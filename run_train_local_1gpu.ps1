@@ -3,7 +3,7 @@ param(
     [switch]$AllowCpu,
     [switch]$NoResume,
     [int]$Epochs = 50,
-    [int]$BatchSizePerGpu = 1,
+    [int]$BatchSizePerGpu = 4,
     [int]$MaxTrainSamples = 512,
     [int]$MaxValSamples = 128,
     [int]$MaxTestSamples = 128

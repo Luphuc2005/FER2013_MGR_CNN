@@ -124,6 +124,10 @@ def apply_env_overrides(cfg: Dict[str, Any]) -> None:
     data["mask_dir"] = _env_str("MGR_MASK_DIR", data.get("mask_dir"))
     data["predecode_pixels"] = _env_bool("MGR_PREDECODE_PIXELS", bool(data.get("predecode_pixels", False)))
     data["preload_masks"] = _env_bool("MGR_PRELOAD_MASKS", bool(data.get("preload_masks", False)))
+    data["allow_missing_masks"] = _env_bool(
+        "MGR_ALLOW_MISSING_MASKS",
+        bool(data.get("allow_missing_masks", False)),
+    )
     data["cache"] = _env_bool("MGR_CACHE_DATA", bool(data.get("cache", False)))
     data["shuffle_buffer"] = _env_int("MGR_SHUFFLE_BUFFER", data.get("shuffle_buffer"))
     data["max_train_samples"] = _env_int("MGR_MAX_TRAIN_SAMPLES", data.get("max_train_samples"))

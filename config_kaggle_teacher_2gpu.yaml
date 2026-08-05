@@ -10,7 +10,7 @@ source:
 runtime:
   gpu_ids: [0, 1]
   batch_size_per_gpu: 16
-  fallback_batch_size_per_gpu: 1
+  fallback_batch_size_per_gpu: 8
   require_two_gpus: true
   min_gpus: 2
   memory_growth: true
@@ -31,6 +31,7 @@ data:
   normalize: true
   predecode_pixels: false
   preload_masks: false
+  allow_missing_masks: false
   use_clean_filter: false
   bad_row_indices_path:
   mask_ablation: "none"

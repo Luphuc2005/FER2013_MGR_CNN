@@ -27,14 +27,15 @@ export MGR_PREFETCH_BUFFER="${MGR_PREFETCH_BUFFER:-1}"
 export MGR_SHUFFLE_BUFFER="${MGR_SHUFFLE_BUFFER:-512}"
 export MGR_PREDECODE_PIXELS="${MGR_PREDECODE_PIXELS:-0}"
 export MGR_PRELOAD_MASKS="${MGR_PRELOAD_MASKS:-0}"
+export MGR_ALLOW_MISSING_MASKS="${MGR_ALLOW_MISSING_MASKS:-0}"
 export MGR_CACHE_DATA="${MGR_CACHE_DATA:-0}"
 export MGR_USE_NUMACTL="${MGR_USE_NUMACTL:-0}"
 unset MGR_MAX_TRAIN_SAMPLES
 unset MGR_MAX_VAL_SAMPLES
 unset MGR_MAX_TEST_SAMPLES
 
-PRIMARY_BATCH="${MGR_PRIMARY_BATCH_SIZE_PER_GPU:-2}"
-FALLBACK_BATCH="${MGR_FALLBACK_BATCH_SIZE_PER_GPU:-1}"
+PRIMARY_BATCH="${MGR_PRIMARY_BATCH_SIZE_PER_GPU:-8}"
+FALLBACK_BATCH="${MGR_FALLBACK_BATCH_SIZE_PER_GPU:-4}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 TRAIN_LOG="${LOG_DIR}/train_${STAMP}.log"
 
@@ -52,9 +53,9 @@ run_training() {
   echo "[INFO] Starting training with batch_size_per_gpu=${MGR_BATCH_SIZE_PER_GPU}"
   if [ "${MGR_USE_NUMACTL}" = "1" ] && command -v numactl >/dev/null 2>&1; then
     echo "[INFO] Using numactl --interleave=all for dual CPU socket memory balancing"
-    numactl --interleave=all "${PYTHON_BIN}" train.py --config config.yaml --resume 2>&1 | tee -a "${TRAIN_LOG}"
+    numactl --interleave=all "${PYTHON_BIN}" train.py --config config.yaml 2>&1 | tee -a "${TRAIN_LOG}"
   else
-    "${PYTHON_BIN}" train.py --config config.yaml --resume 2>&1 | tee -a "${TRAIN_LOG}"
+    "${PYTHON_BIN}" train.py --config config.yaml 2>&1 | tee -a "${TRAIN_LOG}"
   fi
 }
 

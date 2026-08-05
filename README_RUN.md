@@ -35,8 +35,8 @@ Script sẽ:
 - kiểm tra TensorFlow và GPU
 - dùng GPU 0 và GPU 1
 - profile mặc định ưu tiên ổn định RAM: 16 thread tính toán, 4 luồng `tf.data`
-- batch mặc định 2/GPU, global batch 4 để giảm tải GPU/VRAM
-- nếu hết VRAM thì tự retry 1/GPU
+- batch mặc định 8/GPU, global batch 16
+- nếu hết VRAM thì tự retry 4/GPU
 - train full dataset, không giới hạn số mẫu
 - giảm `shuffle_buffer`, `prefetch` và số luồng đọc dữ liệu để tránh RAM tăng dần
 - không preload pixel/mask mặc định để tránh spike RAM cuối đầu run

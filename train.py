@@ -220,7 +220,13 @@ def resolve_monitor_value(metrics: Dict[str, object], monitor_name: str) -> floa
     return -value if key == "loss" else value
 
 
-def make_step_function(cfg: Dict, model: MGRConvNeXtFER, optimizer_head, optimizer_backbone=None):
+def make_step_function(
+    cfg: Dict,
+    model: MGRConvNeXtFER,
+    optimizer_head,
+    optimizer_backbone=None,
+    loss_scale: float = 1.0,
+):
     loss_cfg = cfg["training"]
     label_smoothing = float(loss_cfg.get("label_smoothing", 0.0))
     ortho_weight = float(cfg["model"].get("ortho_loss_weight", 0.003))
@@ -230,6 +236,7 @@ def make_step_function(cfg: Dict, model: MGRConvNeXtFER, optimizer_head, optimiz
     use_sam = str(loss_cfg.get("optimizer", "sam")).lower() == "sam"
     skip_nonfinite = bool(loss_cfg.get("skip_nonfinite_batches", True))
     grad_clip_norm = float(loss_cfg.get("grad_clip_norm", 0.0)) if loss_cfg.get("grad_clip_norm") else None
+    loss_scale_tensor = tf.constant(float(loss_scale), dtype=tf.float32)
     backbone_vars, head_vars = split_variables(model)
     all_vars = head_vars + backbone_vars
 
@@ -257,7 +264,7 @@ def make_step_function(cfg: Dict, model: MGRConvNeXtFER, optimizer_head, optimiz
     def _step_impl(features, labels, trainable_vars):
         with tf.GradientTape() as tape:
             outputs = model(features, training=True)
-            loss, parts = supervised_mgr_loss(
+            raw_loss, parts = supervised_mgr_loss(
                 labels,
                 outputs,
                 num_classes=cfg["data"]["num_classes"],
@@ -265,6 +272,7 @@ def make_step_function(cfg: Dict, model: MGRConvNeXtFER, optimizer_head, optimiz
                 ortho_weight=ortho_weight,
                 cnn_aux_weight=cnn_aux_weight,
             )
+            loss = raw_loss * loss_scale_tensor
         grads = tape.gradient(loss, trainable_vars)
         if skip_nonfinite:
             grads = [tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) if g is not None else None for g in grads]
@@ -272,7 +280,7 @@ def make_step_function(cfg: Dict, model: MGRConvNeXtFER, optimizer_head, optimiz
         if not use_sam:
             _apply_gradients(grads, trainable_vars)
             correct, count = _batch_stats(outputs, labels)
-            return loss, correct, count, tf.constant(1, tf.int32)
+            return raw_loss, correct, count, tf.constant(1, tf.int32)
 
         grad_norm = tf.linalg.global_norm([g for g in grads if g is not None])
 
@@ -292,7 +300,7 @@ def make_step_function(cfg: Dict, model: MGRConvNeXtFER, optimizer_head, optimiz
 
         with tf.GradientTape() as tape2:
             outputs_2 = model(features, training=True)
-            loss_2, _ = supervised_mgr_loss(
+            raw_loss_2, _ = supervised_mgr_loss(
                 labels,
                 outputs_2,
                 num_classes=cfg["data"]["num_classes"],
@@ -300,6 +308,7 @@ def make_step_function(cfg: Dict, model: MGRConvNeXtFER, optimizer_head, optimiz
                 ortho_weight=ortho_weight,
                 cnn_aux_weight=cnn_aux_weight,
             )
+            loss_2 = raw_loss_2 * loss_scale_tensor
         grads_2 = tape2.gradient(loss_2, trainable_vars)
 
         for var, eps in zip(trainable_vars, eps_list):
@@ -311,7 +320,7 @@ def make_step_function(cfg: Dict, model: MGRConvNeXtFER, optimizer_head, optimiz
 
         _apply_gradients(grads_2, trainable_vars)
         correct, count = _batch_stats(outputs_2, labels)
-        return loss_2, correct, count, tf.constant(1, tf.int32)
+        return raw_loss_2, correct, count, tf.constant(1, tf.int32)
 
     def train_step_head(features, labels):
         return _step_impl(features, labels, head_vars)
@@ -391,13 +400,17 @@ def evaluate_dataset(
 
     for batch in dataset:
         inputs, labels = batch
-        loss, count, preds, labels = _eval_step(inputs, labels)
+        loss, count, preds, _ = _eval_step(inputs, labels)
+        c = int(count.numpy())
+        l = float(loss.numpy())
         y_true.extend(labels.numpy().tolist())
         y_pred.extend(preds.numpy().tolist())
-        total_loss += float(loss.numpy()) * int(count.numpy())
-        total_count += int(count.numpy())
+        total_loss += l * c
+        total_count += c
+        del loss, count, preds, inputs, labels
     metrics = classification_metrics(y_true, y_pred, EMOTION_NAMES)
     metrics["loss"] = total_loss / max(total_count, 1)
+    gc.collect()
     return metrics
 
 
@@ -489,7 +502,15 @@ def main() -> int:
         print(f"Backbone trainable vars: {len(backbone_vars)}")
     print(f"Head trainable vars: {len(head_vars)}")
 
-    train_step_head, train_step_full = make_step_function(cfg, model, optimizer_head, optimizer_backbone)
+    loss_scale = 1.0 / float(max(int(strategy.num_replicas_in_sync), 1))
+    print(f"[INFO] Distributed gradient loss scale: {loss_scale:.6f}")
+    train_step_head, train_step_full = make_step_function(
+        cfg,
+        model,
+        optimizer_head,
+        optimizer_backbone,
+        loss_scale=loss_scale,
+    )
     distributed_train_step_head = make_distributed_train_step(strategy, train_step_head)
     distributed_train_step_full = make_distributed_train_step(strategy, train_step_full)
     start_epoch = int(ckpt_epoch.numpy())
@@ -548,6 +569,8 @@ def main() -> int:
         if periodic_interval and (epoch + 1) % periodic_interval == 0:
             print(f"[INFO] Epoch {epoch+1}: saving periodic checkpoint", flush=True)
             periodic_manager.save(checkpoint_number=epoch + 1)
+        patience_limit = int(cfg["training"].get("patience", 75))
+        patience_counter = (epoch + 1) - best_epoch
         row = {
             "epoch": epoch + 1,
             "train_loss": train_loss,
@@ -562,6 +585,7 @@ def main() -> int:
             "monitor_value": monitor,
             "best_monitor_value": best_score,
             "best_epoch": best_epoch,
+            "patience": f"{patience_counter}/{patience_limit}",
             "improved": int(improved),
         }
         history.append(row)
@@ -571,14 +595,13 @@ def main() -> int:
             f"val_loss={row['val_loss']:.4f} val_acc={row['val_accuracy']:.4f} "
             f"val_macro_f1={row['val_macro_f1']:.4f} "
             f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f} "
+            f"patience={patience_counter}/{patience_limit} "
             f"{monitor_name}={monitor:.4f}",
             flush=True,
         )
-        if len(history) > int(cfg["training"]["patience"]) and not improved:
-            recent = history[-int(cfg["training"]["patience"]):]
-            if max(r["monitor_value"] for r in recent) < best_score:
-                print(f"Early stopping at epoch {epoch+1}")
-                break
+        if patience_counter >= patience_limit:
+            print(f"[INFO] Early stopping triggered at epoch {epoch+1} (patience reached {patience_limit})", flush=True)
+            break
         gc.collect()
 
     if history:

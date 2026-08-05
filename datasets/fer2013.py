@@ -48,11 +48,29 @@ def _load_bad_indices(path: Optional[Path]) -> set:
         return {int(line.strip()) for line in f if line.strip()}
 
 
-def _safe_load_npy(path_str: str) -> np.ndarray:
+def _safe_load_npy(path_str: str, *, allow_missing: bool = False) -> np.ndarray:
     p = Path(path_str)
     if p.exists():
         return np.load(p).astype(np.float32)
-    return np.ones((6, 7, 7), dtype=np.float32)
+    if allow_missing:
+        return np.ones((6, 7, 7), dtype=np.float32)
+    raise FileNotFoundError(f"Missing mask file: {p}")
+
+
+def _verify_mask_paths(mask_paths: np.ndarray, split: str, *, allow_missing: bool) -> None:
+    missing = [path for path in mask_paths if not Path(path).exists()]
+    if not missing:
+        print(f"[INFO] Verified {len(mask_paths)} mask files for {split}")
+        return
+    preview = "\n".join(str(path) for path in missing[:10])
+    message = (
+        f"Missing {len(missing)}/{len(mask_paths)} mask file(s) for split {split}. "
+        f"First missing paths:\n{preview}"
+    )
+    if allow_missing:
+        print(f"[WARNING] {message}\n[WARNING] Falling back to all-one masks because allow_missing_masks=true.")
+        return
+    raise FileNotFoundError(message)
 
 
 def _resolve_split_csv_dir(data_dir: Path) -> Path:
@@ -89,6 +107,7 @@ def collect_split_records(
     mask_region_permutation: Optional[Iterable[int]] = None,
     predecode_pixels: bool = False,
     preload_masks: bool = False,
+    allow_missing_masks: bool = False,
 ) -> SplitRecords:
     data_dir = _resolve_split_csv_dir(Path(data_dir))
     csv_path = data_dir / f"{split}.csv"
@@ -121,8 +140,9 @@ def collect_split_records(
         if not split_mask_dir.exists():
             raise FileNotFoundError(f"Missing mask split directory: {split_mask_dir}")
         mask_paths = np.asarray([str(split_mask_dir / f"{int(i):06d}.npy") for i in sample_ids], dtype=str)
+        _verify_mask_paths(mask_paths, split, allow_missing=allow_missing_masks)
         if preload_masks:
-            masks = np.stack([_safe_load_npy(path) for path in mask_paths], axis=0)
+            masks = np.stack([_safe_load_npy(path, allow_missing=allow_missing_masks) for path in mask_paths], axis=0)
             mask_paths = None
     return SplitRecords(images, labels.astype(np.int64), sample_ids, mask_paths, masks)
 
@@ -150,16 +170,16 @@ def _normalize_image(image: tf.Tensor, channels: int) -> tf.Tensor:
     return (image - mean) / std
 
 
-def _load_mask_npy(mask_path: tf.Tensor) -> tf.Tensor:
+def _load_mask_npy(mask_path: tf.Tensor, *, allow_missing: bool = False) -> tf.Tensor:
     def _reader(path_bytes):
         if hasattr(path_bytes, "numpy"):
             path_bytes = path_bytes.numpy()
         if isinstance(path_bytes, np.ndarray):
             path_bytes = path_bytes.item()
         path_str = path_bytes.decode("utf-8")
-        return _safe_load_npy(path_str)
+        return _safe_load_npy(path_str, allow_missing=allow_missing)
     mask = tf.py_function(_reader, [mask_path], Tout=tf.float32)
-    mask.set_shape([None, None, None])
+    mask.set_shape([6, 7, 7])
     return mask
 
 
@@ -261,7 +281,10 @@ def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dic
     if mask_tensor is not None:
         mask = _resize_mask(tf.cast(mask_tensor, tf.float32), int(cfg["model"]["token_grid_size"]))
     elif mask_path is not None:
-        mask = _resize_mask(_load_mask_npy(mask_path), int(cfg["model"]["token_grid_size"]))
+        mask = _resize_mask(
+            _load_mask_npy(mask_path, allow_missing=bool(cfg["data"].get("allow_missing_masks", False))),
+            int(cfg["model"]["token_grid_size"]),
+        )
     if mask is not None:
         mask = _apply_mask_ablation(
             mask,
@@ -344,6 +367,7 @@ def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.D
             mask_region_permutation=cfg["data"].get("mask_region_permutation"),
             predecode_pixels=bool(cfg["data"].get("predecode_pixels", False)),
             preload_masks=bool(cfg["data"].get("preload_masks", False)),
+            allow_missing_masks=bool(cfg["data"].get("allow_missing_masks", False)),
         )
         for split in ("train", "val", "test")
     }
