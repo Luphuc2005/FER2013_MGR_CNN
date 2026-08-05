@@ -22,6 +22,14 @@ chmod +x run_train.sh run_train_single_gpu.sh run_eval.sh
 bash run_train.sh
 ```
 
+Neu data/mask nam ngoai thu muc project, truyen path truc tiep:
+
+```bash
+MGR_DATA_PATH="/duong/dan/fer13-split" \
+MGR_MASK_DIR="/duong/dan/mediapipe_region_masks" \
+bash run_train.sh
+```
+
 Script sẽ:
 
 - kiểm tra TensorFlow và GPU
@@ -46,6 +54,9 @@ MGR_TF_DATA_NUM_PARALLEL_CALLS=4
 MGR_TF_DATA_PRIVATE_THREADPOOL_SIZE=4
 MGR_PREFETCH_BUFFER=1
 MGR_SHUFFLE_BUFFER=512
+MGR_PREDECODE_PIXELS=0
+MGR_PRELOAD_MASKS=0
+MGR_CACHE_DATA=0
 ```
 
 Nếu máy bị lag khi đang dùng việc khác, có thể giảm thread trước khi chạy:
@@ -57,7 +68,13 @@ MGR_TF_DATA_NUM_PARALLEL_CALLS=2 MGR_TF_DATA_PRIVATE_THREADPOOL_SIZE=2 MGR_PRIMA
 Nếu đã chạy ổn định nhiều epoch và RAM không tăng bất thường, có thể thử profile nhanh hơn:
 
 ```bash
-MGR_PRIMARY_BATCH_SIZE_PER_GPU=2 MGR_TF_DATA_NUM_PARALLEL_CALLS=8 MGR_TF_DATA_PRIVATE_THREADPOOL_SIZE=8 MGR_PREFETCH_BUFFER=1 bash run_train.sh
+MGR_PRIMARY_BATCH_SIZE_PER_GPU=4 MGR_TF_DATA_NUM_PARALLEL_CALLS=8 MGR_TF_DATA_PRIVATE_THREADPOOL_SIZE=8 MGR_PREFETCH_BUFFER=1 bash run_train.sh
+```
+
+Neu muon ép đúng batch 16/GPU theo file C gốc, chỉ thử sau khi batch 2/GPU đã ổn định:
+
+```bash
+MGR_PRIMARY_BATCH_SIZE_PER_GPU=16 MGR_FALLBACK_BATCH_SIZE_PER_GPU=8 bash run_train.sh
 ```
 
 Chỉ bật NUMA interleave khi server cho phép:

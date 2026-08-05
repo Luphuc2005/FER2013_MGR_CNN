@@ -76,6 +76,11 @@ def _env_int(name: str, current: Optional[int]) -> Optional[int]:
     return current if raw in (None, "") else int(raw)
 
 
+def _env_str(name: str, current: Optional[str]) -> Optional[str]:
+    raw = os.environ.get(name)
+    return current if raw in (None, "") else raw
+
+
 def _env_bool(name: str, current: bool) -> bool:
     raw = os.environ.get(name)
     return current if raw in (None, "") else _parse_bool(raw)
@@ -115,12 +120,20 @@ def apply_env_overrides(cfg: Dict[str, Any]) -> None:
     )
     runtime["prefetch_buffer"] = _env_int("MGR_PREFETCH_BUFFER", runtime.get("prefetch_buffer"))
     runtime["distributed_eval"] = _env_bool("MGR_DISTRIBUTED_EVAL", bool(runtime.get("distributed_eval", False)))
+    data["data_path"] = _env_str("MGR_DATA_PATH", data.get("data_path"))
+    data["mask_dir"] = _env_str("MGR_MASK_DIR", data.get("mask_dir"))
+    data["predecode_pixels"] = _env_bool("MGR_PREDECODE_PIXELS", bool(data.get("predecode_pixels", False)))
+    data["preload_masks"] = _env_bool("MGR_PRELOAD_MASKS", bool(data.get("preload_masks", False)))
+    data["cache"] = _env_bool("MGR_CACHE_DATA", bool(data.get("cache", False)))
     data["shuffle_buffer"] = _env_int("MGR_SHUFFLE_BUFFER", data.get("shuffle_buffer"))
     data["max_train_samples"] = _env_int("MGR_MAX_TRAIN_SAMPLES", data.get("max_train_samples"))
     data["max_val_samples"] = _env_int("MGR_MAX_VAL_SAMPLES", data.get("max_val_samples"))
     data["max_test_samples"] = _env_int("MGR_MAX_TEST_SAMPLES", data.get("max_test_samples"))
     training["epochs"] = _env_int("MGR_EPOCHS", training.get("epochs"))
     training["patience"] = _env_int("MGR_PATIENCE", training.get("patience"))
+    cfg["paths"]["output_dir"] = _env_str("MGR_OUTPUT_DIR", cfg["paths"].get("output_dir"))
+    cfg["paths"]["logs_dir"] = _env_str("MGR_LOGS_DIR", cfg["paths"].get("logs_dir"))
+    resolve_paths(cfg)
 
 
 def global_batch_size(cfg: Dict[str, Any], replicas: Optional[int] = None) -> int:

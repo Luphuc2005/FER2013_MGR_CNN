@@ -23,6 +23,17 @@ chmod +x run_train.sh run_train_single_gpu.sh run_eval.sh
 bash run_train.sh
 ```
 
+Mac dinh `run_train.sh` phu hop may Linux 2 GPU ~6GB/GPU: batch `2/GPU`, fallback `1/GPU`,
+full dataset, khong cache/preload data de tranh tang RAM.
+
+Neu data/mask nam o path rieng tren may giang vien:
+
+```bash
+MGR_DATA_PATH="/duong/dan/fer13-split" \
+MGR_MASK_DIR="/duong/dan/mediapipe_region_masks" \
+bash run_train.sh
+```
+
 Neu chi muon dung 1 GPU:
 
 ```bash

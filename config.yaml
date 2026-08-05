@@ -9,17 +9,17 @@ source:
 
 runtime:
   gpu_ids: [0, 1]
-  batch_size_per_gpu: 16
-  fallback_batch_size_per_gpu: 8
+  batch_size_per_gpu: 2
+  fallback_batch_size_per_gpu: 1
   require_two_gpus: true
   min_gpus: 2
   memory_growth: true
-  intra_op_threads: 24
-  inter_op_threads: 8
-  tf_data_num_parallel_calls: 16
-  tf_data_private_threadpool_size: 16
+  intra_op_threads: 16
+  inter_op_threads: 4
+  tf_data_num_parallel_calls: 4
+  tf_data_private_threadpool_size: 4
   tf_data_deterministic: false
-  prefetch_buffer: 4
+  prefetch_buffer: 1
   distributed_eval: true
 
 data:
@@ -29,14 +29,14 @@ data:
   image_size: 224
   channels: 3
   normalize: true
-  predecode_pixels: true
-  preload_masks: true
+  predecode_pixels: false
+  preload_masks: false
   use_clean_filter: false
   bad_row_indices_path:
   mask_ablation: "none"
   mask_region_permutation: [4, 2, 0, 5, 1, 3]
-  shuffle_buffer: 1024
-  cache: true
+  shuffle_buffer: 512
+  cache: false
 
 augmentation:
   horizontal_flip: true
