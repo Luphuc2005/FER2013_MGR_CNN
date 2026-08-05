@@ -1,0 +1,154 @@
+================================================================================
+BÁO CÁO CHI TIẾT TỔNG HỢP TOÀN BỘ QUÁ TRÌNH PHÂN TÍCH, SỬA LỖI VÀ TỐI ƯU HÓA
+HUẤN LUYỆN DỰ ÁN FER2013_SGU (TENSORFLOW 2.10.1 - MULTI-GPU SERVER)
+================================================================================
+
+1. TỔNG QUAN MỤC TIÊU VÀ BÀI TOÁN
+--------------------------------------------------------------------------------
+- Dự án: Nhận diện biểu cảm khuôn mặt FER2013 (Facial Expression Recognition).
+- Mô hình: MGR-CNN (Mask-Guided Region Attention + ConvNeXt-Tiny Backbone + Relation Tokens).
+- Phân tán: TensorFlow 2.10.1 MirroredStrategy chạy trên Server 2x GPU (Batch Size per GPU = 16 => Global Batch Size = 32).
+- Mục tiêu: Khắc phục hiện tượng mô hình đứng im ở Accuracy ~0.25 (25%) và Macro F1 ~0.0570, đảm bảo đồng bộ hóa gradient và cập nhật trọng số chính xác trên 2 GPU.
+
+
+2. NGUYÊN NHÂN GỐC RỄ & CÁC LỖI KỸ THUẬT ĐÃ PHÁT HIỆN
+--------------------------------------------------------------------------------
+[LỖI 1] LEARNING RATE KHÔNG CẬP NHẬT (NGUYÊN NHÂN CHÍNH KẾT CẢ TRỌNG SỐ KHÔNG ĐỔI)
+- Nguyên nhân: Hàm set_optimizer_lr() ưu tiên kiểm tra if hasattr(optimizer, "_set_hyper"). Đối với bộ tối ưu Keras 2.10 AdamW, _set_hyper() là một hàm No-Op (không thay đổi biến learning_rate thực tế), dẫn tới hàm return sớm và không bao giờ gọi optimizer.learning_rate.assign().
+- Hậu quả: Learning rate của Optimizer luôn giữ nguyên ở 0.0 hoặc không đổi qua các epoch, làm cho trọng số không thể cập nhật.
+- Giải pháp: Đảo thứ tự ưu tiên trong set_optimizer_lr(), ép gọi optimizer.learning_rate.assign(float(lr_value)) trực tiếp trước.
+
+[LỖI 2] LỆCH TRỌNG SỐ VÌ SAM TRÊN 2 GPU (MULTI-GPU SAM DRIFT)
+- Nguyên nhân: Khi dùng SAM (Sharpness-Aware Minimization) trên 2 GPU, GPU 0 và GPU 1 tự tính gradient và nhiễu eps khác nhau trên batch riêng của từng GPU. Khi gọi var.assign_add(eps), trọng số giữa GPU 0 và GPU 1 bị lệch nhau (Weight Divergence), vi phạm nguyên tắc của MirroredStrategy.
+- Giải pháp: Trước khi tính eps trong SAM step, gọi replica_ctx.all_reduce(ReduceOp.MEAN, g) để lấy trung bình gradient của 2 GPU. Việc này giúp eps trên 2 GPU 100% giống hệt nhau, duy trì trọng số đồng bộ hoàn hảo giữa các GPU.
+
+[LỖI 3] XUNG ĐỘT TENSORFLOW ADDONS ADAMW TRÊN MIRROREDSTRATEGY
+- Lỗi: TypeError: tuple indices must be integers or slices, not MirroredVariable.
+- Nguyên nhân: tfa.optimizers.AdamW (TensorFlow Addons) gặp lỗi truy vấn chỉ số tuple khi áp dụng Weight Decay lên các biến dạng MirroredVariable trên môi trường phân tán.
+- Giải pháp: Chuyển sang bộ tối ưu chuẩn native tf.keras.optimizers.experimental.AdamW (hoặc fallback sang LegacyDecoupledAdamW nếu chạy 1 GPU local).
+
+[LỖI 4] THEO DÕI BIẾN TRỌNG SỐ BACKBONE (CONVNEXT-TINY)
+- Nguyên nhân: Keras không tự động theo dõi danh sách các khối layer nằm trong Python list thường.
+- Giải pháp: Bổ sung stage_blocks tracking trong models/mgr_cnn.py để Keras nhận diện đầy đủ 178 biến backbone và 90 biến head, hỗ trợ hàm split_variables() phân tách đúng nhóm trọng số cho 2 Optimizer.
+
+[LỖI 5] ĐÓNG BĂNG CACHE DỮ LIỆU AUGMENTATION (DATASET PIPELINE)
+- Nguyên nhân: Trong datasets/fer2013.py, hàm ds.cache() đặt phía sau bước map(_parse_example) chứa Data Augmentation.
+- Hậu quả: Dữ liệu biến dạng ngẫu nhiên của Epoch 1 bị lưu cứng vào RAM, khiến Epoch 2+ chỉ lặp lại ảnh cũ mà không tạo ảnh mới.
+- Giải pháp: Đổi điều kiện cache sang if cfg["data"].get("cache", False) and not training:, giữ cho tập Train luôn được Augmentation tươi mới (Dynamic Data Augmentation) ở mỗi Epoch.
+
+
+3. THÔNG SỐ CẤU HÌNH & SIÊU THAM SỐ (CONFIG.YAML)
+--------------------------------------------------------------------------------
+- Backbone: ConvNeXt-Tiny (Pretrained ImageNet 100%).
+- Logit Fusion: 80% CNN Auxiliary Logits + 20% Region Attention Logits.
+- Loss Function: Cross Entropy (Label Smoothing 0.05) + Orthogonality Loss (weight=0.003) + CNN Aux Loss (weight=0.4).
+- Optimizer: Native Keras AdamW + SAM (Sharpness-Aware Minimization, rho=0.03).
+- Learning Rate: Head = 0.0002, Backbone = 0.0001 (Cosine Annealing Scheduler).
+- Unfreeze Backbone: freeze_backbone_epochs = 0 (Backbone mở cập nhật từ Epoch 0).
+
+
+4. LỆNH GỘP THỰC THI CHÍNH THỨC TRÊN SERVER (2 GPU)
+--------------------------------------------------------------------------------
+Dưới đây là lệnh gộp đầy đủ để áp dụng toàn bộ các sửa lỗi trên và khởi chạy lại tiến trình huấn luyện:
+
+```bash
+cd ~/Ha/FER2013_SGU
+
+# 1. Dừng tiến trình huấn luyện cũ
+pkill -9 -f train.py || true
+sleep 2
+
+# 2. Cập nhật train.py và datasets/fer2013.py
+python3 << 'PYEOF'
+# --- FIX TRAIN.PY ---
+code = open("train.py", encoding="utf-8").read()
+
+# Fix set_optimizer_lr
+old_set_lr = """def set_optimizer_lr(optimizer, lr_value: float):
+    if optimizer is None:
+        return
+    try:
+        if hasattr(optimizer, "_set_hyper"):
+            optimizer._set_hyper("learning_rate", float(lr_value))
+            return
+    except Exception:
+        pass
+    try:
+        if isinstance(getattr(optimizer, "learning_rate", None), tf.Variable):
+            optimizer.learning_rate.assign(lr_value)
+        else:
+            tf.keras.backend.set_value(optimizer.learning_rate, lr_value)
+    except Exception:
+        try:
+            optimizer.learning_rate = lr_value
+        except Exception:
+            pass"""
+
+new_set_lr = """def set_optimizer_lr(optimizer, lr_value: float):
+    if optimizer is None:
+        return
+    try:
+        if isinstance(getattr(optimizer, "learning_rate", None), tf.Variable):
+            optimizer.learning_rate.assign(float(lr_value))
+            return
+    except Exception:
+        pass
+    try:
+        tf.keras.backend.set_value(optimizer.learning_rate, float(lr_value))
+        return
+    except Exception:
+        pass
+    try:
+        if hasattr(optimizer, "_set_hyper"):
+            optimizer._set_hyper("learning_rate", float(lr_value))
+            return
+    except Exception:
+        try:
+            optimizer.learning_rate = float(lr_value)
+        except Exception:
+            pass"""
+
+if old_set_lr in code:
+    code = code.replace(old_set_lr, new_set_lr)
+
+# Add LR logging
+old_step_log = 'f"running_acc={correct / max(seen, 1):.4f}"'
+new_step_log = 'f"running_acc={correct / max(seen, 1):.4f} lr_head={lr:.6f} lr_backbone={backbone_lr:.6f}"'
+if old_step_log in code:
+    code = code.replace(old_step_log, new_step_log)
+
+old_row = '"val_weighted_f1": float(val_metrics["weighted_f1"]),'
+new_row = '"val_weighted_f1": float(val_metrics["weighted_f1"]),\n            "lr_head": lr,\n            "lr_backbone": backbone_lr,'
+if old_row in code and '"lr_head"' not in code:
+    code = code.replace(old_row, new_row)
+
+old_epoch_log = 'f"val_macro_f1={row[\'val_macro_f1\']:.4f} "'
+new_epoch_log = 'f"val_macro_f1={row[\'val_macro_f1\']:.4f} lr_head={lr:.6f} lr_backbone={backbone_lr:.6f} "'
+if old_epoch_log in code and "lr_head=" not in code:
+    code = code.replace(old_epoch_log, new_epoch_log)
+
+open("train.py", "w", encoding="utf-8").write(code)
+print("[SUCCESS] Updated train.py with LR assign fix & detailed logging!")
+
+# --- FIX DATASETS/FER2013.PY ---
+ds_code = open("datasets/fer2013.py", encoding="utf-8").read()
+old_cache = '    if cfg["data"].get("cache", False):\n        ds = ds.cache()'
+new_cache = '    if cfg["data"].get("cache", False) and not training:\n        ds = ds.cache()'
+if old_cache in ds_code:
+    ds_code = ds_code.replace(old_cache, new_cache)
+    open("datasets/fer2013.py", "w", encoding="utf-8").write(ds_code)
+    print("[SUCCESS] Updated fer2013.py for dynamic train augmentation!")
+PYEOF
+
+# 3. Xóa checkpoint lỗi cũ và khởi chạy huấn luyện
+rm -rf outputs/tf_runs/c_relation_tokens_080_020_tf/checkpoints
+bash run_train.sh
+```
+
+
+5. KẾT QUẢ KỲ VỌNG SAU KHI THỰC THI
+--------------------------------------------------------------------------------
+- Loss giảm đều đặn từ 2.67 xuống ~1.50 ngay trong Epoch 1.
+- Hiển thị đầy đủ thông số lr_head và lr_backbone ở mỗi step và mỗi epoch.
+- val_accuracy và val_macro_f1 kết thúc Epoch 1 sẽ tăng vọt vượt mốc 0.50 (50%+) thay vì dẫm chân ở 0.0570.
+================================================================================

@@ -1,0 +1,360 @@
+from __future__ import annotations
+
+from typing import Dict, Optional, Sequence
+
+import tensorflow as tf
+
+
+def _norm():
+    return tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+
+class DropPath(tf.keras.layers.Layer):
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = float(drop_prob)
+
+    def call(self, x, training=False):
+        if not training or self.drop_prob <= 0.0:
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        shape = (tf.shape(x)[0],) + (1,) * (x.shape.rank - 1)
+        mask = tf.floor(keep_prob + tf.random.uniform(shape, dtype=x.dtype))
+        return tf.math.divide_no_nan(x, keep_prob) * mask
+
+
+class ConvNeXtBlock(tf.keras.layers.Layer):
+    def __init__(self, dim: int, drop_path: float = 0.0):
+        super().__init__()
+        self.dwconv = tf.keras.layers.DepthwiseConv2D(7, padding="same")
+        self.norm = _norm()
+        self.pw1 = tf.keras.layers.Dense(4 * dim)
+        self.act = tf.keras.layers.Activation(tf.nn.gelu)
+        self.pw2 = tf.keras.layers.Dense(dim)
+        self.drop_path = DropPath(drop_path)
+        self.gamma = self.add_weight(
+            name="gamma",
+            shape=(dim,),
+            initializer=tf.keras.initializers.Constant(1e-6),
+            trainable=True,
+        )
+
+    def call(self, x, training=False):
+        residual = x
+        x = self.dwconv(x)
+        x = self.norm(x)
+        x = self.pw1(x)
+        x = self.act(x)
+        x = self.pw2(x)
+        x = x * self.gamma
+        return residual + self.drop_path(x, training=training)
+
+
+class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
+    def __init__(self, pretrained: bool = False, weights: Optional[str] = None, use_builtin_convnext: bool = False):
+        super().__init__()
+        self.pretrained = bool(pretrained)
+        self.backbone_weights = weights
+
+        dims = [96, 192, 384, 768]
+        depths = [3, 3, 9, 3]
+        self.downsample_layers = [
+            tf.keras.Sequential([tf.keras.layers.Conv2D(dims[0], 4, strides=4, padding="same"), _norm()])
+        ]
+        for i in range(3):
+            self.downsample_layers.append(
+                tf.keras.Sequential([_norm(), tf.keras.layers.Conv2D(dims[i + 1], 2, strides=2, padding="same")])
+            )
+        rates = tf.linspace(0.0, 0.1, sum(depths))
+        self.stages = []
+        cursor = 0
+        for i, depth in enumerate(depths):
+            blocks = []
+            for _ in range(depth):
+                blocks.append(ConvNeXtBlock(dims[i], float(rates[cursor])))
+                cursor += 1
+            self.stages.append(blocks)
+        self.stage_blocks = [blk for stage in self.stages for blk in stage]
+
+        if self.pretrained:
+            self._load_imagenet_pretrained()
+
+    def _load_imagenet_pretrained(self):
+        import ssl
+        ssl._create_default_https_context = ssl._create_unverified_context
+        convnext_tiny = getattr(tf.keras.applications, "ConvNeXtTiny", None)
+        if convnext_tiny is None:
+            return
+        try:
+            with tf.init_scope():
+                with tf.device("/CPU:0"):
+                    app = convnext_tiny(include_top=False, include_preprocessing=False, weights="imagenet")
+                    dummy = tf.zeros([1, 224, 224, 3])
+                    _ = app(dummy, training=False)
+                    _ = self(dummy, training=False)
+
+            stem_app = app.get_layer("convnext_tiny_stem")
+            self.downsample_layers[0].layers[0].set_weights(stem_app.layers[0].get_weights())
+            self.downsample_layers[0].layers[1].set_weights(stem_app.layers[1].get_weights())
+
+            for idx in range(3):
+                ds_app = app.get_layer(f"convnext_tiny_downsampling_block_{idx}")
+                self.downsample_layers[idx + 1].layers[0].set_weights(ds_app.layers[0].get_weights())
+                self.downsample_layers[idx + 1].layers[1].set_weights(ds_app.layers[1].get_weights())
+
+            depths = [3, 3, 9, 3]
+            for i, d in enumerate(depths):
+                for j in range(d):
+                    blk = self.stages[i][j]
+                    dw_w, dw_b = app.get_layer(f"convnext_tiny_stage_{i}_block_{j}_depthwise_conv").get_weights()
+                    blk.dwconv.set_weights([tf.reshape(dw_w, blk.dwconv.weights[0].shape), dw_b])
+                    blk.norm.set_weights(app.get_layer(f"convnext_tiny_stage_{i}_block_{j}_layernorm").get_weights())
+                    blk.pw1.set_weights(app.get_layer(f"convnext_tiny_stage_{i}_block_{j}_pointwise_conv_1").get_weights())
+                    blk.pw2.set_weights(app.get_layer(f"convnext_tiny_stage_{i}_block_{j}_pointwise_conv_2").get_weights())
+                    blk.gamma.assign(app.get_layer(f"convnext_tiny_stage_{i}_block_{j}_layer_scale").weights[0])
+
+            print("[INFO] Successfully loaded and mapped 100% ImageNet pretrained weights into custom ConvNeXtTinyBackbone!")
+        except Exception as exc:
+            print(f"[WARNING] Failed to load ImageNet pretrained weights: {exc}")
+
+    def call(self, x, training=False):
+        for i, down in enumerate(self.downsample_layers):
+            x = down(x, training=training)
+            for block in self.stages[i]:
+                x = block(x, training=training)
+        return x
+
+
+class RegionDictionary(tf.keras.layers.Layer):
+    def __init__(self, num_regions: int, embed_dim: int):
+        super().__init__()
+        self.embedding = tf.keras.layers.Embedding(num_regions, embed_dim)
+
+    def call(self, batch_size):
+        ids = tf.range(self.embedding.input_dim, dtype=tf.int32)
+        tokens = tf.expand_dims(self.embedding(ids), axis=0)
+        return tf.tile(tokens, [batch_size, 1, 1])
+
+
+class CrossAttentionWithMask(tf.keras.layers.Layer):
+    def __init__(self, embed_dim: int, visual_dim: int, num_heads: int, dropout: float, mask_attention_alpha: float, mask_floor: float):
+        super().__init__()
+        if embed_dim % num_heads != 0:
+            raise ValueError("embed_dim must be divisible by num_heads.")
+        self.embed_dim = int(embed_dim)
+        self.num_heads = int(num_heads)
+        self.head_dim = int(embed_dim) // int(num_heads)
+        self.scale = self.head_dim ** -0.5
+        self.mask_attention_alpha = float(mask_attention_alpha)
+        self.mask_floor = float(mask_floor)
+        self.q_proj = tf.keras.layers.Dense(embed_dim)
+        self.k_proj = tf.keras.layers.Dense(embed_dim)
+        self.v_proj = tf.keras.layers.Dense(embed_dim)
+        self.out_proj = tf.keras.layers.Dense(embed_dim)
+        self.drop = tf.keras.layers.Dropout(dropout)
+        self.norm1 = _norm()
+        self.ffn = tf.keras.Sequential([
+            tf.keras.layers.Dense(embed_dim * 2, activation=tf.nn.gelu),
+            tf.keras.layers.Dropout(dropout),
+            tf.keras.layers.Dense(embed_dim),
+        ])
+        self.norm2 = _norm()
+
+    def _split(self, x):
+        b = tf.shape(x)[0]
+        n = tf.shape(x)[1]
+        x = tf.reshape(x, [b, n, self.num_heads, self.head_dim])
+        return tf.transpose(x, [0, 2, 1, 3])
+
+    def _merge(self, x):
+        x = tf.transpose(x, [0, 2, 1, 3])
+        return tf.reshape(x, [tf.shape(x)[0], tf.shape(x)[1], self.embed_dim])
+
+    def call(self, region_tokens, visual_tokens, region_masks=None, training=False):
+        q = self._split(self.q_proj(region_tokens))
+        k = self._split(self.k_proj(visual_tokens))
+        v = self._split(self.v_proj(visual_tokens))
+        scores = tf.einsum("bhqd,bhkd->bhqk", q, k) * self.scale
+        if region_masks is not None and self.mask_attention_alpha > 0.0:
+            mask = tf.clip_by_value(region_masks, self.mask_floor, 1.0)
+            scores = scores + tf.expand_dims(tf.math.log(mask + 1e-6) * self.mask_attention_alpha, axis=1)
+        attn = tf.nn.softmax(scores, axis=-1)
+        attn = self.drop(attn, training=training)
+        context = tf.einsum("bhqk,bhkd->bhqd", attn, v)
+        context = self._merge(context)
+        x = self.norm1(region_tokens + self.drop(self.out_proj(context), training=training))
+        y = self.ffn(x, training=training)
+        return self.norm2(x + self.drop(y, training=training)), attn
+
+
+class TransformerEncoderBlock(tf.keras.layers.Layer):
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float):
+        super().__init__()
+        self.mha = tf.keras.layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim // num_heads, dropout=dropout)
+        self.drop = tf.keras.layers.Dropout(dropout)
+        self.norm1 = _norm()
+        self.ffn = tf.keras.Sequential([
+            tf.keras.layers.Dense(embed_dim * 2, activation=tf.nn.gelu),
+            tf.keras.layers.Dropout(dropout),
+            tf.keras.layers.Dense(embed_dim),
+        ])
+        self.norm2 = _norm()
+
+    def call(self, x, training=False):
+        attn = self.mha(x, x, training=training)
+        x = self.norm1(x + self.drop(attn, training=training))
+        y = self.ffn(x, training=training)
+        return self.norm2(x + self.drop(y, training=training))
+
+
+class RelationTokenBuilder(tf.keras.layers.Layer):
+    def __init__(self, embed_dim: int, relation_pairs: Sequence[Dict], dropout: float):
+        super().__init__()
+        self.relation_pairs = list(relation_pairs)
+        self.fusions = [
+            tf.keras.Sequential([
+                tf.keras.layers.LayerNormalization(epsilon=1e-6),
+                tf.keras.layers.Dense(embed_dim),
+                tf.keras.layers.Activation(tf.nn.gelu),
+                tf.keras.layers.Dropout(dropout),
+                tf.keras.layers.Dense(embed_dim),
+            ])
+            for _ in self.relation_pairs
+        ]
+
+    def call(self, region_features, training=False):
+        tokens = []
+        for pair, fusion in zip(self.relation_pairs, self.fusions):
+            left = tf.reduce_mean(tf.gather(region_features, pair["left"], axis=1), axis=1)
+            right = tf.reduce_mean(tf.gather(region_features, pair["right"], axis=1), axis=1)
+            tokens.append(tf.expand_dims(fusion(tf.concat([left, right], axis=-1), training=training), axis=1))
+        return region_features if not tokens else tf.concat([region_features] + tokens, axis=1)
+
+
+class MGRConvNeXtFER(tf.keras.Model):
+    def __init__(self, cfg: Dict):
+        super().__init__(name=cfg["model"]["name"])
+        model_cfg = cfg["model"]
+        self.cfg = cfg
+        self.ablation = model_cfg.get("ablation", "full")
+        self.num_classes = int(cfg["data"]["num_classes"])
+        self.embed_dim = int(model_cfg["embed_dim"])
+        self.visual_dim = int(model_cfg.get("visual_dim", 768))
+        self.num_regions = int(model_cfg["num_regions"])
+        self.region_pooling = model_cfg.get("region_pooling", "concat")
+        self.mask_guided_attention = bool(model_cfg.get("mask_guided_attention", True))
+        self.use_global_visual_bias = bool(model_cfg.get("use_global_visual_bias", True))
+        self.use_region_relation_tokens = bool(model_cfg.get("use_region_relation_tokens", True))
+        self.use_cnn_aux_logits = bool(model_cfg.get("use_cnn_aux_logits", True))
+        self.cnn_aux_logit_weight = float(model_cfg.get("cnn_aux_logit_weight", 0.8))
+        self.attention_logit_weight = float(model_cfg.get("attention_logit_weight", 0.2))
+        self.ortho_loss_type = model_cfg.get("ortho_loss_type", "squared_offdiag")
+        self.backbone = ConvNeXtTinyBackbone(
+            pretrained=bool(model_cfg.get("pretrained", False)),
+            weights=model_cfg.get("weights"),
+            use_builtin_convnext=bool(model_cfg.get("use_builtin_convnext", False)),
+        )
+        self.region_dict = RegionDictionary(self.num_regions, self.embed_dim)
+        self.cross_attention = CrossAttentionWithMask(
+            self.embed_dim,
+            self.visual_dim,
+            int(model_cfg["num_heads"]),
+            float(model_cfg.get("transformer_dropout", 0.25)),
+            float(model_cfg.get("mask_attention_alpha", 0.3)),
+            float(model_cfg.get("mask_floor", 0.05)),
+        )
+        relation_pairs = model_cfg.get("region_relation_pairs", [])
+        self.relation_builder = RelationTokenBuilder(
+            self.embed_dim,
+            relation_pairs,
+            float(model_cfg.get("region_relation_dropout", 0.1)),
+        ) if self.use_region_relation_tokens else None
+        relation_count = len(relation_pairs) if self.use_region_relation_tokens else 0
+        self.pos_embed = self.add_weight(
+            name="pos_embed",
+            shape=(1, self.num_regions + relation_count, self.embed_dim),
+            initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
+            trainable=True,
+        )
+        self.global_proj = tf.keras.Sequential([_norm(), tf.keras.layers.Dense(self.embed_dim), tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25)))])
+        self.encoder = [
+            TransformerEncoderBlock(self.embed_dim, int(model_cfg["num_heads"]), float(model_cfg.get("transformer_dropout", 0.25)))
+            for _ in range(int(model_cfg["num_encoder_layers"]))
+        ]
+        self.classifier = tf.keras.Sequential([
+            _norm(),
+            tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.45))),
+            tf.keras.layers.Dense(int(model_cfg.get("classifier_hidden_dim", 512))),
+            tf.keras.layers.Activation(tf.nn.gelu),
+            tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout2", 0.35))),
+            tf.keras.layers.Dense(self.num_classes),
+        ])
+        self.cnn_aux_classifier = None
+        if self.use_cnn_aux_logits:
+            self.cnn_aux_classifier = tf.keras.Sequential([
+                _norm(),
+                tf.keras.layers.Dropout(float(model_cfg.get("cnn_aux_dropout", 0.2))),
+                tf.keras.layers.Dense(int(model_cfg.get("cnn_aux_hidden_dim", 768))),
+                tf.keras.layers.Activation(tf.nn.gelu),
+                tf.keras.layers.Dropout(float(model_cfg.get("cnn_aux_dropout", 0.2))),
+                tf.keras.layers.Dense(self.num_classes),
+            ])
+
+    def _pool_regions(self, encoded):
+        if self.region_pooling == "concat":
+            return tf.reshape(encoded, [tf.shape(encoded)[0], -1])
+        return tf.reduce_mean(encoded, axis=1)
+
+    def _apply_ablation(self, logits, cnn_aux_logits):
+        if self.ablation == "cnn_only":
+            return cnn_aux_logits
+        if self.ablation == "region_only":
+            return logits
+        if self.ablation in ("full", "no_mask", "shuffled_mask") and cnn_aux_logits is not None:
+            return self.attention_logit_weight * logits + self.cnn_aux_logit_weight * cnn_aux_logits
+        return logits
+
+    def call(self, inputs, training=False, return_attn=False, return_region_weights=False):
+        image = inputs["image"]
+        mask = inputs.get("mask")
+        feat_map = self.backbone(image, training=training)
+        feat_map = tf.image.resize(feat_map, [7, 7])
+        visual_tokens = tf.reshape(feat_map, [tf.shape(feat_map)[0], -1, self.visual_dim])
+        global_avg = tf.reduce_mean(visual_tokens, axis=1)
+        global_max = tf.reduce_max(visual_tokens, axis=1)
+        region_tokens = self.region_dict(tf.shape(image)[0])
+        attn_mask = None
+        if self.mask_guided_attention and self.ablation not in ("no_mask", "cnn_only"):
+            if mask is None:
+                raise ValueError("Mask guidance is enabled but no mask tensor was provided.")
+            attn_mask = tf.transpose(tf.reshape(mask, [tf.shape(mask)[0], -1, self.num_regions]), [0, 2, 1])
+        region_features, attn_scores = self.cross_attention(region_tokens, visual_tokens, region_masks=attn_mask, training=training)
+        if self.relation_builder is not None:
+            region_features = self.relation_builder(region_features, training=training)
+        region_features = region_features + self.pos_embed[:, : region_features.shape[1], :]
+        if self.use_global_visual_bias:
+            region_features = region_features + tf.expand_dims(self.global_proj(global_avg, training=training), axis=1)
+        encoded = region_features
+        for block in self.encoder:
+            encoded = block(encoded, training=training)
+        logits = self.classifier(self._pool_regions(encoded), training=training)
+        cnn_aux_logits = None
+        if self.cnn_aux_classifier is not None:
+            cnn_aux_logits = self.cnn_aux_classifier(tf.concat([global_avg, global_max], axis=-1), training=training)
+        fused_logits = self._apply_ablation(logits, cnn_aux_logits)
+        attn_region = tf.reduce_mean(attn_scores, axis=1)
+        attn_norm = tf.math.divide_no_nan(attn_region, tf.norm(attn_region, ord=2, axis=-1, keepdims=True))
+        sim = tf.matmul(attn_norm, attn_norm, transpose_b=True)
+        eye = tf.eye(tf.shape(sim)[-1], batch_shape=[tf.shape(sim)[0]], dtype=sim.dtype)
+        off_diag = tf.where(tf.cast(1.0 - eye, tf.bool), sim, tf.zeros_like(sim))
+        ortho_loss = tf.reduce_mean(tf.square(off_diag)) if self.ortho_loss_type == "squared_offdiag" else tf.reduce_mean(off_diag)
+        outputs = {
+            "logits": fused_logits,
+            "attention_logits": logits,
+            "cnn_aux_logits": cnn_aux_logits,
+            "ortho_loss": ortho_loss,
+            "attn_scores": attn_scores,
+        }
+        if return_region_weights:
+            outputs["region_weights"] = None
+        return outputs

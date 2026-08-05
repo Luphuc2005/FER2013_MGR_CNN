@@ -1,0 +1,32 @@
+# Local datasets and generated masks
+/data/
+/mediapipe_region_masks/
+/merged_mediapipe_region_masks/
+*.npy
+
+# Training outputs
+/outputs/
+/logs/
+/checkpoints/
+
+# Python/runtime cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+
+# Local environments and machine-specific files
+.env
+.venv/
+venv/
+env/
+MISSING_PACKAGES.txt
+
+# Large model artifacts
+*.ckpt
+*.h5
+*.keras
+*.pth
+*.pt
+*.onnx

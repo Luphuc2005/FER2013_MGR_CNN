@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${ROOT_DIR}"
+
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-1}"
+export TF_FORCE_GPU_ALLOW_GROWTH=true
+export MGR_GPU_IDS=0
+export MGR_REQUIRE_TWO_GPUS=0
+export MGR_MIN_GPUS=1
+export MGR_BATCH_SIZE_PER_GPU="${MGR_BATCH_SIZE_PER_GPU:-1}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-16}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-16}"
+export TF_NUM_INTRAOP_THREADS="${TF_NUM_INTRAOP_THREADS:-16}"
+export TF_NUM_INTEROP_THREADS="${TF_NUM_INTEROP_THREADS:-4}"
+export MGR_TF_INTRA_OP_THREADS="${MGR_TF_INTRA_OP_THREADS:-16}"
+export MGR_TF_INTER_OP_THREADS="${MGR_TF_INTER_OP_THREADS:-4}"
+export MGR_TF_DATA_NUM_PARALLEL_CALLS="${MGR_TF_DATA_NUM_PARALLEL_CALLS:-16}"
+export MGR_TF_DATA_PRIVATE_THREADPOOL_SIZE="${MGR_TF_DATA_PRIVATE_THREADPOOL_SIZE:-16}"
+export MGR_TF_DATA_DETERMINISTIC="${MGR_TF_DATA_DETERMINISTIC:-0}"
+export MGR_PREFETCH_BUFFER="${MGR_PREFETCH_BUFFER:-2}"
+export MGR_USE_NUMACTL="${MGR_USE_NUMACTL:-0}"
+
+mkdir -p logs
+STAMP="$(date +%Y%m%d_%H%M%S)"
+"${PYTHON_BIN}" check_environment.py | tee "logs/check_environment_single_${STAMP}.log"
+"${PYTHON_BIN}" train.py --config config.yaml --resume 2>&1 | tee "logs/train_single_${STAMP}.log"

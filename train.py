@@ -1,0 +1,587 @@
+from __future__ import annotations
+
+import argparse
+import gc
+import json
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+import sys
+
+if sys.platform == "win32":
+    env_dir = os.path.dirname(sys.executable)
+    lib_bin = os.path.join(env_dir, "Library", "bin")
+    if os.path.exists(lib_bin):
+        os.environ["PATH"] = lib_bin + os.path.pathsep + os.environ.get("PATH", "")
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(lib_bin)
+            except Exception:
+                pass
+
+import numpy as np
+import tensorflow as tf
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*calling iterator did not fully read the dataset being cached.*")
+tf.get_logger().setLevel('ERROR')
+
+from config import load_config, global_batch_size
+from datasets.fer2013 import EMOTION_NAMES, build_datasets
+from losses.classification import supervised_mgr_loss
+from metrics.classification import classification_metrics, save_metrics
+from models import MGRConvNeXtFER
+
+
+class LegacyDecoupledAdamW(tf.keras.optimizers.Adam):
+    """Small AdamW fallback for TF 2.10 environments without Keras AdamW."""
+
+    def __init__(self, learning_rate: float, weight_decay: float = 0.0, name: str = "LegacyDecoupledAdamW", **kwargs):
+        super().__init__(learning_rate=learning_rate, name=name, **kwargs)
+        self.weight_decay = float(weight_decay)
+
+    def apply_gradients(self, grads_and_vars, name=None, experimental_aggregate_gradients=True):
+        grads_and_vars = [(g, v) for g, v in grads_and_vars if g is not None]
+        if not grads_and_vars:
+            return tf.no_op()
+        train_op = super().apply_gradients(
+            grads_and_vars,
+            name=name,
+            experimental_aggregate_gradients=experimental_aggregate_gradients,
+        )
+        if self.weight_decay <= 0.0:
+            return train_op
+
+        def _decay():
+            lr = tf.cast(self.learning_rate, grads_and_vars[0][1].dtype)
+            decay_ops = []
+            for _, var in grads_and_vars:
+                decay_ops.append(var.assign_sub(tf.cast(self.weight_decay, var.dtype) * lr * var))
+            return tf.group(decay_ops)
+
+        with tf.control_dependencies([train_op]):
+            return _decay()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="FER2013_SGU TensorFlow MGR-CNN training")
+    parser.add_argument("--config", type=str, default="config.yaml")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--evaluate-only", action="store_true")
+    return parser.parse_args()
+
+
+def configure_tensorflow_runtime(cfg: Dict) -> None:
+    runtime = cfg.get("runtime", {})
+    intra_threads = runtime.get("intra_op_threads")
+    inter_threads = runtime.get("inter_op_threads")
+    if intra_threads:
+        tf.config.threading.set_intra_op_parallelism_threads(int(intra_threads))
+    if inter_threads:
+        tf.config.threading.set_inter_op_parallelism_threads(int(inter_threads))
+    tf.config.optimizer.set_jit(bool(runtime.get("xla", False)))
+
+
+def configure_gpus(cfg: Dict) -> None:
+    gpus = tf.config.list_physical_devices("GPU")
+    if not gpus:
+        print("[WARNING] No GPU devices visible to TensorFlow. Falling back to CPU mode.")
+        return
+    gpu_ids = cfg["runtime"].get("gpu_ids", [0])
+    visible = [gpus[i] for i in gpu_ids if i < len(gpus)]
+    if not visible:
+        visible = gpus
+    min_gpus = int(cfg["runtime"].get("min_gpus", 1))
+    if len(visible) < min_gpus:
+        if bool(cfg["runtime"].get("allow_cpu_fallback", True)) or min_gpus <= 1:
+            visible = gpus
+        else:
+            raise RuntimeError(f"TensorFlow sees only {len(visible)} GPU(s), need {min_gpus}.")
+    if visible:
+        tf.config.set_visible_devices(visible, "GPU")
+        if cfg["runtime"].get("memory_growth", True):
+            for gpu in visible:
+                try:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                except Exception:
+                    pass
+        print(f"[INFO] Configured {len(visible)} GPU device(s): {[g.name for g in visible]}")
+
+
+def build_optimizer(cfg: Dict, learning_rate: float):
+    weight_decay = float(cfg["training"].get("weight_decay", 0.0))
+    adamw = getattr(tf.keras.optimizers, "AdamW", None)
+    if adamw is None:
+        adamw = getattr(getattr(tf.keras.optimizers, "experimental", object()), "AdamW", None)
+    if adamw is not None:
+        try:
+            return adamw(learning_rate=learning_rate, weight_decay=weight_decay, jit_compile=False)
+        except TypeError:
+            return adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+    return LegacyDecoupledAdamW(learning_rate=learning_rate, weight_decay=weight_decay)
+
+
+def get_param_count(model: tf.keras.Model) -> Tuple[int, int]:
+    total = int(np.sum([np.prod(v.shape) for v in model.variables]))
+    trainable = int(np.sum([np.prod(v.shape) for v in model.trainable_variables]))
+    return total, trainable
+
+
+def split_variables(model: MGRConvNeXtFER) -> Tuple[List[tf.Variable], List[tf.Variable]]:
+    backbone_ids = {v.ref() for v in model.backbone.variables}
+    backbone = [v for v in model.trainable_variables if v.ref() in backbone_ids]
+    head = [v for v in model.trainable_variables if v.ref() not in backbone_ids]
+    return backbone, head
+
+
+def ensure_optimizer_built(optimizer, variables: Sequence[tf.Variable], strategy: Optional[tf.distribute.Strategy] = None) -> None:
+    variables = [v for v in variables if v is not None]
+    if not variables:
+        return
+    build = getattr(optimizer, "build", None)
+    if callable(build):
+        try:
+            build(variables)
+            return
+        except Exception:
+            pass
+    def _dummy():
+        optimizer.apply_gradients([(tf.zeros_like(v), v) for v in variables])
+    if strategy is not None:
+        strategy.run(_dummy)
+    else:
+        _dummy()
+
+
+def set_optimizer_lr(optimizer, lr_value: float):
+    if optimizer is None:
+        return
+    try:
+        if isinstance(getattr(optimizer, "learning_rate", None), tf.Variable):
+            optimizer.learning_rate.assign(float(lr_value))
+            return
+    except Exception:
+        pass
+    try:
+        tf.keras.backend.set_value(optimizer.learning_rate, float(lr_value))
+        return
+    except Exception:
+        pass
+    try:
+        if hasattr(optimizer, "_set_hyper"):
+            optimizer._set_hyper("learning_rate", float(lr_value))
+            return
+    except Exception:
+        try:
+            optimizer.learning_rate = float(lr_value)
+        except Exception:
+            pass
+
+
+def cosine_lr(base_lr: float, epoch: int, epochs: int, min_lr: float = 1e-6) -> float:
+    if epochs <= 1:
+        return base_lr
+    ratio = epoch / float(max(epochs - 1, 1))
+    cosine = 0.5 * (1.0 + np.cos(np.pi * ratio))
+    return float(min_lr + (base_lr - min_lr) * cosine)
+
+
+def resolve_monitor_value(metrics: Dict[str, object], monitor_name: str) -> float:
+    aliases = {
+        "val_macro_f1": "macro_f1",
+        "val_weighted_f1": "weighted_f1",
+        "val_accuracy": "accuracy",
+        "val_acc": "accuracy",
+        "val_loss": "loss",
+    }
+    key = aliases.get(monitor_name, monitor_name)
+    if key not in metrics:
+        raise KeyError(f"Monitor {monitor_name!r} resolved to {key!r}, but metric is not available.")
+    value = float(metrics[key])
+    return -value if key == "loss" else value
+
+
+def make_step_function(cfg: Dict, model: MGRConvNeXtFER, optimizer_head, optimizer_backbone=None):
+    loss_cfg = cfg["training"]
+    label_smoothing = float(loss_cfg.get("label_smoothing", 0.0))
+    ortho_weight = float(cfg["model"].get("ortho_loss_weight", 0.003))
+    cnn_aux_weight = float(cfg["model"].get("cnn_aux_loss_weight", 0.4))
+    sam_rho = float(loss_cfg.get("sam_rho", 0.03))
+    sam_adaptive = bool(loss_cfg.get("sam_adaptive", False))
+    use_sam = str(loss_cfg.get("optimizer", "sam")).lower() == "sam"
+    skip_nonfinite = bool(loss_cfg.get("skip_nonfinite_batches", True))
+    grad_clip_norm = float(loss_cfg.get("grad_clip_norm", 0.0)) if loss_cfg.get("grad_clip_norm") else None
+    backbone_vars, head_vars = split_variables(model)
+    all_vars = head_vars + backbone_vars
+
+    def _all_finite(grads):
+        finite_tensors = [tf.reduce_all(tf.math.is_finite(g)) for g in grads if g is not None]
+        return tf.constant(True) if not finite_tensors else tf.reduce_all(tf.stack(finite_tensors))
+
+    def _batch_stats(outputs, labels):
+        preds = tf.argmax(outputs["logits"], axis=-1, output_type=tf.int32)
+        correct = tf.reduce_sum(tf.cast(tf.equal(preds, labels), tf.int32))
+        count = tf.shape(labels)[0]
+        return correct, count
+
+    def _apply_gradients(grads, trainable_vars):
+        if grad_clip_norm:
+            grads, _ = tf.clip_by_global_norm(grads, grad_clip_norm)
+        backbone_ids = {v.ref() for v in backbone_vars}
+        head_grads = [(g, v) for g, v in zip(grads, trainable_vars) if v.ref() not in backbone_ids and g is not None]
+        backbone_grads = [(g, v) for g, v in zip(grads, trainable_vars) if v.ref() in backbone_ids and g is not None]
+        if head_grads:
+            optimizer_head.apply_gradients(head_grads)
+        if optimizer_backbone is not None and backbone_grads:
+            optimizer_backbone.apply_gradients(backbone_grads)
+
+    def _step_impl(features, labels, trainable_vars):
+        with tf.GradientTape() as tape:
+            outputs = model(features, training=True)
+            loss, parts = supervised_mgr_loss(
+                labels,
+                outputs,
+                num_classes=cfg["data"]["num_classes"],
+                label_smoothing=label_smoothing,
+                ortho_weight=ortho_weight,
+                cnn_aux_weight=cnn_aux_weight,
+            )
+        grads = tape.gradient(loss, trainable_vars)
+        if skip_nonfinite:
+            grads = [tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) if g is not None else None for g in grads]
+
+        if not use_sam:
+            _apply_gradients(grads, trainable_vars)
+            correct, count = _batch_stats(outputs, labels)
+            return loss, correct, count, tf.constant(1, tf.int32)
+
+        grad_norm = tf.linalg.global_norm([g for g in grads if g is not None])
+
+        eps_list = []
+        for var, grad in zip(trainable_vars, grads):
+            if grad is None:
+                eps_list.append(None)
+                continue
+            scale = sam_rho / (grad_norm + 1e-12)
+            if sam_adaptive:
+                scale = scale * tf.square(tf.abs(var))
+            eps_list.append(grad * scale)
+
+        for var, eps in zip(trainable_vars, eps_list):
+            if eps is not None:
+                var.assign_add(eps)
+
+        with tf.GradientTape() as tape2:
+            outputs_2 = model(features, training=True)
+            loss_2, _ = supervised_mgr_loss(
+                labels,
+                outputs_2,
+                num_classes=cfg["data"]["num_classes"],
+                label_smoothing=label_smoothing,
+                ortho_weight=ortho_weight,
+                cnn_aux_weight=cnn_aux_weight,
+            )
+        grads_2 = tape2.gradient(loss_2, trainable_vars)
+
+        for var, eps in zip(trainable_vars, eps_list):
+            if eps is not None:
+                var.assign_sub(eps)
+
+        if skip_nonfinite:
+            grads_2 = [tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) if g is not None else None for g in grads_2]
+
+        _apply_gradients(grads_2, trainable_vars)
+        correct, count = _batch_stats(outputs_2, labels)
+        return loss_2, correct, count, tf.constant(1, tf.int32)
+
+    def train_step_head(features, labels):
+        return _step_impl(features, labels, head_vars)
+
+    def train_step_full(features, labels):
+        return _step_impl(features, labels, all_vars)
+
+    return train_step_head, train_step_full
+
+
+def make_distributed_train_step(strategy: tf.distribute.Strategy, train_step):
+    @tf.function(reduce_retracing=True, jit_compile=False)
+    def distributed_step(batch):
+        per_loss, per_correct, per_count, per_ok = strategy.run(train_step, args=batch)
+        ok = strategy.reduce(tf.distribute.ReduceOp.SUM, per_ok, axis=None)
+        loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_loss, axis=None)
+        correct = strategy.reduce(tf.distribute.ReduceOp.SUM, per_correct, axis=None)
+        count = strategy.reduce(tf.distribute.ReduceOp.SUM, per_count, axis=None)
+        return loss, correct, count, ok
+
+    return distributed_step
+
+
+def evaluate_dataset(
+    model: MGRConvNeXtFER,
+    dataset: tf.data.Dataset,
+    cfg: Dict,
+    strategy: Optional[tf.distribute.Strategy] = None,
+) -> Dict[str, object]:
+    @tf.function(reduce_retracing=True, jit_compile=False)
+    def _eval_step(inputs, labels):
+        outputs = model(inputs, training=False)
+        loss, _ = supervised_mgr_loss(
+            labels,
+            outputs,
+            num_classes=cfg["data"]["num_classes"],
+            label_smoothing=float(cfg["training"].get("label_smoothing", 0.0)),
+            ortho_weight=float(cfg["model"].get("ortho_loss_weight", 0.003)),
+            cnn_aux_weight=float(cfg["model"].get("cnn_aux_loss_weight", 0.4)),
+        )
+        preds = tf.argmax(outputs["logits"], axis=-1, output_type=tf.int32)
+        return loss, tf.shape(labels)[0], preds, labels
+
+    y_true: List[int] = []
+    y_pred: List[int] = []
+    total_loss = 0.0
+    total_count = 0
+
+    if strategy is not None and strategy.num_replicas_in_sync > 1:
+        dist_dataset = strategy.experimental_distribute_dataset(dataset)
+        @tf.function(reduce_retracing=True)
+        def _distributed_eval_step(batch):
+            return strategy.run(_eval_step, args=batch)
+
+        for batch in dist_dataset:
+            per_replica_loss, per_replica_count, per_replica_preds, per_replica_labels = _distributed_eval_step(batch)
+            local_losses = strategy.experimental_local_results(per_replica_loss)
+            local_counts = strategy.experimental_local_results(per_replica_count)
+            local_preds = strategy.experimental_local_results(per_replica_preds)
+            local_labels = strategy.experimental_local_results(per_replica_labels)
+            for loss_tensor, count_tensor, preds_tensor, labels_tensor in zip(
+                local_losses,
+                local_counts,
+                local_preds,
+                local_labels,
+            ):
+                count = int(count_tensor.numpy())
+                if count == 0:
+                    continue
+                total_loss += float(loss_tensor.numpy()) * count
+                total_count += count
+                y_true.extend(labels_tensor.numpy().tolist())
+                y_pred.extend(preds_tensor.numpy().tolist())
+        metrics = classification_metrics(y_true, y_pred, EMOTION_NAMES)
+        metrics["loss"] = total_loss / max(total_count, 1)
+        return metrics
+
+    for batch in dataset:
+        inputs, labels = batch
+        loss, count, preds, labels = _eval_step(inputs, labels)
+        y_true.extend(labels.numpy().tolist())
+        y_pred.extend(preds.numpy().tolist())
+        total_loss += float(loss.numpy()) * int(count.numpy())
+        total_count += int(count.numpy())
+    metrics = classification_metrics(y_true, y_pred, EMOTION_NAMES)
+    metrics["loss"] = total_loss / max(total_count, 1)
+    return metrics
+
+
+def main() -> int:
+    args = parse_args()
+    cfg = load_config(args.config)
+    configure_tensorflow_runtime(cfg)
+    tf.keras.utils.set_random_seed(int(cfg["seed"]["random_seed"]))
+    configure_gpus(cfg)
+    visible_gpu_count = len(tf.config.list_logical_devices("GPU"))
+    strategy_devices = (
+        [f"/GPU:{i}" for i in range(visible_gpu_count)]
+        if visible_gpu_count > 0
+        else ["/CPU:0"]
+    )
+    strategy = tf.distribute.MirroredStrategy(devices=strategy_devices)
+    print(f"TensorFlow {tf.__version__}")
+    print(f"Replicas in sync: {strategy.num_replicas_in_sync}")
+
+    train_ds, val_ds, test_ds = build_datasets(cfg, replicas=strategy.num_replicas_in_sync)
+    train_loop_ds = strategy.experimental_distribute_dataset(train_ds)
+    global_bs = global_batch_size(cfg, strategy.num_replicas_in_sync)
+    if global_bs != int(cfg["runtime"]["batch_size_per_gpu"]) * strategy.num_replicas_in_sync:
+        raise ValueError("Global batch size mismatch.")
+
+    run_dir = Path(cfg["paths"]["output_dir"])
+    run_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = Path(cfg["paths"]["logs_dir"])
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_root = run_dir / "checkpoints"
+
+    with strategy.scope():
+        model = MGRConvNeXtFER(cfg)
+        dummy_image = tf.zeros([1, cfg["data"]["image_size"], cfg["data"]["image_size"], cfg["data"]["channels"]], dtype=tf.float32)
+        dummy_mask = tf.zeros([1, cfg["model"]["token_grid_size"], cfg["model"]["token_grid_size"], cfg["model"]["num_regions"]], dtype=tf.float32)
+        smoke = model({"image": dummy_image, "mask": dummy_mask}, training=False)
+        total_params, trainable_params = get_param_count(model)
+        print(f"Model params: total={total_params:,}, trainable={trainable_params:,}")
+        print(f"Smoke logits shape: {smoke['logits'].shape}")
+        optimizer_head = build_optimizer(cfg, float(cfg["training"]["lr"]))
+        optimizer_backbone = build_optimizer(cfg, float(cfg["training"].get("visual_extractor_lr", cfg["training"]["lr"])))
+        backbone_vars_for_optimizer, head_vars_for_optimizer = split_variables(model)
+        ensure_optimizer_built(optimizer_head, head_vars_for_optimizer, strategy)
+        ensure_optimizer_built(optimizer_backbone, backbone_vars_for_optimizer, strategy)
+        ckpt_epoch = tf.Variable(0, dtype=tf.int64, trainable=False)
+        ckpt_best_metric = tf.Variable(-1.0, dtype=tf.float32, trainable=False)
+        checkpoint = tf.train.Checkpoint(
+            epoch=ckpt_epoch,
+            best_metric=ckpt_best_metric,
+            model=model,
+            optimizer_head=optimizer_head,
+            optimizer_backbone=optimizer_backbone,
+        )
+        last_manager = tf.train.CheckpointManager(
+            checkpoint,
+            directory=str(checkpoint_root / "last"),
+            max_to_keep=1,
+        )
+        best_manager = tf.train.CheckpointManager(
+            checkpoint,
+            directory=str(checkpoint_root / "best"),
+            max_to_keep=1,
+        )
+        periodic_manager = tf.train.CheckpointManager(
+            checkpoint,
+            directory=str(checkpoint_root / "periodic"),
+            max_to_keep=5,
+        )
+        if (args.resume or cfg["training"].get("resume", True)) and last_manager.latest_checkpoint:
+            checkpoint.restore(last_manager.latest_checkpoint).expect_partial()
+            print(f"Resumed from {last_manager.latest_checkpoint}")
+
+    first_batch = next(iter(train_ds.take(1)))
+    first_inputs, first_labels = first_batch
+    first_outputs = model(first_inputs, training=False)
+    first_loss, _ = supervised_mgr_loss(
+        first_labels,
+        first_outputs,
+        num_classes=cfg["data"]["num_classes"],
+        label_smoothing=float(cfg["training"].get("label_smoothing", 0.0)),
+        ortho_weight=float(cfg["model"].get("ortho_loss_weight", 0.003)),
+        cnn_aux_weight=float(cfg["model"].get("cnn_aux_loss_weight", 0.4)),
+    )
+    if not np.isfinite(float(first_loss.numpy())):
+        raise FloatingPointError("Smoke-test loss is not finite.")
+
+    backbone_vars, head_vars = split_variables(model)
+    if backbone_vars:
+        print(f"Backbone trainable vars: {len(backbone_vars)}")
+    print(f"Head trainable vars: {len(head_vars)}")
+
+    train_step_head, train_step_full = make_step_function(cfg, model, optimizer_head, optimizer_backbone)
+    distributed_train_step_head = make_distributed_train_step(strategy, train_step_head)
+    distributed_train_step_full = make_distributed_train_step(strategy, train_step_full)
+    start_epoch = int(ckpt_epoch.numpy())
+    monitor_name = str(cfg["training"].get("monitor", "val_macro_f1"))
+    best_score = float(ckpt_best_metric.numpy())
+    best_epoch = start_epoch if best_score >= 0.0 else -1
+    history = []
+    csv_path = run_dir / "training_history.csv"
+    progress_interval = int(cfg["training"].get("progress_interval", 0) or 0)
+    periodic_interval = int(cfg["training"].get("periodic_checkpoint_interval", 10) or 0)
+    eval_strategy = strategy if bool(cfg["runtime"].get("distributed_eval", False)) else None
+    for epoch in range(start_epoch, int(cfg["training"]["epochs"])):
+        train_backbone = bool(cfg["model"].get("unfreeze_backbone", True)) and epoch >= int(cfg["model"].get("freeze_backbone_epochs", 0) or 0)
+        train_step = train_step_full if train_backbone else train_step_head
+        distributed_train_step = distributed_train_step_full if train_backbone else distributed_train_step_head
+        lr = cosine_lr(float(cfg["training"]["lr"]), epoch, int(cfg["training"]["epochs"]))
+        set_optimizer_lr(optimizer_head, lr)
+        backbone_lr = float(cfg["training"].get("visual_extractor_lr", lr)) if train_backbone else float(cfg["training"]["lr"])
+        set_optimizer_lr(optimizer_backbone, backbone_lr)
+        losses = []
+        correct = 0
+        seen = 0
+        total_steps = int(tf.data.experimental.cardinality(train_ds).numpy())
+        for step_index, batch in enumerate(train_loop_ds, start=1):
+            loss, batch_correct, batch_count, ok = distributed_train_step(batch)
+            if int(ok.numpy()) == 0:
+                continue
+            correct += int(batch_correct.numpy())
+            seen += int(batch_count.numpy())
+            losses.append(float(loss.numpy()))
+            if progress_interval and step_index % progress_interval == 0:
+                print(
+                    f"Epoch {epoch+1}/{cfg['training']['epochs']} "
+                    f"step {step_index}/{total_steps} "
+                    f"loss={float(loss.numpy()):.4f} "
+                    f"running_acc={correct / max(seen, 1):.4f} "
+                    f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f}",
+                    flush=True,
+                )
+        train_loss = float(np.mean(losses)) if losses else float("nan")
+        train_acc = correct / max(seen, 1)
+        print(f"[INFO] Epoch {epoch+1}: starting validation", flush=True)
+        val_metrics = evaluate_dataset(model, val_ds, cfg, strategy=eval_strategy)
+        print(f"[INFO] Epoch {epoch+1}: validation finished", flush=True)
+        monitor = resolve_monitor_value(val_metrics, monitor_name)
+        improved = monitor > best_score
+        if improved:
+            best_score = monitor
+            best_epoch = epoch + 1
+            ckpt_best_metric.assign(best_score)
+            print(f"[INFO] Epoch {epoch+1}: saving best checkpoint", flush=True)
+            best_manager.save(checkpoint_number=epoch + 1)
+        ckpt_epoch.assign(epoch + 1)
+        print(f"[INFO] Epoch {epoch+1}: saving last checkpoint", flush=True)
+        last_manager.save(checkpoint_number=epoch + 1)
+        if periodic_interval and (epoch + 1) % periodic_interval == 0:
+            print(f"[INFO] Epoch {epoch+1}: saving periodic checkpoint", flush=True)
+            periodic_manager.save(checkpoint_number=epoch + 1)
+        row = {
+            "epoch": epoch + 1,
+            "train_loss": train_loss,
+            "train_accuracy": train_acc,
+            "val_loss": float(val_metrics["loss"]),
+            "val_accuracy": float(val_metrics["accuracy"]),
+            "val_macro_f1": float(val_metrics["macro_f1"]),
+            "val_weighted_f1": float(val_metrics["weighted_f1"]),
+            "lr_head": lr,
+            "lr_backbone": backbone_lr,
+            "monitor_name": monitor_name,
+            "monitor_value": monitor,
+            "best_monitor_value": best_score,
+            "best_epoch": best_epoch,
+            "improved": int(improved),
+        }
+        history.append(row)
+        print(
+            f"Epoch {epoch+1}/{cfg['training']['epochs']} "
+            f"loss={train_loss:.4f} acc={train_acc:.4f} "
+            f"val_loss={row['val_loss']:.4f} val_acc={row['val_accuracy']:.4f} "
+            f"val_macro_f1={row['val_macro_f1']:.4f} "
+            f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f} "
+            f"{monitor_name}={monitor:.4f}",
+            flush=True,
+        )
+        if len(history) > int(cfg["training"]["patience"]) and not improved:
+            recent = history[-int(cfg["training"]["patience"]):]
+            if max(r["monitor_value"] for r in recent) < best_score:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
+        gc.collect()
+
+    if history:
+        with csv_path.open("w", encoding="utf-8") as f:
+            f.write(",".join(history[0].keys()) + "\n")
+            for row in history:
+                f.write(",".join(str(row[k]) for k in history[0].keys()) + "\n")
+    else:
+        print("[INFO] No new training epochs were run; skipping training_history.csv update.", flush=True)
+
+    best_ckpt = best_manager.latest_checkpoint or last_manager.latest_checkpoint
+    if best_ckpt:
+        checkpoint.restore(best_ckpt).expect_partial()
+    print("[INFO] Starting final test evaluation", flush=True)
+    test_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy)
+    save_metrics(test_metrics, run_dir / "test_metrics.json")
+    print(json.dumps(test_metrics, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

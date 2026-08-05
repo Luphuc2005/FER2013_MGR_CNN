@@ -1,0 +1,138 @@
+seed:
+  random_seed: 42
+
+source:
+  pytorch_config: "configs/paper_ablation_strong/c_cnn_region_logits_080_020_imagenet_sam_cosine_seed42_relation_noclean_batch16_kaggle.yaml"
+  reported_no_tta_accuracy_percent: 74.17107829478964
+  reported_tta_hflip_accuracy_percent: 74.33825578155475
+  note: "TensorFlow port of C relation-token run: final = 0.8 * cnn_aux_logits + 0.2 * region_attention_logits."
+
+runtime:
+  gpu_ids: [0, 1]
+  batch_size_per_gpu: 16
+  fallback_batch_size_per_gpu: 8
+  require_two_gpus: true
+  min_gpus: 2
+  memory_growth: true
+  intra_op_threads: 24
+  inter_op_threads: 8
+  tf_data_num_parallel_calls: 16
+  tf_data_private_threadpool_size: 16
+  tf_data_deterministic: false
+  prefetch_buffer: 4
+  distributed_eval: true
+
+data:
+  data_path: "data/fer13-split"
+  mask_dir: "data/mediapipe_region_masks"
+  num_classes: 7
+  image_size: 224
+  channels: 3
+  normalize: true
+  predecode_pixels: true
+  preload_masks: true
+  use_clean_filter: false
+  bad_row_indices_path:
+  mask_ablation: "none"
+  mask_region_permutation: [4, 2, 0, 5, 1, 3]
+  shuffle_buffer: 1024
+  cache: true
+
+augmentation:
+  horizontal_flip: true
+  rotation_degrees: 15.0
+  brightness_delta: 0.15
+  contrast_lower: 0.85
+  contrast_upper: 1.15
+  gamma_prob: 0.5
+  gamma_min: 0.5
+  gamma_max: 2.0
+  random_erasing_prob: 0.4
+  random_erasing_area_min: 0.02
+  random_erasing_area_max: 0.15
+
+model:
+  name: "convnext_tiny_mask_guided_region_attention"
+  arch: "convnext_tiny"
+  pretrained: true
+  use_builtin_convnext: false
+  weights:
+  checkpoint_path:
+  checkpoint_strict: false
+  num_regions: 6
+  token_grid_size: 7
+  visual_dim: 768
+  embed_dim: 384
+  num_heads: 4
+  num_encoder_layers: 2
+  transformer_dropout: 0.25
+  use_visual_pos_embed: true
+  use_region_slot_embed: true
+  use_global_visual_bias: true
+  region_pooling: "concat"
+  classifier_hidden_dim: 512
+  classifier_dropout1: 0.45
+  classifier_dropout2: 0.35
+  ortho_loss_type: "squared_offdiag"
+  ortho_loss_weight: 0.003
+  use_source_classifier: false
+  use_clip_dictionary: false
+  use_learnable_clip_region_tokens: false
+  mask_guided_attention: true
+  mask_attention_alpha: 0.3
+  mask_floor: 0.05
+  mask_ablation: "none"
+  use_cnn_aux_loss: true
+  use_cnn_aux_logits: true
+  cnn_aux_loss_weight: 0.4
+  cnn_aux_hidden_dim: 768
+  cnn_aux_dropout: 0.2
+  attention_logit_weight: 0.2
+  cnn_aux_logit_weight: 0.8
+  logit_fusion: "cnn_aux_sum"
+  finetune_logit_fusion: "cnn_aux_sum"
+  freeze_backbone_epochs: 0
+  unfreeze_backbone: true
+  freeze_unfrozen_batchnorm: true
+  use_region_relation_tokens: true
+  region_relation_dropout: 0.1
+  region_relation_pairs:
+    - name: "brow_eye"
+      left: [0]
+      right: [1, 2]
+    - name: "eye_nose"
+      left: [1, 2]
+      right: [3]
+    - name: "nose_mouth"
+      left: [3]
+      right: [4]
+    - name: "eyes_mouth"
+      left: [1, 2]
+      right: [4]
+  # full | cnn_only | region_only | no_mask | shuffled_mask
+  ablation: "full"
+
+training:
+  epochs: 2
+  patience: 50
+  loss: "cross_entropy"
+  label_smoothing: 0.05
+  optimizer: "sam"
+  base_optimizer: "adamw"
+  sam_rho: 0.03
+  sam_adaptive: false
+  lr: 0.0002
+  finetune_lr: 0.00008
+  visual_extractor_lr: 0.000008
+  weight_decay: 0.02
+  scheduler: "cosine"
+  grad_clip_norm: 1.0
+  skip_nonfinite_batches: true
+  monitor: "val_accuracy"
+  resume: false
+  periodic_checkpoint_interval: 10
+  progress_interval: 100
+
+paths:
+  output_dir: "outputs/tf_runs/c_relation_tokens_080_020_tf"
+  logs_dir: "logs"
