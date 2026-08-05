@@ -196,6 +196,35 @@ def _random_erasing(image: tf.Tensor, seed: tf.Tensor, cfg: Dict) -> tf.Tensor:
     return tf.cond(draw < prob, erase, lambda: image)
 
 
+def _rotate_tensor(tensor: tf.Tensor, radians: tf.Tensor, interpolation: str = "BILINEAR") -> tf.Tensor:
+    shape = tf.shape(tensor)
+    height = tf.cast(shape[0], tf.float32)
+    width = tf.cast(shape[1], tf.float32)
+    center_x = (width - 1.0) / 2.0
+    center_y = (height - 1.0) / 2.0
+    cos_v = tf.cos(radians)
+    sin_v = tf.sin(radians)
+    transform = tf.stack([
+        cos_v,
+        sin_v,
+        center_x - cos_v * center_x - sin_v * center_y,
+        -sin_v,
+        cos_v,
+        center_y + sin_v * center_x - cos_v * center_y,
+        0.0,
+        0.0,
+    ])
+    rotated = tf.raw_ops.ImageProjectiveTransformV3(
+        images=tf.expand_dims(tensor, axis=0),
+        transforms=tf.expand_dims(transform, axis=0),
+        output_shape=shape[:2],
+        interpolation=interpolation,
+        fill_mode="CONSTANT",
+        fill_value=tf.constant(0.0, dtype=tensor.dtype),
+    )
+    return tf.squeeze(rotated, axis=0)
+
+
 def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
     if split != "train":
         return image, mask
@@ -207,15 +236,11 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
             mask = tf.cond(flip, lambda: tf.image.flip_left_right(mask), lambda: mask)
     degrees = float(aug_cfg.get("rotation_degrees", 0.0))
     if degrees > 0.0:
-        try:
-            import tensorflow_addons as tfa
-        except Exception as exc:
-            raise ImportError("tensorflow_addons is required when rotation_degrees > 0.") from exc
         angle = tf.random.stateless_uniform([], seed=seed + [5, 9], minval=-degrees, maxval=degrees)
         radians = angle * np.pi / 180.0
-        image = tfa.image.rotate(image, radians, interpolation="BILINEAR")
+        image = _rotate_tensor(image, radians, interpolation="BILINEAR")
         if mask is not None:
-            mask = tf.clip_by_value(tfa.image.rotate(mask, radians, interpolation="BILINEAR"), 0.0, 1.0)
+            mask = tf.clip_by_value(_rotate_tensor(mask, radians, interpolation="BILINEAR"), 0.0, 1.0)
     image = tf.image.stateless_random_brightness(image, max_delta=float(aug_cfg.get("brightness_delta", 0.0)), seed=seed + [17, 23])
     image = tf.image.stateless_random_contrast(image, lower=float(aug_cfg.get("contrast_lower", 1.0)), upper=float(aug_cfg.get("contrast_upper", 1.0)), seed=seed + [19, 29])
     image = tf.clip_by_value(image, 0.0, 255.0)

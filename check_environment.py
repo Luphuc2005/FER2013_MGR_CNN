@@ -8,13 +8,12 @@ from typing import List, Tuple
 
 
 REQUIRED_PACKAGES: List[Tuple[str, str, str]] = [
-    ("tensorflow", "2.10.1", "tensorflow==2.10.1"),
-    ("tensorflow_addons", "0.20.0", "tensorflow-addons==0.20.0"),
-    ("numpy", "1.23.5", "numpy==1.23.5"),
-    ("pandas", "1.5.3", "pandas==1.5.3"),
-    ("sklearn", "1.3.2", "scikit-learn==1.3.2"),
-    ("yaml", "6.0.2", "PyYAML==6.0.2"),
-    ("PIL", "10.4.0", "Pillow==10.4.0"),
+    ("tensorflow", "2.10.1+", "tensorflow"),
+    ("numpy", "1.23.5+", "numpy"),
+    ("pandas", "1.5.3+", "pandas"),
+    ("sklearn", "1.3.2+", "scikit-learn"),
+    ("yaml", "6.0.2+", "PyYAML"),
+    ("PIL", "10.4.0+", "Pillow"),
 ]
 
 
