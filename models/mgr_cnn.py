@@ -87,11 +87,10 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
             return
         try:
             with tf.init_scope():
-                with tf.device("/CPU:0"):
-                    app = convnext_tiny(include_top=False, include_preprocessing=False, weights="imagenet")
-                    dummy = tf.zeros([1, 224, 224, 3])
-                    _ = app(dummy, training=False)
-                    _ = self(dummy, training=False)
+                app = convnext_tiny(include_top=False, include_preprocessing=False, weights="imagenet")
+                dummy = tf.zeros([1, 224, 224, 3])
+                _ = app(dummy, training=False)
+                _ = self(dummy, training=False)
 
             stem_app = app.get_layer("convnext_tiny_stem")
             self.downsample_layers[0].layers[0].set_weights(stem_app.layers[0].get_weights())

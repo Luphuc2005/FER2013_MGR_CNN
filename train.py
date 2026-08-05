@@ -119,7 +119,7 @@ def build_optimizer(cfg: Dict, learning_rate: float):
     if adamw is not None:
         try:
             return adamw(learning_rate=learning_rate, weight_decay=weight_decay, jit_compile=False)
-        except TypeError:
+        except (TypeError, ValueError):
             return adamw(learning_rate=learning_rate, weight_decay=weight_decay)
     return LegacyDecoupledAdamW(learning_rate=learning_rate, weight_decay=weight_decay)
 
