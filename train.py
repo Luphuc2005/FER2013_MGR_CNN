@@ -130,10 +130,26 @@ def get_param_count(model: tf.keras.Model) -> Tuple[int, int]:
     return total, trainable
 
 
+def variable_key(variable) -> object:
+    ref = getattr(variable, "ref", None)
+    if callable(ref):
+        return ref()
+    experimental_ref = getattr(variable, "experimental_ref", None)
+    if callable(experimental_ref):
+        return experimental_ref()
+    path = getattr(variable, "path", None)
+    if path:
+        return path
+    name = getattr(variable, "name", None)
+    if name:
+        return name
+    return id(variable)
+
+
 def split_variables(model: MGRConvNeXtFER) -> Tuple[List[tf.Variable], List[tf.Variable]]:
-    backbone_ids = {v.ref() for v in model.backbone.variables}
-    backbone = [v for v in model.trainable_variables if v.ref() in backbone_ids]
-    head = [v for v in model.trainable_variables if v.ref() not in backbone_ids]
+    backbone_ids = {variable_key(v) for v in model.backbone.variables}
+    backbone = [v for v in model.trainable_variables if variable_key(v) in backbone_ids]
+    head = [v for v in model.trainable_variables if variable_key(v) not in backbone_ids]
     return backbone, head
 
 
@@ -230,9 +246,9 @@ def make_step_function(cfg: Dict, model: MGRConvNeXtFER, optimizer_head, optimiz
     def _apply_gradients(grads, trainable_vars):
         if grad_clip_norm:
             grads, _ = tf.clip_by_global_norm(grads, grad_clip_norm)
-        backbone_ids = {v.ref() for v in backbone_vars}
-        head_grads = [(g, v) for g, v in zip(grads, trainable_vars) if v.ref() not in backbone_ids and g is not None]
-        backbone_grads = [(g, v) for g, v in zip(grads, trainable_vars) if v.ref() in backbone_ids and g is not None]
+        backbone_ids = {variable_key(v) for v in backbone_vars}
+        head_grads = [(g, v) for g, v in zip(grads, trainable_vars) if variable_key(v) not in backbone_ids and g is not None]
+        backbone_grads = [(g, v) for g, v in zip(grads, trainable_vars) if variable_key(v) in backbone_ids and g is not None]
         if head_grads:
             optimizer_head.apply_gradients(head_grads)
         if optimizer_backbone is not None and backbone_grads:
