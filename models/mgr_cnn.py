@@ -269,9 +269,10 @@ class MGRConvNeXtFER(tf.keras.Model):
             float(model_cfg.get("region_relation_dropout", 0.1)),
         ) if self.use_region_relation_tokens else None
         relation_count = len(relation_pairs) if self.use_region_relation_tokens else 0
+        self.region_token_count = self.num_regions + relation_count
         self.pos_embed = self.add_weight(
             name="pos_embed",
-            shape=(1, self.num_regions + relation_count, self.embed_dim),
+            shape=(1, self.region_token_count, self.embed_dim),
             initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
             trainable=True,
         )
@@ -301,7 +302,7 @@ class MGRConvNeXtFER(tf.keras.Model):
 
     def _pool_regions(self, encoded):
         if self.region_pooling == "concat":
-            return tf.reshape(encoded, [tf.shape(encoded)[0], -1])
+            return tf.reshape(encoded, [tf.shape(encoded)[0], self.region_token_count * self.embed_dim])
         return tf.reduce_mean(encoded, axis=1)
 
     def _apply_ablation(self, logits, cnn_aux_logits):
