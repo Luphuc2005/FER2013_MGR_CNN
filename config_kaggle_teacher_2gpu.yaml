@@ -91,7 +91,7 @@ model:
   cnn_aux_logit_weight: 0.8
   logit_fusion: "cnn_aux_sum"
   finetune_logit_fusion: "cnn_aux_sum"
-  freeze_backbone_epochs: 0
+  freeze_backbone_epochs: 4
   unfreeze_backbone: true
   freeze_unfrozen_batchnorm: true
   use_region_relation_tokens: true
@@ -112,8 +112,8 @@ model:
   ablation: "full"
 
 training:
-  epochs: 500
-  patience: 75
+  epochs: 50
+  patience: 20
   loss: "cross_entropy"
   label_smoothing: 0.05
   optimizer: "sam"
