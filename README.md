@@ -29,6 +29,27 @@ Neu chi muon dung 1 GPU:
 bash run_train_single_gpu.sh
 ```
 
+## Chay Kaggle 2 GPU
+
+Gan 2 Kaggle Dataset input nay vao notebook:
+
+- `/kaggle/input/datasets/doduyquynii/fer13-split`
+- `/kaggle/input/datasets/lhongphuc2/mediapipe-mask-datasets-35887`
+
+Chay:
+
+```bash
+chmod +x run_train_kaggle_2gpu.sh
+bash run_train_kaggle_2gpu.sh
+```
+
+Mac dinh Kaggle launcher dung 2 GPU, batch `2/GPU`, full dataset, output vao `/kaggle/working/outputs/...`.
+Neu muon thu batch lon hon:
+
+```bash
+MGR_PRIMARY_BATCH_SIZE_PER_GPU=4 bash run_train_kaggle_2gpu.sh
+```
+
 ## Kiem Tra Moi Truong
 
 ```bash

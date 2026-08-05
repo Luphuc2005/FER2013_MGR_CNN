@@ -55,6 +55,29 @@ def _safe_load_npy(path_str: str) -> np.ndarray:
     return np.ones((6, 7, 7), dtype=np.float32)
 
 
+def _resolve_split_csv_dir(data_dir: Path) -> Path:
+    if all((data_dir / f"{split}.csv").exists() for split in ("train", "val", "test")):
+        return data_dir
+    candidates = sorted({p.parent for p in data_dir.rglob("train.csv")})
+    for candidate in candidates:
+        if all((candidate / f"{split}.csv").exists() for split in ("train", "val", "test")):
+            print(f"[INFO] Resolved FER split CSV directory: {candidate}")
+            return candidate
+    return data_dir
+
+
+def _resolve_mask_split_dir(mask_root: Path, split: str) -> Path:
+    split_mask_dir = mask_root / split
+    if split_mask_dir.exists():
+        return split_mask_dir
+    candidates = sorted(p for p in mask_root.rglob(split) if p.is_dir())
+    for candidate in candidates:
+        if any(candidate.glob("*.npy")):
+            print(f"[INFO] Resolved mask directory for {split}: {candidate}")
+            return candidate
+    return split_mask_dir
+
+
 def collect_split_records(
     data_dir,
     split: str,
@@ -67,7 +90,7 @@ def collect_split_records(
     predecode_pixels: bool = False,
     preload_masks: bool = False,
 ) -> SplitRecords:
-    data_dir = Path(data_dir)
+    data_dir = _resolve_split_csv_dir(Path(data_dir))
     csv_path = data_dir / f"{split}.csv"
     if not csv_path.exists():
         raise FileNotFoundError(f"Missing split CSV: {csv_path}")
@@ -94,7 +117,7 @@ def collect_split_records(
         mask_root = Path(mask_dir)
         if not mask_root.is_absolute():
             mask_root = Path(__file__).resolve().parents[1] / mask_root
-        split_mask_dir = mask_root / split
+        split_mask_dir = _resolve_mask_split_dir(mask_root, split)
         if not split_mask_dir.exists():
             raise FileNotFoundError(f"Missing mask split directory: {split_mask_dir}")
         mask_paths = np.asarray([str(split_mask_dir / f"{int(i):06d}.npy") for i in sample_ids], dtype=str)
