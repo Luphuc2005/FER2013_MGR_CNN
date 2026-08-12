@@ -89,7 +89,6 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
             with tf.init_scope():
                 app = convnext_tiny(include_top=False, include_preprocessing=False, weights="imagenet")
                 dummy = tf.zeros([1, 224, 224, 3])
-                _ = app(dummy, training=False)
                 _ = self(dummy, training=False)
 
             stem_app = app.get_layer("convnext_tiny_stem")
@@ -245,6 +244,9 @@ class MGRConvNeXtFER(tf.keras.Model):
         self.use_global_visual_bias = bool(model_cfg.get("use_global_visual_bias", True))
         self.use_region_relation_tokens = bool(model_cfg.get("use_region_relation_tokens", True))
         self.use_cnn_aux_logits = bool(model_cfg.get("use_cnn_aux_logits", True))
+        self.cnn_aux_pooling = model_cfg.get("cnn_aux_pooling", "avg").lower()
+        if self.cnn_aux_pooling not in ("avg", "avgmax"):
+            raise ValueError("model.cnn_aux_pooling must be one of: avg, avgmax")
         self.cnn_aux_logit_weight = float(model_cfg.get("cnn_aux_logit_weight", 0.8))
         self.attention_logit_weight = float(model_cfg.get("attention_logit_weight", 0.2))
         self.ortho_loss_type = model_cfg.get("ortho_loss_type", "squared_offdiag")
@@ -253,6 +255,15 @@ class MGRConvNeXtFER(tf.keras.Model):
             weights=model_cfg.get("weights"),
             use_builtin_convnext=bool(model_cfg.get("use_builtin_convnext", False)),
         )
+        self.use_visual_pos_embed = bool(model_cfg.get("use_visual_pos_embed", True))
+        if self.use_visual_pos_embed:
+            _token_grid = int(model_cfg.get("token_grid_size", 7))
+            self.visual_pos_embed = self.add_weight(
+                name="visual_pos_embed",
+                shape=(1, _token_grid * _token_grid, self.visual_dim),
+                initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
+                trainable=True,
+            )
         self.region_dict = RegionDictionary(self.num_regions, self.embed_dim)
         self.cross_attention = CrossAttentionWithMask(
             self.embed_dim,
@@ -314,12 +325,19 @@ class MGRConvNeXtFER(tf.keras.Model):
             return self.attention_logit_weight * logits + self.cnn_aux_logit_weight * cnn_aux_logits
         return logits
 
+    def _cnn_aux_features(self, global_avg, global_max):
+        if self.cnn_aux_pooling == "avg":
+            return global_avg
+        return tf.concat([global_avg, global_max], axis=-1)
+
     def call(self, inputs, training=False, return_attn=False, return_region_weights=False):
         image = inputs["image"]
         mask = inputs.get("mask")
         feat_map = self.backbone(image, training=training)
         feat_map = tf.image.resize(feat_map, [7, 7])
         visual_tokens = tf.reshape(feat_map, [tf.shape(feat_map)[0], -1, self.visual_dim])
+        if self.use_visual_pos_embed:
+            visual_tokens = visual_tokens + self.visual_pos_embed
         global_avg = tf.reduce_mean(visual_tokens, axis=1)
         global_max = tf.reduce_max(visual_tokens, axis=1)
         region_tokens = self.region_dict(tf.shape(image)[0])
@@ -340,14 +358,22 @@ class MGRConvNeXtFER(tf.keras.Model):
         logits = self.classifier(self._pool_regions(encoded), training=training)
         cnn_aux_logits = None
         if self.cnn_aux_classifier is not None:
-            cnn_aux_logits = self.cnn_aux_classifier(tf.concat([global_avg, global_max], axis=-1), training=training)
+            cnn_aux_logits = self.cnn_aux_classifier(
+                self._cnn_aux_features(global_avg, global_max),
+                training=training,
+            )
         fused_logits = self._apply_ablation(logits, cnn_aux_logits)
         attn_region = tf.reduce_mean(attn_scores, axis=1)
         attn_norm = tf.math.divide_no_nan(attn_region, tf.norm(attn_region, ord=2, axis=-1, keepdims=True))
         sim = tf.matmul(attn_norm, attn_norm, transpose_b=True)
         eye = tf.eye(tf.shape(sim)[-1], batch_shape=[tf.shape(sim)[0]], dtype=sim.dtype)
-        off_diag = tf.where(tf.cast(1.0 - eye, tf.bool), sim, tf.zeros_like(sim))
-        ortho_loss = tf.reduce_mean(tf.square(off_diag)) if self.ortho_loss_type == "squared_offdiag" else tf.reduce_mean(off_diag)
+        off_diag_mask = 1.0 - eye
+        off_diag_vals = sim * off_diag_mask
+        off_diag_count = tf.maximum(tf.reduce_sum(off_diag_mask), 1.0)
+        if self.ortho_loss_type == "squared_offdiag":
+            ortho_loss = tf.reduce_sum(tf.square(off_diag_vals)) / off_diag_count
+        else:
+            ortho_loss = tf.reduce_sum(off_diag_vals) / off_diag_count
         outputs = {
             "logits": fused_logits,
             "attention_logits": logits,

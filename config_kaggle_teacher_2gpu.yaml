@@ -14,13 +14,15 @@ runtime:
   require_two_gpus: true
   min_gpus: 2
   memory_growth: true
-  intra_op_threads: 4
-  inter_op_threads: 2
+  intra_op_threads: 16
+  inter_op_threads: 4
   tf_data_num_parallel_calls: 4
   tf_data_private_threadpool_size: 4
   tf_data_deterministic: false
   prefetch_buffer: 1
   distributed_eval: true
+  eval_tta_hflip: true
+  train_val_tta_hflip: false
 
 data:
   data_path: "/kaggle/input/datasets/doduyquynii/fer13-split"
@@ -29,8 +31,8 @@ data:
   image_size: 224
   channels: 3
   normalize: true
-  predecode_pixels: false
-  preload_masks: false
+  predecode_pixels: true
+  preload_masks: true
   allow_missing_masks: false
   use_clean_filter: false
   bad_row_indices_path:
@@ -51,6 +53,7 @@ augmentation:
   random_erasing_prob: 0.4
   random_erasing_area_min: 0.02
   random_erasing_area_max: 0.15
+  random_erasing_value: "random"
 
 model:
   name: "convnext_tiny_mask_guided_region_attention"
@@ -85,6 +88,7 @@ model:
   mask_ablation: "none"
   use_cnn_aux_loss: true
   use_cnn_aux_logits: true
+  cnn_aux_pooling: "avg"
   cnn_aux_loss_weight: 0.4
   cnn_aux_hidden_dim: 768
   cnn_aux_dropout: 0.2
@@ -113,8 +117,8 @@ model:
   ablation: "full"
 
 training:
-  epochs: 50
-  patience: 20
+  epochs: 300
+  patience: 15
   loss: "cross_entropy"
   label_smoothing: 0.05
   optimizer: "sam"
@@ -123,16 +127,17 @@ training:
   sam_adaptive: false
   lr: 0.0002
   finetune_lr: 0.00008
-  visual_extractor_lr: 0.0001
+  visual_extractor_lr: 0.000008
   weight_decay: 0.02
   scheduler: "cosine"
   grad_clip_norm: 1.0
   skip_nonfinite_batches: true
   monitor: "val_accuracy"
   resume: false
-  periodic_checkpoint_interval: 10
+  best_checkpoint_start_epoch: 20
+  periodic_checkpoint_interval: 20
   progress_interval: 100
 
 paths:
-  output_dir: "/kaggle/working/outputs/tf_runs/c_relation_tokens_080_020_kaggle_teacher_2gpu"
+  output_dir: "/kaggle/working/outputs/tf_runs/c_relation_tokens_080_020_kaggle_teacher_2gpu_batch16pergpu"
   logs_dir: "/kaggle/working/logs"

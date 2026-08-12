@@ -17,6 +17,8 @@ def parse_args():
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--split", default="test", choices=["val", "test"])
+    parser.add_argument("--tta-hflip", action="store_true", help="Average logits from original and horizontal-flip inputs.")
+    parser.add_argument("--no-tta-hflip", action="store_true", help="Disable hflip TTA even when enabled in config.")
     return parser.parse_args()
 
 
@@ -47,9 +49,16 @@ def main() -> int:
         ckpt.restore(checkpoint_path).expect_partial()
         print(f"Restored: {checkpoint_path}")
     eval_strategy = strategy if bool(cfg["runtime"].get("distributed_eval", False)) else None
-    metrics = evaluate_dataset(model, dataset, cfg, strategy=eval_strategy)
-    out = Path(cfg["paths"]["output_dir"]) / f"{args.split}_metrics.json"
+    use_tta_hflip = bool(cfg["runtime"].get("eval_tta_hflip", False))
+    if args.tta_hflip:
+        use_tta_hflip = True
+    if args.no_tta_hflip:
+        use_tta_hflip = False
+    metrics = evaluate_dataset(model, dataset, cfg, strategy=eval_strategy, use_tta_hflip=use_tta_hflip)
+    suffix = "_tta_hflip" if use_tta_hflip else "_no_tta"
+    out = Path(cfg["paths"]["output_dir"]) / f"{args.split}_metrics{suffix}.json"
     save_metrics(metrics, out)
+    save_metrics(metrics, Path(cfg["paths"]["output_dir"]) / f"{args.split}_metrics.json")
     print(metrics)
     return 0
 

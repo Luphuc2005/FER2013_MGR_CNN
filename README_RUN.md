@@ -39,7 +39,7 @@ Script sẽ:
 - nếu hết VRAM thì tự retry 4/GPU
 - train full dataset, không giới hạn số mẫu
 - giảm `shuffle_buffer`, `prefetch` và số luồng đọc dữ liệu để tránh RAM tăng dần
-- không preload pixel/mask mặc định để tránh spike RAM cuối đầu run
+- preload pixel/mask mặc định để giảm nghẽn input pipeline; vẫn giữ `cache=0` để tránh RAM tăng theo ảnh 224 float32
 - mặc định không bật `numactl` để tránh lỗi quyền trên server; có thể bật thủ công sau khi chạy ổn định
 - lưu log vào `logs/`
 - lưu checkpoint vào `outputs/tf_runs/c_relation_tokens_080_020_tf/checkpoints/`
@@ -54,8 +54,8 @@ MGR_TF_DATA_NUM_PARALLEL_CALLS=4
 MGR_TF_DATA_PRIVATE_THREADPOOL_SIZE=4
 MGR_PREFETCH_BUFFER=1
 MGR_SHUFFLE_BUFFER=512
-MGR_PREDECODE_PIXELS=0
-MGR_PRELOAD_MASKS=0
+MGR_PREDECODE_PIXELS=1
+MGR_PRELOAD_MASKS=1
 MGR_CACHE_DATA=0
 ```
 
@@ -65,13 +65,13 @@ Nếu máy bị lag khi đang dùng việc khác, có thể giảm thread trư�
 MGR_TF_DATA_NUM_PARALLEL_CALLS=2 MGR_TF_DATA_PRIVATE_THREADPOOL_SIZE=2 MGR_PRIMARY_BATCH_SIZE_PER_GPU=1 bash run_train.sh
 ```
 
-Nếu đã chạy ổn định nhiều epoch và RAM không tăng bất thường, có thể thử profile nhanh hơn:
+Nếu muốn tắt preload để giảm spike RAM lúc đầu run:
 
 ```bash
-MGR_PRIMARY_BATCH_SIZE_PER_GPU=4 MGR_TF_DATA_NUM_PARALLEL_CALLS=8 MGR_TF_DATA_PRIVATE_THREADPOOL_SIZE=8 MGR_PREFETCH_BUFFER=1 bash run_train.sh
+MGR_PREDECODE_PIXELS=0 MGR_PRELOAD_MASKS=0 bash run_train.sh
 ```
 
-Neu muon ép đúng batch 16/GPU theo file C gốc, chỉ thử sau khi batch 2/GPU đã ổn định:
+Neu muon thử batch 16/GPU, đây là batch lớn hơn file C batch16 gốc:
 
 ```bash
 MGR_PRIMARY_BATCH_SIZE_PER_GPU=16 MGR_FALLBACK_BATCH_SIZE_PER_GPU=8 bash run_train.sh

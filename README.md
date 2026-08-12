@@ -23,8 +23,8 @@ chmod +x run_train.sh run_train_single_gpu.sh run_eval.sh
 bash run_train.sh
 ```
 
-Mac dinh `run_train.sh` phu hop may Linux 2 GPU ~6GB/GPU: batch `2/GPU`, fallback `1/GPU`,
-full dataset, khong cache/preload data de tranh tang RAM.
+Mac dinh `run_train.sh` phu hop may Linux 2 GPU ~6GB/GPU va bam theo file C-relation batch16:
+batch `8/GPU`, global batch `16`, fallback `4/GPU`, full dataset, preload pixel/mask va khong cache.
 
 Neu data/mask nam o path rieng tren may giang vien:
 
@@ -54,11 +54,11 @@ chmod +x run_train_kaggle_2gpu.sh
 bash run_train_kaggle_2gpu.sh
 ```
 
-Mac dinh Kaggle launcher dung 2 GPU, batch `2/GPU`, full dataset, output vao `/kaggle/working/outputs/...`.
-Neu muon thu batch lon hon:
+Mac dinh Kaggle launcher dung 2 GPU, batch `16/GPU`, global batch `32`, fallback `8/GPU`, bat final hflip TTA, full dataset, output vao `/kaggle/working/outputs/...`.
+Neu muon ha batch de tranh OOM:
 
 ```bash
-MGR_PRIMARY_BATCH_SIZE_PER_GPU=4 bash run_train_kaggle_2gpu.sh
+MGR_PRIMARY_BATCH_SIZE_PER_GPU=8 MGR_FALLBACK_BATCH_SIZE_PER_GPU=4 bash run_train_kaggle_2gpu.sh
 ```
 
 ## Kiem Tra Moi Truong

@@ -205,6 +205,21 @@ def cosine_lr(base_lr: float, epoch: int, epochs: int, min_lr: float = 1e-6) -> 
     return float(min_lr + (base_lr - min_lr) * cosine)
 
 
+def resolve_phase_lrs(cfg: Dict, epoch: int, train_backbone: bool) -> Tuple[float, float]:
+    training_cfg = cfg["training"]
+    total_epochs = int(training_cfg["epochs"])
+    if train_backbone:
+        freeze_epochs = int(cfg["model"].get("freeze_backbone_epochs", 0) or 0)
+        phase_epoch = max(0, int(epoch) - freeze_epochs)
+        head_base_lr = float(training_cfg.get("finetune_lr", training_cfg["lr"]))
+        visual_base_lr = float(training_cfg.get("visual_extractor_lr", head_base_lr))
+        return (
+            cosine_lr(head_base_lr, phase_epoch, total_epochs),
+            cosine_lr(visual_base_lr, phase_epoch, total_epochs),
+        )
+    return cosine_lr(float(training_cfg["lr"]), int(epoch), total_epochs), 0.0
+
+
 def resolve_monitor_value(metrics: Dict[str, object], monitor_name: str) -> float:
     aliases = {
         "val_macro_f1": "macro_f1",
@@ -218,6 +233,18 @@ def resolve_monitor_value(metrics: Dict[str, object], monitor_name: str) -> floa
         raise KeyError(f"Monitor {monitor_name!r} resolved to {key!r}, but metric is not available.")
     value = float(metrics[key])
     return -value if key == "loss" else value
+
+
+def classification_ce_loss(labels, logits, num_classes: int, label_smoothing: float):
+    y_true = tf.one_hot(tf.cast(labels, tf.int32), int(num_classes))
+    return tf.reduce_mean(
+        tf.keras.losses.categorical_crossentropy(
+            y_true,
+            logits,
+            from_logits=True,
+            label_smoothing=float(label_smoothing),
+        )
+    )
 
 
 def make_step_function(
@@ -250,9 +277,13 @@ def make_step_function(
         count = tf.shape(labels)[0]
         return correct, count
 
-    def _apply_gradients(grads, trainable_vars):
+    def _clip_gradients(grads):
         if grad_clip_norm:
             grads, _ = tf.clip_by_global_norm(grads, grad_clip_norm)
+        return grads
+
+    def _apply_gradients(grads, trainable_vars):
+        grads = _clip_gradients(grads)
         backbone_ids = {variable_key(v) for v in backbone_vars}
         head_grads = [(g, v) for g, v in zip(grads, trainable_vars) if variable_key(v) not in backbone_ids and g is not None]
         backbone_grads = [(g, v) for g, v in zip(grads, trainable_vars) if variable_key(v) in backbone_ids and g is not None]
@@ -282,6 +313,7 @@ def make_step_function(
             correct, count = _batch_stats(outputs, labels)
             return raw_loss, correct, count, tf.constant(1, tf.int32)
 
+        grads = _clip_gradients(grads)
         grad_norm = tf.linalg.global_norm([g for g in grads if g is not None])
 
         eps_list = []
@@ -319,8 +351,8 @@ def make_step_function(
             grads_2 = [tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) if g is not None else None for g in grads_2]
 
         _apply_gradients(grads_2, trainable_vars)
-        correct, count = _batch_stats(outputs_2, labels)
-        return raw_loss_2, correct, count, tf.constant(1, tf.int32)
+        correct, count = _batch_stats(outputs, labels)
+        return raw_loss, correct, count, tf.constant(1, tf.int32)
 
     def train_step_head(features, labels):
         return _step_impl(features, labels, head_vars)
@@ -349,19 +381,30 @@ def evaluate_dataset(
     dataset: tf.data.Dataset,
     cfg: Dict,
     strategy: Optional[tf.distribute.Strategy] = None,
+    use_tta_hflip: bool = False,
 ) -> Dict[str, object]:
+    def _forward_logits(inputs):
+        outputs = model(inputs, training=False)
+        logits = outputs["logits"]
+        if not use_tta_hflip:
+            return logits
+        flipped_inputs = dict(inputs)
+        flipped_inputs["image"] = tf.image.flip_left_right(inputs["image"])
+        if "mask" in inputs:
+            flipped_inputs["mask"] = tf.image.flip_left_right(inputs["mask"])
+        flipped_outputs = model(flipped_inputs, training=False)
+        return (logits + flipped_outputs["logits"]) * 0.5
+
     @tf.function(reduce_retracing=True, jit_compile=False)
     def _eval_step(inputs, labels):
-        outputs = model(inputs, training=False)
-        loss, _ = supervised_mgr_loss(
+        logits = _forward_logits(inputs)
+        loss = classification_ce_loss(
             labels,
-            outputs,
+            logits,
             num_classes=cfg["data"]["num_classes"],
             label_smoothing=float(cfg["training"].get("label_smoothing", 0.0)),
-            ortho_weight=float(cfg["model"].get("ortho_loss_weight", 0.003)),
-            cnn_aux_weight=float(cfg["model"].get("cnn_aux_loss_weight", 0.4)),
         )
-        preds = tf.argmax(outputs["logits"], axis=-1, output_type=tf.int32)
+        preds = tf.argmax(logits, axis=-1, output_type=tf.int32)
         return loss, tf.shape(labels)[0], preds, labels
 
     y_true: List[int] = []
@@ -396,6 +439,7 @@ def evaluate_dataset(
                 y_pred.extend(preds_tensor.numpy().tolist())
         metrics = classification_metrics(y_true, y_pred, EMOTION_NAMES)
         metrics["loss"] = total_loss / max(total_count, 1)
+        metrics["tta_hflip"] = bool(use_tta_hflip)
         return metrics
 
     for batch in dataset:
@@ -410,6 +454,7 @@ def evaluate_dataset(
         del loss, count, preds, inputs, labels
     metrics = classification_metrics(y_true, y_pred, EMOTION_NAMES)
     metrics["loss"] = total_loss / max(total_count, 1)
+    metrics["tta_hflip"] = bool(use_tta_hflip)
     gc.collect()
     return metrics
 
@@ -517,18 +562,27 @@ def main() -> int:
     monitor_name = str(cfg["training"].get("monitor", "val_macro_f1"))
     best_score = float(ckpt_best_metric.numpy())
     best_epoch = start_epoch if best_score >= 0.0 else -1
+    best_checkpoint_start_epoch = int(cfg["training"].get("best_checkpoint_start_epoch", 1) or 1)
+    patience_anchor_epoch = best_epoch if best_score >= 0.0 else max(start_epoch, best_checkpoint_start_epoch - 1)
     history = []
     csv_path = run_dir / "training_history.csv"
     progress_interval = int(cfg["training"].get("progress_interval", 0) or 0)
     periodic_interval = int(cfg["training"].get("periodic_checkpoint_interval", 10) or 0)
     eval_strategy = strategy if bool(cfg["runtime"].get("distributed_eval", False)) else None
+    freeze_epochs = int(cfg["model"].get("freeze_backbone_epochs", 0) or 0)
     for epoch in range(start_epoch, int(cfg["training"]["epochs"])):
-        train_backbone = bool(cfg["model"].get("unfreeze_backbone", True)) and epoch >= int(cfg["model"].get("freeze_backbone_epochs", 0) or 0)
+        train_backbone = bool(cfg["model"].get("unfreeze_backbone", True)) and epoch >= freeze_epochs
+        phase_transitioned = bool(train_backbone and epoch == freeze_epochs)
+        if phase_transitioned:
+            patience_anchor_epoch = epoch + 1
+            print(
+                f"[INFO] Unfreezing backbone at epoch {epoch+1}; resetting early-stopping patience counter",
+                flush=True,
+            )
         train_step = train_step_full if train_backbone else train_step_head
         distributed_train_step = distributed_train_step_full if train_backbone else distributed_train_step_head
-        lr = cosine_lr(float(cfg["training"]["lr"]), epoch, int(cfg["training"]["epochs"]))
+        lr, backbone_lr = resolve_phase_lrs(cfg, epoch, train_backbone)
         set_optimizer_lr(optimizer_head, lr)
-        backbone_lr = float(cfg["training"].get("visual_extractor_lr", lr)) if train_backbone else float(cfg["training"]["lr"])
         set_optimizer_lr(optimizer_backbone, backbone_lr)
         losses = []
         correct = 0
@@ -553,16 +607,30 @@ def main() -> int:
         train_loss = float(np.mean(losses)) if losses else float("nan")
         train_acc = correct / max(seen, 1)
         print(f"[INFO] Epoch {epoch+1}: starting validation", flush=True)
-        val_metrics = evaluate_dataset(model, val_ds, cfg, strategy=eval_strategy)
+        val_metrics = evaluate_dataset(
+            model,
+            val_ds,
+            cfg,
+            strategy=eval_strategy,
+            use_tta_hflip=bool(cfg["runtime"].get("train_val_tta_hflip", False)),
+        )
         print(f"[INFO] Epoch {epoch+1}: validation finished", flush=True)
         monitor = resolve_monitor_value(val_metrics, monitor_name)
-        improved = monitor > best_score
+        checkpoint_eligible = (epoch + 1) >= best_checkpoint_start_epoch
+        improved = bool(checkpoint_eligible and monitor > best_score)
         if improved:
             best_score = monitor
             best_epoch = epoch + 1
+            patience_anchor_epoch = epoch + 1
             ckpt_best_metric.assign(best_score)
             print(f"[INFO] Epoch {epoch+1}: saving best checkpoint", flush=True)
             best_manager.save(checkpoint_number=epoch + 1)
+        elif not checkpoint_eligible:
+            print(
+                f"[INFO] Epoch {epoch+1}: best checkpoint is not considered before epoch "
+                f"{best_checkpoint_start_epoch}",
+                flush=True,
+            )
         ckpt_epoch.assign(epoch + 1)
         print(f"[INFO] Epoch {epoch+1}: saving last checkpoint", flush=True)
         last_manager.save(checkpoint_number=epoch + 1)
@@ -570,7 +638,7 @@ def main() -> int:
             print(f"[INFO] Epoch {epoch+1}: saving periodic checkpoint", flush=True)
             periodic_manager.save(checkpoint_number=epoch + 1)
         patience_limit = int(cfg["training"].get("patience", 75))
-        patience_counter = (epoch + 1) - best_epoch
+        patience_counter = 0 if not checkpoint_eligible else (epoch + 1) - patience_anchor_epoch
         row = {
             "epoch": epoch + 1,
             "train_loss": train_loss,
@@ -585,7 +653,10 @@ def main() -> int:
             "monitor_value": monitor,
             "best_monitor_value": best_score,
             "best_epoch": best_epoch,
+            "checkpoint_eligible": int(checkpoint_eligible),
+            "best_checkpoint_start_epoch": best_checkpoint_start_epoch,
             "patience": f"{patience_counter}/{patience_limit}",
+            "phase_transitioned": int(phase_transitioned),
             "improved": int(improved),
         }
         history.append(row)
@@ -616,7 +687,14 @@ def main() -> int:
     if best_ckpt:
         checkpoint.restore(best_ckpt).expect_partial()
     print("[INFO] Starting final test evaluation", flush=True)
-    test_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy)
+    use_final_tta = bool(cfg["runtime"].get("eval_tta_hflip", False))
+    if use_final_tta:
+        print("[INFO] Saving no-TTA test metrics before TTA hflip evaluation", flush=True)
+        no_tta_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=False)
+        save_metrics(no_tta_metrics, run_dir / "test_metrics_no_tta.json")
+        print("[INFO] Running final test evaluation with hflip TTA", flush=True)
+    test_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=use_final_tta)
+    save_metrics(test_metrics, run_dir / ("test_metrics_tta_hflip.json" if use_final_tta else "test_metrics_no_tta.json"))
     save_metrics(test_metrics, run_dir / "test_metrics.json")
     print(json.dumps(test_metrics, indent=2))
     return 0

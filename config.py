@@ -120,6 +120,11 @@ def apply_env_overrides(cfg: Dict[str, Any]) -> None:
     )
     runtime["prefetch_buffer"] = _env_int("MGR_PREFETCH_BUFFER", runtime.get("prefetch_buffer"))
     runtime["distributed_eval"] = _env_bool("MGR_DISTRIBUTED_EVAL", bool(runtime.get("distributed_eval", False)))
+    runtime["eval_tta_hflip"] = _env_bool("MGR_EVAL_TTA_HFLIP", bool(runtime.get("eval_tta_hflip", False)))
+    runtime["train_val_tta_hflip"] = _env_bool(
+        "MGR_TRAIN_VAL_TTA_HFLIP",
+        bool(runtime.get("train_val_tta_hflip", False)),
+    )
     data["data_path"] = _env_str("MGR_DATA_PATH", data.get("data_path"))
     data["mask_dir"] = _env_str("MGR_MASK_DIR", data.get("mask_dir"))
     data["predecode_pixels"] = _env_bool("MGR_PREDECODE_PIXELS", bool(data.get("predecode_pixels", False)))
@@ -135,6 +140,10 @@ def apply_env_overrides(cfg: Dict[str, Any]) -> None:
     data["max_test_samples"] = _env_int("MGR_MAX_TEST_SAMPLES", data.get("max_test_samples"))
     training["epochs"] = _env_int("MGR_EPOCHS", training.get("epochs"))
     training["patience"] = _env_int("MGR_PATIENCE", training.get("patience"))
+    training["best_checkpoint_start_epoch"] = _env_int(
+        "MGR_BEST_CHECKPOINT_START_EPOCH",
+        training.get("best_checkpoint_start_epoch"),
+    )
     cfg["paths"]["output_dir"] = _env_str("MGR_OUTPUT_DIR", cfg["paths"].get("output_dir"))
     cfg["paths"]["logs_dir"] = _env_str("MGR_LOGS_DIR", cfg["paths"].get("logs_dir"))
     resolve_paths(cfg)

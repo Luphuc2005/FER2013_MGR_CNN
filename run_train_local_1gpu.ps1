@@ -79,6 +79,9 @@ $env:MGR_TF_DATA_NUM_PARALLEL_CALLS = "1"
 $env:MGR_TF_DATA_PRIVATE_THREADPOOL_SIZE = "1"
 $env:MGR_TF_DATA_DETERMINISTIC = "0"
 $env:MGR_PREFETCH_BUFFER = "1"
+$env:MGR_PREDECODE_PIXELS = "1"
+$env:MGR_PRELOAD_MASKS = "1"
+$env:MGR_ALLOW_MISSING_MASKS = "0"
 $env:MGR_USE_TFA_ADAMW = "0"
 
 New-Item -ItemType Directory -Force logs | Out-Null
@@ -91,6 +94,7 @@ if ($AllowCpu) {
 }
 Write-Host "[INFO] epochs=$Epochs batch_size_per_gpu=$BatchSizePerGpu"
 Write-Host "[INFO] max_train_samples=$MaxTrainSamples max_val_samples=$MaxValSamples max_test_samples=$MaxTestSamples"
+Write-Host "[INFO] predecode_pixels=$env:MGR_PREDECODE_PIXELS preload_masks=$env:MGR_PRELOAD_MASKS"
 Write-Host "[INFO] log=$LogPath"
 Write-Host "[INFO] python=$PythonBin"
 

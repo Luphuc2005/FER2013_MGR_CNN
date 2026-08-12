@@ -84,16 +84,27 @@ def _resolve_split_csv_dir(data_dir: Path) -> Path:
     return data_dir
 
 
-def _resolve_mask_split_dir(mask_root: Path, split: str) -> Path:
-    split_mask_dir = mask_root / split
-    if split_mask_dir.exists():
-        return split_mask_dir
-    candidates = sorted(p for p in mask_root.rglob(split) if p.is_dir())
-    for candidate in candidates:
-        if any(candidate.glob("*.npy")):
-            print(f"[INFO] Resolved mask directory for {split}: {candidate}")
-            return candidate
-    return split_mask_dir
+def _mask_coverage(split_mask_dir: Path, sample_ids: np.ndarray) -> int:
+    if not split_mask_dir.exists():
+        return -1
+    return sum((split_mask_dir / f"{int(i):06d}.npy").exists() for i in sample_ids)
+
+
+def _resolve_mask_split_dir(mask_root: Path, split: str, sample_ids: np.ndarray) -> Path:
+    direct = mask_root / split
+    candidates = [direct]
+    if mask_root.exists():
+        candidates.extend(sorted(p for p in mask_root.rglob(split) if p.is_dir() and p != direct))
+
+    scored = [(candidate, _mask_coverage(candidate, sample_ids)) for candidate in candidates]
+    best_dir, best_count = max(scored, key=lambda item: item[1])
+    direct_count = _mask_coverage(direct, sample_ids)
+    if best_dir != direct:
+        print(
+            f"[INFO] Resolved mask directory for {split}: {best_dir} "
+            f"({best_count}/{len(sample_ids)} masks; direct had {direct_count}/{len(sample_ids)})"
+        )
+    return best_dir
 
 
 def collect_split_records(
@@ -136,7 +147,7 @@ def collect_split_records(
         mask_root = Path(mask_dir)
         if not mask_root.is_absolute():
             mask_root = Path(__file__).resolve().parents[1] / mask_root
-        split_mask_dir = _resolve_mask_split_dir(mask_root, split)
+        split_mask_dir = _resolve_mask_split_dir(mask_root, split, sample_ids)
         if not split_mask_dir.exists():
             raise FileNotFoundError(f"Missing mask split directory: {split_mask_dir}")
         mask_paths = np.asarray([str(split_mask_dir / f"{int(i):06d}.npy") for i in sample_ids], dtype=str)
@@ -210,9 +221,17 @@ def _random_erasing(image: tf.Tensor, seed: tf.Tensor, cfg: Dict) -> tf.Tensor:
         side = tf.clip_by_value(tf.cast(tf.sqrt(erase_area), tf.int32), 1, tf.minimum(h, w))
         y = tf.random.stateless_uniform([], seed + [11, 17], minval=0, maxval=tf.maximum(h - side + 1, 1), dtype=tf.int32)
         x = tf.random.stateless_uniform([], seed + [13, 19], minval=0, maxval=tf.maximum(w - side + 1, 1), dtype=tf.int32)
-        patch = tf.zeros([side, side, c], image.dtype)
-        mask = tf.pad(patch, [[y, h - y - side], [x, w - x - side], [0, 0]], constant_values=1.0)
-        return image * mask
+        erase_shape = [side, side, c]
+        value = str(cfg.get("random_erasing_value", "random")).lower()
+        patch = (
+            tf.random.stateless_normal(erase_shape, seed=seed + [23, 31], dtype=image.dtype)
+            if value == "random"
+            else tf.zeros(erase_shape, image.dtype)
+        )
+        keep = tf.ones_like(image)
+        erase_mask = tf.pad(tf.zeros(erase_shape, image.dtype), [[y, h - y - side], [x, w - x - side], [0, 0]], constant_values=1.0)
+        patch = tf.pad(patch, [[y, h - y - side], [x, w - x - side], [0, 0]], constant_values=0.0)
+        return image * erase_mask + patch * (keep - erase_mask)
     return tf.cond(draw < prob, erase, lambda: image)
 
 
@@ -258,10 +277,18 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
     if degrees > 0.0:
         angle = tf.random.stateless_uniform([], seed=seed + [5, 9], minval=-degrees, maxval=degrees)
         radians = angle * np.pi / 180.0
-        image = _rotate_tensor(image, radians, interpolation="BILINEAR")
+        image = _rotate_tensor(image, radians, interpolation="NEAREST")
         if mask is not None:
             mask = tf.clip_by_value(_rotate_tensor(mask, radians, interpolation="BILINEAR"), 0.0, 1.0)
-    image = tf.image.stateless_random_brightness(image, max_delta=float(aug_cfg.get("brightness_delta", 0.0)), seed=seed + [17, 23])
+    brightness_delta = float(aug_cfg.get("brightness_delta", 0.0))
+    if brightness_delta > 0.0:
+        brightness = tf.random.stateless_uniform(
+            [],
+            seed=seed + [17, 23],
+            minval=max(0.0, 1.0 - brightness_delta),
+            maxval=1.0 + brightness_delta,
+        )
+        image = image * brightness
     image = tf.image.stateless_random_contrast(image, lower=float(aug_cfg.get("contrast_lower", 1.0)), upper=float(aug_cfg.get("contrast_upper", 1.0)), seed=seed + [19, 29])
     image = tf.clip_by_value(image, 0.0, 255.0)
     gamma_prob = float(aug_cfg.get("gamma_prob", 0.0))
@@ -271,8 +298,7 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
             gamma = tf.random.stateless_uniform([], seed=seed + [41, 43], minval=float(aug_cfg.get("gamma_min", 0.5)), maxval=float(aug_cfg.get("gamma_max", 2.0)))
             return tf.image.adjust_gamma(tf.clip_by_value(image, 0.0, 255.0) / 255.0, gamma=gamma) * 255.0
         image = tf.cond(use_gamma, gamma_aug, lambda: image)
-    image = _random_erasing(tf.clip_by_value(image, 0.0, 255.0), seed + [47, 53], aug_cfg)
-    return image, mask
+    return tf.clip_by_value(image, 0.0, 255.0), mask
 
 
 def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dict, split: str):
@@ -293,7 +319,11 @@ def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dic
             cfg["data"].get("mask_region_permutation"),
         )
     image, mask = _augment_pair(image, mask, sample_id, cfg["augmentation"], split)
-    features = {"image": _normalize_image(image, int(cfg["data"]["channels"]))}
+    image = _normalize_image(image, int(cfg["data"]["channels"]))
+    if split == "train":
+        erase_seed = tf.stack([tf.cast(sample_id, tf.int32), tf.constant(89, tf.int32)])
+        image = _random_erasing(image, erase_seed, cfg["augmentation"])
+    features = {"image": image}
     if mask is not None:
         features["mask"] = mask
     return features, tf.cast(label, tf.int32)
