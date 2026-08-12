@@ -9,8 +9,8 @@ source:
 
 runtime:
   gpu_ids: [0, 1]
-  batch_size_per_gpu: 16
-  fallback_batch_size_per_gpu: 8
+  batch_size_per_gpu: 64
+  fallback_batch_size_per_gpu: 32
   require_two_gpus: true
   min_gpus: 2
   memory_growth: true
@@ -117,8 +117,8 @@ model:
   ablation: "full"
 
 training:
-  epochs: 300
-  patience: 15
+  epochs: 60
+  patience: 20
   loss: "cross_entropy"
   label_smoothing: 0.05
   optimizer: "sam"
