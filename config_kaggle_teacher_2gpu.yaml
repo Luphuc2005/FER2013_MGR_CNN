@@ -38,7 +38,7 @@ data:
   bad_row_indices_path:
   mask_ablation: "none"
   mask_region_permutation: [4, 2, 0, 5, 1, 3]
-  shuffle_buffer: 512
+  shuffle_buffer: 28709
   cache: false
 
 augmentation:
@@ -117,8 +117,8 @@ model:
   ablation: "full"
 
 training:
-  epochs: 60
-  patience: 20
+  epochs: 70
+  patience: 15
   loss: "cross_entropy"
   label_smoothing: 0.05
   optimizer: "sam"
@@ -134,10 +134,10 @@ training:
   skip_nonfinite_batches: true
   monitor: "val_accuracy"
   resume: false
-  best_checkpoint_start_epoch: 20
+  best_checkpoint_start_epoch: 1
   periodic_checkpoint_interval: 20
   progress_interval: 100
 
 paths:
-  output_dir: "/kaggle/working/outputs/tf_runs/c_relation_tokens_080_020_kaggle_teacher_2gpu_batch16pergpu"
+  output_dir: "/kaggle/working/outputs/tf_runs/c_relation_tokens_080_020_kaggle_teacher_2gpu_parityfix"
   logs_dir: "/kaggle/working/logs"

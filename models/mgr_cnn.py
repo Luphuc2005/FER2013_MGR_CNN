@@ -5,8 +5,8 @@ from typing import Dict, Optional, Sequence
 import tensorflow as tf
 
 
-def _norm():
-    return tf.keras.layers.LayerNormalization(epsilon=1e-6)
+def _norm(epsilon: float = 1e-6):
+    return tf.keras.layers.LayerNormalization(epsilon=epsilon)
 
 
 class DropPath(tf.keras.layers.Layer):
@@ -126,7 +126,11 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
 class RegionDictionary(tf.keras.layers.Layer):
     def __init__(self, num_regions: int, embed_dim: int):
         super().__init__()
-        self.embedding = tf.keras.layers.Embedding(num_regions, embed_dim)
+        self.embedding = tf.keras.layers.Embedding(
+            num_regions,
+            embed_dim,
+            embeddings_initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
+        )
 
     def call(self, batch_size):
         ids = tf.range(self.embedding.input_dim, dtype=tf.int32)
@@ -149,14 +153,15 @@ class CrossAttentionWithMask(tf.keras.layers.Layer):
         self.k_proj = tf.keras.layers.Dense(embed_dim)
         self.v_proj = tf.keras.layers.Dense(embed_dim)
         self.out_proj = tf.keras.layers.Dense(embed_dim)
-        self.drop = tf.keras.layers.Dropout(dropout)
-        self.norm1 = _norm()
+        self.attn_drop = tf.keras.layers.Dropout(dropout)
+        self.drop_path = DropPath(dropout if dropout > 0.0 else 0.0)
+        self.norm1 = _norm(1e-5)
         self.ffn = tf.keras.Sequential([
             tf.keras.layers.Dense(embed_dim * 2, activation=tf.nn.gelu),
             tf.keras.layers.Dropout(dropout),
             tf.keras.layers.Dense(embed_dim),
         ])
-        self.norm2 = _norm()
+        self.norm2 = _norm(1e-5)
 
     def _split(self, x):
         b = tf.shape(x)[0]
@@ -177,12 +182,12 @@ class CrossAttentionWithMask(tf.keras.layers.Layer):
             mask = tf.clip_by_value(region_masks, self.mask_floor, 1.0)
             scores = scores + tf.expand_dims(tf.math.log(mask + 1e-6) * self.mask_attention_alpha, axis=1)
         attn = tf.nn.softmax(scores, axis=-1)
-        attn = self.drop(attn, training=training)
+        attn = self.attn_drop(attn, training=training)
         context = tf.einsum("bhqk,bhkd->bhqd", attn, v)
         context = self._merge(context)
-        x = self.norm1(region_tokens + self.drop(self.out_proj(context), training=training))
+        x = self.norm1(region_tokens + self.drop_path(self.out_proj(context), training=training))
         y = self.ffn(x, training=training)
-        return self.norm2(x + self.drop(y, training=training)), attn
+        return self.norm2(x + self.drop_path(y, training=training)), attn
 
 
 class TransformerEncoderBlock(tf.keras.layers.Layer):
@@ -190,13 +195,13 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         super().__init__()
         self.mha = tf.keras.layers.MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim // num_heads, dropout=dropout)
         self.drop = tf.keras.layers.Dropout(dropout)
-        self.norm1 = _norm()
+        self.norm1 = _norm(1e-5)
         self.ffn = tf.keras.Sequential([
             tf.keras.layers.Dense(embed_dim * 2, activation=tf.nn.gelu),
             tf.keras.layers.Dropout(dropout),
             tf.keras.layers.Dense(embed_dim),
         ])
-        self.norm2 = _norm()
+        self.norm2 = _norm(1e-5)
 
     def call(self, x, training=False):
         attn = self.mha(x, x, training=training)
@@ -211,7 +216,7 @@ class RelationTokenBuilder(tf.keras.layers.Layer):
         self.relation_pairs = list(relation_pairs)
         self.fusions = [
             tf.keras.Sequential([
-                tf.keras.layers.LayerNormalization(epsilon=1e-6),
+                tf.keras.layers.LayerNormalization(epsilon=1e-5),
                 tf.keras.layers.Dense(embed_dim),
                 tf.keras.layers.Activation(tf.nn.gelu),
                 tf.keras.layers.Dropout(dropout),
@@ -287,13 +292,13 @@ class MGRConvNeXtFER(tf.keras.Model):
             initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
             trainable=True,
         )
-        self.global_proj = tf.keras.Sequential([_norm(), tf.keras.layers.Dense(self.embed_dim), tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25)))])
+        self.global_proj = tf.keras.Sequential([_norm(1e-5), tf.keras.layers.Dense(self.embed_dim), tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25)))])
         self.encoder = [
             TransformerEncoderBlock(self.embed_dim, int(model_cfg["num_heads"]), float(model_cfg.get("transformer_dropout", 0.25)))
             for _ in range(int(model_cfg["num_encoder_layers"]))
         ]
         self.classifier = tf.keras.Sequential([
-            _norm(),
+            _norm(1e-5),
             tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.45))),
             tf.keras.layers.Dense(int(model_cfg.get("classifier_hidden_dim", 512))),
             tf.keras.layers.Activation(tf.nn.gelu),
@@ -303,7 +308,7 @@ class MGRConvNeXtFER(tf.keras.Model):
         self.cnn_aux_classifier = None
         if self.use_cnn_aux_logits:
             self.cnn_aux_classifier = tf.keras.Sequential([
-                _norm(),
+                _norm(1e-5),
                 tf.keras.layers.Dropout(float(model_cfg.get("cnn_aux_dropout", 0.2))),
                 tf.keras.layers.Dense(int(model_cfg.get("cnn_aux_hidden_dim", 768))),
                 tf.keras.layers.Activation(tf.nn.gelu),

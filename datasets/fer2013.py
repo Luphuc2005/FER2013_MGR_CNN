@@ -209,22 +209,22 @@ def _apply_mask_ablation(mask: tf.Tensor, ablation: str, mask_floor: float, perm
     return tf.clip_by_value(mask, mask_floor, 1.0)
 
 
-def _random_erasing(image: tf.Tensor, seed: tf.Tensor, cfg: Dict) -> tf.Tensor:
+def _random_erasing(image: tf.Tensor, cfg: Dict) -> tf.Tensor:
     prob = float(cfg.get("random_erasing_prob", 0.0))
     if prob <= 0.0:
         return image
-    draw = tf.random.stateless_uniform([], seed=seed)
+    draw = tf.random.uniform([])
     def erase():
         h, w, c = tf.shape(image)[0], tf.shape(image)[1], tf.shape(image)[2]
         area = tf.cast(h * w, tf.float32)
-        erase_area = tf.random.stateless_uniform([], seed + [3, 7], minval=float(cfg.get("random_erasing_area_min", 0.02)), maxval=float(cfg.get("random_erasing_area_max", 0.15))) * area
+        erase_area = tf.random.uniform([], minval=float(cfg.get("random_erasing_area_min", 0.02)), maxval=float(cfg.get("random_erasing_area_max", 0.15))) * area
         side = tf.clip_by_value(tf.cast(tf.sqrt(erase_area), tf.int32), 1, tf.minimum(h, w))
-        y = tf.random.stateless_uniform([], seed + [11, 17], minval=0, maxval=tf.maximum(h - side + 1, 1), dtype=tf.int32)
-        x = tf.random.stateless_uniform([], seed + [13, 19], minval=0, maxval=tf.maximum(w - side + 1, 1), dtype=tf.int32)
+        y = tf.random.uniform([], minval=0, maxval=tf.maximum(h - side + 1, 1), dtype=tf.int32)
+        x = tf.random.uniform([], minval=0, maxval=tf.maximum(w - side + 1, 1), dtype=tf.int32)
         erase_shape = [side, side, c]
         value = str(cfg.get("random_erasing_value", "random")).lower()
         patch = (
-            tf.random.stateless_normal(erase_shape, seed=seed + [23, 31], dtype=image.dtype)
+            tf.random.normal(erase_shape, dtype=image.dtype)
             if value == "random"
             else tf.zeros(erase_shape, image.dtype)
         )
@@ -267,35 +267,33 @@ def _rotate_tensor(tensor: tf.Tensor, radians: tf.Tensor, interpolation: str = "
 def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
     if split != "train":
         return image, mask
-    seed = tf.stack([tf.cast(sample_id, tf.int32), tf.constant(42, tf.int32)])
     if aug_cfg.get("horizontal_flip", True):
-        flip = tf.random.stateless_uniform([], seed=seed) < 0.5
+        flip = tf.random.uniform([]) < 0.5
         image = tf.cond(flip, lambda: tf.image.flip_left_right(image), lambda: image)
         if mask is not None:
             mask = tf.cond(flip, lambda: tf.image.flip_left_right(mask), lambda: mask)
     degrees = float(aug_cfg.get("rotation_degrees", 0.0))
     if degrees > 0.0:
-        angle = tf.random.stateless_uniform([], seed=seed + [5, 9], minval=-degrees, maxval=degrees)
+        angle = tf.random.uniform([], minval=-degrees, maxval=degrees)
         radians = angle * np.pi / 180.0
         image = _rotate_tensor(image, radians, interpolation="NEAREST")
         if mask is not None:
             mask = tf.clip_by_value(_rotate_tensor(mask, radians, interpolation="BILINEAR"), 0.0, 1.0)
     brightness_delta = float(aug_cfg.get("brightness_delta", 0.0))
     if brightness_delta > 0.0:
-        brightness = tf.random.stateless_uniform(
+        brightness = tf.random.uniform(
             [],
-            seed=seed + [17, 23],
             minval=max(0.0, 1.0 - brightness_delta),
             maxval=1.0 + brightness_delta,
         )
         image = image * brightness
-    image = tf.image.stateless_random_contrast(image, lower=float(aug_cfg.get("contrast_lower", 1.0)), upper=float(aug_cfg.get("contrast_upper", 1.0)), seed=seed + [19, 29])
+    image = tf.image.random_contrast(image, lower=float(aug_cfg.get("contrast_lower", 1.0)), upper=float(aug_cfg.get("contrast_upper", 1.0)))
     image = tf.clip_by_value(image, 0.0, 255.0)
     gamma_prob = float(aug_cfg.get("gamma_prob", 0.0))
     if gamma_prob > 0.0:
-        use_gamma = tf.random.stateless_uniform([], seed=seed + [31, 37]) < gamma_prob
+        use_gamma = tf.random.uniform([]) < gamma_prob
         def gamma_aug():
-            gamma = tf.random.stateless_uniform([], seed=seed + [41, 43], minval=float(aug_cfg.get("gamma_min", 0.5)), maxval=float(aug_cfg.get("gamma_max", 2.0)))
+            gamma = tf.random.uniform([], minval=float(aug_cfg.get("gamma_min", 0.5)), maxval=float(aug_cfg.get("gamma_max", 2.0)))
             return tf.image.adjust_gamma(tf.clip_by_value(image, 0.0, 255.0) / 255.0, gamma=gamma) * 255.0
         image = tf.cond(use_gamma, gamma_aug, lambda: image)
     return tf.clip_by_value(image, 0.0, 255.0), mask
@@ -321,8 +319,7 @@ def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dic
     image, mask = _augment_pair(image, mask, sample_id, cfg["augmentation"], split)
     image = _normalize_image(image, int(cfg["data"]["channels"]))
     if split == "train":
-        erase_seed = tf.stack([tf.cast(sample_id, tf.int32), tf.constant(89, tf.int32)])
-        image = _random_erasing(image, erase_seed, cfg["augmentation"])
+        image = _random_erasing(image, cfg["augmentation"])
     features = {"image": image}
     if mask is not None:
         features["mask"] = mask
