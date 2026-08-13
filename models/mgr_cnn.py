@@ -51,10 +51,24 @@ class ConvNeXtBlock(tf.keras.layers.Layer):
 
 
 class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
-    def __init__(self, pretrained: bool = False, weights: Optional[str] = None, use_builtin_convnext: bool = False):
+    def __init__(
+        self,
+        pretrained: bool = False,
+        weights: Optional[str] = None,
+        use_builtin_convnext: bool = False,
+        builtin_include_preprocessing: bool = False,
+    ):
         super().__init__()
         self.pretrained = bool(pretrained)
         self.backbone_weights = weights
+        self.use_builtin_convnext = bool(use_builtin_convnext)
+        self.builtin_include_preprocessing = bool(builtin_include_preprocessing)
+        if self.use_builtin_convnext:
+            self.app = self._build_builtin_convnext()
+            self.downsample_layers = []
+            self.stages = []
+            self.stage_blocks = []
+            return
 
         dims = [96, 192, 384, 768]
         depths = [3, 3, 9, 3]
@@ -78,6 +92,35 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
 
         if self.pretrained:
             self._load_imagenet_pretrained()
+
+    def _resolve_builtin_weights(self):
+        if self.backbone_weights not in (None, "", "none", "None", False):
+            return self.backbone_weights
+        return "imagenet" if self.pretrained else None
+
+    def _build_builtin_convnext(self):
+        convnext_tiny = getattr(tf.keras.applications, "ConvNeXtTiny", None)
+        if convnext_tiny is None:
+            raise RuntimeError("tf.keras.applications.ConvNeXtTiny is not available in this TensorFlow build.")
+        weights = self._resolve_builtin_weights()
+        kwargs = {
+            "include_top": False,
+            "weights": weights,
+        }
+        try:
+            app = convnext_tiny(
+                include_preprocessing=self.builtin_include_preprocessing,
+                **kwargs,
+            )
+        except TypeError:
+            app = convnext_tiny(**kwargs)
+        print(
+            "[INFO] Using built-in tf.keras.applications.ConvNeXtTiny "
+            "(include_top=False, "
+            f"include_preprocessing={self.builtin_include_preprocessing}, "
+            f"weights={weights})"
+        )
+        return app
 
     def _load_imagenet_pretrained(self):
         import ssl
@@ -116,6 +159,8 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
             print(f"[WARNING] Failed to load ImageNet pretrained weights: {exc}")
 
     def call(self, x, training=False):
+        if self.use_builtin_convnext:
+            return self.app(x, training=training)
         for i, down in enumerate(self.downsample_layers):
             x = down(x, training=training)
             for block in self.stages[i]:
@@ -259,6 +304,7 @@ class MGRConvNeXtFER(tf.keras.Model):
             pretrained=bool(model_cfg.get("pretrained", False)),
             weights=model_cfg.get("weights"),
             use_builtin_convnext=bool(model_cfg.get("use_builtin_convnext", False)),
+            builtin_include_preprocessing=bool(model_cfg.get("builtin_include_preprocessing", False)),
         )
         self.use_visual_pos_embed = bool(model_cfg.get("use_visual_pos_embed", True))
         if self.use_visual_pos_embed:
