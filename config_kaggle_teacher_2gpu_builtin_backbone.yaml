@@ -1,25 +1,25 @@
 seed:
-  random_seed: 42
+  random_seed: 1337
 
 source:
   pytorch_config: "configs/paper_ablation_strong/c_cnn_region_logits_080_020_imagenet_sam_cosine_seed42_relation_noclean_batch16_kaggle.yaml"
   reported_no_tta_accuracy_percent: 74.17107829478964
   reported_tta_hflip_accuracy_percent: 74.33825578155475
-  note: "Kaggle 2-GPU TensorFlow built-in ConvNeXtTiny parity test: final = 0.8 * cnn_aux_logits + 0.2 * region_attention_logits."
+  note: "Kaggle 2-GPU TensorFlow parity: final = 0.8 * cnn_aux_logits + 0.2 * region_attention_logits (batch 16 global, noclean, seed 1337)."
 
 runtime:
   gpu_ids: [0, 1]
-  batch_size_per_gpu: 64
-  fallback_batch_size_per_gpu: 32
+  batch_size_per_gpu: 8
+  fallback_batch_size_per_gpu: 8
   require_two_gpus: true
   min_gpus: 2
   memory_growth: true
-  intra_op_threads: 16
-  inter_op_threads: 4
-  tf_data_num_parallel_calls: 4
-  tf_data_private_threadpool_size: 4
+  intra_op_threads: 2
+  inter_op_threads: 2
+  tf_data_num_parallel_calls: 2
+  tf_data_private_threadpool_size: 2
   tf_data_deterministic: false
-  prefetch_buffer: 1
+  prefetch_buffer: 2
   distributed_eval: true
   eval_tta_hflip: true
   train_val_tta_hflip: false
@@ -76,7 +76,7 @@ model:
   use_global_visual_bias: true
   region_pooling: "concat"
   classifier_hidden_dim: 512
-  classifier_dropout1: 0.45
+  classifier_dropout1: 0.50
   classifier_dropout2: 0.35
   ortho_loss_type: "squared_offdiag"
   ortho_loss_weight: 0.003
@@ -92,7 +92,7 @@ model:
   cnn_aux_pooling: "avg"
   cnn_aux_loss_weight: 0.4
   cnn_aux_hidden_dim: 768
-  cnn_aux_dropout: 0.2
+  cnn_aux_dropout: 0.25
   attention_logit_weight: 0.2
   cnn_aux_logit_weight: 0.8
   logit_fusion: "cnn_aux_sum"
@@ -118,10 +118,10 @@ model:
   ablation: "full"
 
 training:
-  epochs: 70
-  patience: 15
+  epochs: 115
+  patience: 30
   loss: "cross_entropy"
-  label_smoothing: 0.05
+  label_smoothing: 0.10
   optimizer: "sam"
   base_optimizer: "adamw"
   sam_rho: 0.03
@@ -129,7 +129,7 @@ training:
   lr: 0.0002
   finetune_lr: 0.00008
   visual_extractor_lr: 0.000008
-  weight_decay: 0.02
+  weight_decay: 0.025
   scheduler: "cosine"
   grad_clip_norm: 1.0
   skip_nonfinite_batches: true
@@ -137,7 +137,7 @@ training:
   resume: false
   best_checkpoint_start_epoch: 1
   periodic_checkpoint_interval: 20
-  progress_interval: 100
+  progress_interval: 200
 
 paths:
   output_dir: "/kaggle/working/outputs/tf_runs/c_relation_tokens_080_020_kaggle_teacher_2gpu_builtin_backbone"
