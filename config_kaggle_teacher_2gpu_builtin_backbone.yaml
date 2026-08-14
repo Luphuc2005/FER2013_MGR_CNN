@@ -1,11 +1,11 @@
 seed:
-  random_seed: 1337
+  random_seed: 42
 
 source:
   pytorch_config: "configs/paper_ablation_strong/c_cnn_region_logits_080_020_imagenet_sam_cosine_seed42_relation_noclean_batch16_kaggle.yaml"
   reported_no_tta_accuracy_percent: 74.17107829478964
   reported_tta_hflip_accuracy_percent: 74.33825578155475
-  note: "Kaggle 2-GPU TensorFlow parity: final = 0.8 * cnn_aux_logits + 0.2 * region_attention_logits (batch 16 global, noclean, seed 1337)."
+  note: "Kaggle 2-GPU TensorFlow parity: final = 0.8 * cnn_aux_logits + 0.2 * region_attention_logits (batch 16 global, noclean, seed 42)."
 
 runtime:
   gpu_ids: [0, 1]
