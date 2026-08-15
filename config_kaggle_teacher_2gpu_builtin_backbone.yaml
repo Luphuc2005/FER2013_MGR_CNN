@@ -118,8 +118,8 @@ model:
   ablation: "full"
 
 training:
-  epochs: 115
-  patience: 30
+  epochs: 70
+  patience: 15
   loss: "cross_entropy"
   label_smoothing: 0.10
   optimizer: "sam"
