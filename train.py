@@ -70,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FER2013_SGU TensorFlow MGR-CNN training")
     parser.add_argument("--config", type=str, default="config.yaml")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--checkpoint-path", type=str, default=None, help="Explicit path to checkpoint directory or index file to restore from.")
     parser.add_argument("--evaluate-only", action="store_true")
     return parser.parse_args()
 
@@ -459,6 +460,59 @@ def evaluate_dataset(
     return metrics
 
 
+def resolve_and_restore_checkpoint(checkpoint, args, cfg, last_manager) -> Optional[str]:
+    ckpt_path = getattr(args, "checkpoint_path", None) or cfg["model"].get("checkpoint_path")
+    if not ckpt_path and (args.resume or cfg["training"].get("resume", False)):
+        if last_manager.latest_checkpoint:
+            ckpt_path = last_manager.latest_checkpoint
+
+    if not ckpt_path:
+        return None
+
+    p = Path(ckpt_path)
+    prefix = None
+    if p.is_file() and p.name.endswith(".index"):
+        prefix = str(p.with_suffix(""))
+    elif p.is_dir():
+        indices = sorted(p.glob("*.index"))
+        if not indices:
+            indices = sorted(p.rglob("*.index"))
+        if indices:
+            index_file = indices[-1]
+            prefix = str(index_file.with_suffix(""))
+            stem = index_file.stem
+            data_files = list(index_file.parent.glob(f"{stem}*.data*"))
+            if not list(index_file.parent.glob(f"{stem}.data*")) and data_files:
+                tmp_dir = Path("/tmp/tf_ckpt_restore")
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                target_index = tmp_dir / f"{stem}.index"
+                target_data = tmp_dir / f"{stem}.data-00000-of-00001"
+                if target_index.exists():
+                    target_index.unlink()
+                if target_data.exists():
+                    target_data.unlink()
+                try:
+                    os.symlink(index_file, target_index)
+                    os.symlink(data_files[0], target_data)
+                except Exception:
+                    import shutil
+                    shutil.copy(index_file, target_index)
+                    shutil.copy(data_files[0], target_data)
+                prefix = str(tmp_dir / stem)
+    elif p.exists() or Path(str(p) + ".index").exists():
+        prefix = str(p)
+
+    if prefix:
+        try:
+            checkpoint.restore(prefix).expect_partial()
+            print(f"[INFO] Successfully restored checkpoint state from: {prefix}")
+            return prefix
+        except Exception as e:
+            print(f"[WARNING] Failed restoring checkpoint from {prefix}: {e}")
+
+    return None
+
+
 def main() -> int:
     args = parse_args()
     cfg = load_config(args.config)
@@ -524,9 +578,7 @@ def main() -> int:
             directory=str(checkpoint_root / "periodic"),
             max_to_keep=5,
         )
-        if (args.resume or cfg["training"].get("resume", True)) and last_manager.latest_checkpoint:
-            checkpoint.restore(last_manager.latest_checkpoint).expect_partial()
-            print(f"Resumed from {last_manager.latest_checkpoint}")
+        resolve_and_restore_checkpoint(checkpoint, args, cfg, last_manager)
 
     first_batch = next(iter(train_ds.take(1)))
     first_inputs, first_labels = first_batch
