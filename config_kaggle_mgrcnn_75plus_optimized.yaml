@@ -2,10 +2,9 @@ seed:
   random_seed: 42
 
 source:
-  pytorch_config: "configs/paper_ablation_strong/c_cnn_region_logits_080_020_imagenet_sam_cosine_seed42_relation_noclean_batch16_kaggle.yaml"
-  reported_no_tta_accuracy_percent: 74.17107829478964
-  reported_tta_hflip_accuracy_percent: 74.33825578155475
-  note: "Kaggle 2-GPU TensorFlow parity: final = 0.8 * cnn_aux_logits + 0.2 * region_attention_logits (batch 16 global, noclean, seed 42)."
+  pytorch_config: "configs/version_best_reproduce/reproduce_7512_mask_guided_7462_learned_only_drop345_seed42_kaggle.yaml"
+  reported_tta_hflip_accuracy_percent: 75.2020
+  note: "MGR-CNN 75%+ Optimized config: Attention-only logit decision path, Ortho Loss 0.005, visual_extractor_lr 2e-6, drop345 clean filter."
 
 runtime:
   gpu_ids: [0, 1]
@@ -34,8 +33,8 @@ data:
   predecode_pixels: true
   preload_masks: true
   allow_missing_masks: false
-  use_clean_filter: false
-  bad_row_indices_path:
+  use_clean_filter: true
+  bad_row_indices_path: "/kaggle/input/datasets/lhngphc/345-train-error/bad_row_indices_drop345_mediapipe_failed.txt"
   mask_ablation: "none"
   mask_region_permutation: [4, 2, 0, 5, 1, 3]
   shuffle_buffer: 28709
@@ -48,21 +47,14 @@ augmentation:
   contrast_lower: 0.85
   contrast_upper: 1.15
   gamma_prob: 0.5
-  gamma_min: 0.5
-  gamma_max: 2.0
-  random_erasing_prob: 0.4
-  random_erasing_area_min: 0.02
-  random_erasing_area_max: 0.15
-  random_erasing_value: "random"
 
 model:
-  name: "convnext_tiny_mask_guided_region_attention_builtin_backbone"
-  arch: "convnext_tiny"
+  name: "mgr_convnext_fer"
   pretrained: true
   use_builtin_convnext: true
   builtin_include_preprocessing: false
-  weights:
-  checkpoint_path:
+  weights: "imagenet"
+  checkpoint_path: null
   checkpoint_strict: false
   num_regions: 6
   token_grid_size: 7
@@ -79,7 +71,7 @@ model:
   classifier_dropout1: 0.50
   classifier_dropout2: 0.35
   ortho_loss_type: "squared_offdiag"
-  ortho_loss_weight: 0.003
+  ortho_loss_weight: 0.005
   use_source_classifier: false
   use_clip_dictionary: false
   use_learnable_clip_region_tokens: false
@@ -87,16 +79,16 @@ model:
   mask_attention_alpha: 0.3
   mask_floor: 0.05
   mask_ablation: "none"
-  use_cnn_aux_loss: true
-  use_cnn_aux_logits: true
+  use_cnn_aux_loss: false
+  use_cnn_aux_logits: false
   cnn_aux_pooling: "avg"
-  cnn_aux_loss_weight: 0.4
+  cnn_aux_loss_weight: 0.0
   cnn_aux_hidden_dim: 768
   cnn_aux_dropout: 0.25
-  attention_logit_weight: 0.2
-  cnn_aux_logit_weight: 0.8
-  logit_fusion: "cnn_aux_sum"
-  finetune_logit_fusion: "cnn_aux_sum"
+  attention_logit_weight: 1.0
+  cnn_aux_logit_weight: 0.0
+  logit_fusion: "attention"
+  finetune_logit_fusion: "attention"
   freeze_backbone_epochs: 4
   unfreeze_backbone: true
   freeze_unfrozen_batchnorm: true
@@ -118,18 +110,18 @@ model:
   ablation: "full"
 
 training:
-  epochs: 70
+  epochs: 60
   patience: 15
   loss: "cross_entropy"
-  label_smoothing: 0.12
+  label_smoothing: 0.05
   optimizer: "sam"
   base_optimizer: "adamw"
   sam_rho: 0.03
   sam_adaptive: false
-  lr: 0.0002
-  finetune_lr: 0.00008
-  visual_extractor_lr: 0.000008
-  weight_decay: 0.035
+  lr: 0.00008
+  finetune_lr: 0.00004
+  visual_extractor_lr: 0.000002
+  weight_decay: 0.02
   scheduler: "cosine"
   grad_clip_norm: 1.0
   skip_nonfinite_batches: true
@@ -140,5 +132,5 @@ training:
   progress_interval: 200
 
 paths:
-  output_dir: "/kaggle/working/outputs/tf_runs/c_relation_tokens_080_020_kaggle_teacher_2gpu_builtin_backbone"
+  output_dir: "/kaggle/working/outputs/tf_runs/mgrcnn_75plus_optimized_2gpu"
   logs_dir: "/kaggle/working/logs"
