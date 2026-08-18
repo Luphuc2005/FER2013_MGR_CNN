@@ -70,7 +70,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FER2013_SGU TensorFlow MGR-CNN training")
     parser.add_argument("--config", type=str, default="config.yaml")
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--checkpoint-path", type=str, default=None, help="Explicit path to checkpoint directory or index file to restore from.")
     parser.add_argument("--evaluate-only", action="store_true")
     return parser.parse_args()
 
@@ -209,6 +208,17 @@ def cosine_lr(base_lr: float, epoch: int, epochs: int, min_lr: float = 1e-6) -> 
 def resolve_phase_lrs(cfg: Dict, epoch: int, train_backbone: bool) -> Tuple[float, float]:
     training_cfg = cfg["training"]
     total_epochs = int(training_cfg["epochs"])
+    stage_tr = cfg.get("stage_transition", {})
+    if bool(stage_tr.get("enable_2stage_switching", False)) and epoch >= int(stage_tr.get("stage1_end_epoch", 60)):
+        stage2_start = int(stage_tr.get("stage1_end_epoch", 60))
+        phase2_epoch = epoch - stage2_start
+        phase2_total = max(1, total_epochs - stage2_start)
+        head_base_lr = float(stage_tr.get("stage2_finetune_lr", training_cfg.get("finetune_lr", 0.00004)))
+        visual_base_lr = float(stage_tr.get("stage2_visual_extractor_lr", training_cfg.get("visual_extractor_lr", 0.000002)))
+        return (
+            cosine_lr(head_base_lr, phase2_epoch, phase2_total),
+            cosine_lr(visual_base_lr, phase2_epoch, phase2_total),
+        )
     if train_backbone:
         freeze_epochs = int(cfg["model"].get("freeze_backbone_epochs", 0) or 0)
         phase_epoch = max(0, int(epoch) - freeze_epochs)
@@ -460,59 +470,6 @@ def evaluate_dataset(
     return metrics
 
 
-def resolve_and_restore_checkpoint(checkpoint, args, cfg, last_manager) -> Optional[str]:
-    ckpt_path = getattr(args, "checkpoint_path", None) or cfg["model"].get("checkpoint_path")
-    if not ckpt_path and (args.resume or cfg["training"].get("resume", False)):
-        if last_manager.latest_checkpoint:
-            ckpt_path = last_manager.latest_checkpoint
-
-    if not ckpt_path:
-        return None
-
-    p = Path(ckpt_path)
-    prefix = None
-    if p.is_file() and p.name.endswith(".index"):
-        prefix = str(p.with_suffix(""))
-    elif p.is_dir():
-        indices = sorted(p.glob("*.index"))
-        if not indices:
-            indices = sorted(p.rglob("*.index"))
-        if indices:
-            index_file = indices[-1]
-            prefix = str(index_file.with_suffix(""))
-            stem = index_file.stem
-            data_files = list(index_file.parent.glob(f"{stem}*.data*"))
-            if not list(index_file.parent.glob(f"{stem}.data*")) and data_files:
-                tmp_dir = Path("/tmp/tf_ckpt_restore")
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                target_index = tmp_dir / f"{stem}.index"
-                target_data = tmp_dir / f"{stem}.data-00000-of-00001"
-                if target_index.exists():
-                    target_index.unlink()
-                if target_data.exists():
-                    target_data.unlink()
-                try:
-                    os.symlink(index_file, target_index)
-                    os.symlink(data_files[0], target_data)
-                except Exception:
-                    import shutil
-                    shutil.copy(index_file, target_index)
-                    shutil.copy(data_files[0], target_data)
-                prefix = str(tmp_dir / stem)
-    elif p.exists() or Path(str(p) + ".index").exists():
-        prefix = str(p)
-
-    if prefix:
-        try:
-            checkpoint.restore(prefix).expect_partial()
-            print(f"[INFO] Successfully restored checkpoint state from: {prefix}")
-            return prefix
-        except Exception as e:
-            print(f"[WARNING] Failed restoring checkpoint from {prefix}: {e}")
-
-    return None
-
-
 def main() -> int:
     args = parse_args()
     cfg = load_config(args.config)
@@ -528,6 +485,11 @@ def main() -> int:
     strategy = tf.distribute.MirroredStrategy(devices=strategy_devices)
     print(f"TensorFlow {tf.__version__}")
     print(f"Replicas in sync: {strategy.num_replicas_in_sync}")
+
+    stage_tr = cfg.get("stage_transition", {})
+    if bool(stage_tr.get("enable_2stage_switching", False)) and "stage1_batch_size_per_gpu" in stage_tr:
+        cfg["runtime"]["batch_size_per_gpu"] = int(stage_tr["stage1_batch_size_per_gpu"])
+        print(f"[STAGE 1] Initialized with stage1_batch_size_per_gpu={cfg['runtime']['batch_size_per_gpu']}", flush=True)
 
     train_ds, val_ds, test_ds = build_datasets(cfg, replicas=strategy.num_replicas_in_sync)
     train_loop_ds = strategy.experimental_distribute_dataset(train_ds)
@@ -578,7 +540,9 @@ def main() -> int:
             directory=str(checkpoint_root / "periodic"),
             max_to_keep=5,
         )
-        resolve_and_restore_checkpoint(checkpoint, args, cfg, last_manager)
+        if (args.resume or cfg["training"].get("resume", True)) and last_manager.latest_checkpoint:
+            checkpoint.restore(last_manager.latest_checkpoint).expect_partial()
+            print(f"Resumed from {last_manager.latest_checkpoint}")
 
     first_batch = next(iter(train_ds.take(1)))
     first_inputs, first_labels = first_batch
@@ -633,6 +597,26 @@ def main() -> int:
             )
         train_step = train_step_full if train_backbone else train_step_head
         distributed_train_step = distributed_train_step_full if train_backbone else distributed_train_step_head
+        # Dynamic 2-Stage Transition check
+        stage_tr = cfg.get("stage_transition", {})
+        if bool(stage_tr.get("enable_2stage_switching", False)) and epoch == int(stage_tr.get("stage1_end_epoch", 60)):
+            target_ablation = str(stage_tr.get("stage2_ablation", "region_only"))
+            if hasattr(model, "set_ablation"):
+                model.set_ablation(target_ablation)
+            
+            stage2_bs = stage_tr.get("stage2_batch_size_per_gpu")
+            if stage2_bs and int(stage2_bs) != int(cfg["runtime"]["batch_size_per_gpu"]):
+                cfg["runtime"]["batch_size_per_gpu"] = int(stage2_bs)
+                train_ds, val_ds, _ = build_datasets(cfg, replicas=strategy.num_replicas_in_sync)
+                train_loop_ds = strategy.experimental_distribute_dataset(train_ds)
+                print(f"[STAGE SWITCH] Rebuilt train dataset for Stage 2 with batch_size_per_gpu={stage2_bs}", flush=True)
+
+            patience_anchor_epoch = epoch + 1
+            print(
+                f"[STAGE SWITCH] Epoch {epoch+1}: Automated transition to Stage 2 (Ablation mode: {target_ablation!r})!",
+                flush=True,
+            )
+
         lr, backbone_lr = resolve_phase_lrs(cfg, epoch, train_backbone)
         set_optimizer_lr(optimizer_head, lr)
         set_optimizer_lr(optimizer_backbone, backbone_lr)
@@ -675,7 +659,12 @@ def main() -> int:
             best_epoch = epoch + 1
             patience_anchor_epoch = epoch + 1
             ckpt_best_metric.assign(best_score)
-            print(f"[INFO] Epoch {epoch+1}: saving best checkpoint", flush=True)
+            val_loss_val = float(val_metrics['loss'])
+            val_acc_val = float(val_metrics['accuracy'])
+            print(
+                f"[INFO] Save best at ep {epoch+1}, val_loss: {val_loss_val:.4f}, val_accuracy: {val_acc_val:.4f}, monitor: {monitor_name}",
+                flush=True,
+            )
             best_manager.save(checkpoint_number=epoch + 1)
         elif not checkpoint_eligible:
             print(
@@ -722,7 +711,7 @@ def main() -> int:
             f"{monitor_name}={monitor:.4f}",
             flush=True,
         )
-        if patience_counter >= patience_limit:
+        if patience_limit > 0 and patience_counter >= patience_limit:
             print(f"[INFO] Early stopping triggered at epoch {epoch+1} (patience reached {patience_limit})", flush=True)
             break
         gc.collect()
@@ -738,17 +727,52 @@ def main() -> int:
     best_ckpt = best_manager.latest_checkpoint or last_manager.latest_checkpoint
     if best_ckpt:
         checkpoint.restore(best_ckpt).expect_partial()
-    print("[INFO] Starting final test evaluation", flush=True)
+        print(f"[INFO] Restored best checkpoint: {best_ckpt}", flush=True)
+
+    print("\n" + "=" * 70, flush=True)
+    print("  FINAL TEST EVALUATION", flush=True)
+    print("=" * 70, flush=True)
+
+    # --- No-TTA evaluation ---
+    print("\n[INFO] Running final test evaluation (No TTA)...", flush=True)
+    no_tta_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=False)
+    save_metrics(no_tta_metrics, run_dir / "test_metrics_no_tta.json")
+    no_tta_acc = float(no_tta_metrics['accuracy'])
+    print(f"\n{'─' * 50}", flush=True)
+    print(f"  TEST RESULTS (No TTA)", flush=True)
+    print(f"{'─' * 50}", flush=True)
+    print(f"  Test Accuracy:    {no_tta_acc * 100:.2f}%", flush=True)
+    print(f"  Test Loss:        {float(no_tta_metrics['loss']):.4f}", flush=True)
+    print(f"  Macro F1:         {float(no_tta_metrics['macro_f1']):.4f}", flush=True)
+    print(f"  Weighted F1:      {float(no_tta_metrics['weighted_f1']):.4f}", flush=True)
+    print(f"{'─' * 50}\n", flush=True)
+
+    # --- TTA HFlip evaluation ---
     use_final_tta = bool(cfg["runtime"].get("eval_tta_hflip", False))
     if use_final_tta:
-        print("[INFO] Saving no-TTA test metrics before TTA hflip evaluation", flush=True)
-        no_tta_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=False)
-        save_metrics(no_tta_metrics, run_dir / "test_metrics_no_tta.json")
-        print("[INFO] Running final test evaluation with hflip TTA", flush=True)
-    test_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=use_final_tta)
-    save_metrics(test_metrics, run_dir / ("test_metrics_tta_hflip.json" if use_final_tta else "test_metrics_no_tta.json"))
-    save_metrics(test_metrics, run_dir / "test_metrics.json")
-    print(json.dumps(test_metrics, indent=2))
+        print("[INFO] Running final test evaluation (TTA HFlip)...", flush=True)
+        tta_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=True)
+        save_metrics(tta_metrics, run_dir / "test_metrics_tta_hflip.json")
+        save_metrics(tta_metrics, run_dir / "test_metrics.json")
+        tta_acc = float(tta_metrics['accuracy'])
+        print(f"\n{'─' * 50}", flush=True)
+        print(f"  TEST RESULTS (TTA HFlip)", flush=True)
+        print(f"{'─' * 50}", flush=True)
+        print(f"  Test Accuracy:    {tta_acc * 100:.2f}%", flush=True)
+        print(f"  Test Loss:        {float(tta_metrics['loss']):.4f}", flush=True)
+        print(f"  Macro F1:         {float(tta_metrics['macro_f1']):.4f}", flush=True)
+        print(f"  Weighted F1:      {float(tta_metrics['weighted_f1']):.4f}", flush=True)
+        print(f"{'─' * 50}", flush=True)
+        delta_acc = (tta_acc - no_tta_acc) * 100
+        print(f"\n  TTA Improvement: {delta_acc:+.2f}%", flush=True)
+    else:
+        save_metrics(no_tta_metrics, run_dir / "test_metrics.json")
+        tta_metrics = no_tta_metrics
+
+    print("\n" + "=" * 70, flush=True)
+    print(f"  Best Epoch: {best_epoch} | Best Val {monitor_name}: {best_score:.4f}", flush=True)
+    print("=" * 70 + "\n", flush=True)
+    print(json.dumps(tta_metrics, indent=2))
     return 0
 
 

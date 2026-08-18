@@ -367,6 +367,10 @@ class MGRConvNeXtFER(tf.keras.Model):
             return tf.reshape(encoded, [tf.shape(encoded)[0], self.region_token_count * self.embed_dim])
         return tf.reduce_mean(encoded, axis=1)
 
+    def set_ablation(self, mode: str):
+        print(f"[MODEL] Switched ablation mode from {self.ablation!r} to {mode!r}", flush=True)
+        self.ablation = str(mode)
+
     def _apply_ablation(self, logits, cnn_aux_logits):
         if self.ablation == "cnn_only":
             return cnn_aux_logits
@@ -425,10 +429,15 @@ class MGRConvNeXtFER(tf.keras.Model):
             ortho_loss = tf.reduce_sum(tf.square(off_diag_vals)) / off_diag_count
         else:
             ortho_loss = tf.reduce_sum(off_diag_vals) / off_diag_count
+        if self.ablation == "cnn_only":
+            ortho_loss = tf.constant(0.0, dtype=tf.float32)
+
+        effective_cnn_aux = cnn_aux_logits if self.ablation != "region_only" else None
+
         outputs = {
             "logits": fused_logits,
             "attention_logits": logits,
-            "cnn_aux_logits": cnn_aux_logits,
+            "cnn_aux_logits": effective_cnn_aux,
             "ortho_loss": ortho_loss,
             "attn_scores": attn_scores,
         }
