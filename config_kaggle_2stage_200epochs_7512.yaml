@@ -113,8 +113,8 @@ stage_transition:
   stage2_finetune_lr: 0.00004
 
 training:
-  epochs: 200
-  patience: 0  # 0 là kjhông bật
+  epochs: 300
+  patience: 0  # 0 means NO early stopping, run full 300 epochs
   loss: "cross_entropy"
   label_smoothing: 0.12
   optimizer: "sam"

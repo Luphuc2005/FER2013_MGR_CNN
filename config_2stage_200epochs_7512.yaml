@@ -113,7 +113,7 @@ stage_transition:
   stage2_finetune_lr: 0.00004
 
 training:
-  epochs: 200
+  epochs: 300
   patience: 0  # 0 means NO early stopping, run full 200 epochs
   loss: "cross_entropy"
   label_smoothing: 0.12
