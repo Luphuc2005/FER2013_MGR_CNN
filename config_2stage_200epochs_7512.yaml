@@ -7,17 +7,17 @@ source:
 
 runtime:
   gpu_ids: [0, 1]
-  batch_size_per_gpu: 4
+  batch_size_per_gpu: 8
   fallback_batch_size_per_gpu: 4
   require_two_gpus: true
   min_gpus: 2
   memory_growth: true
-  intra_op_threads: 16
-  inter_op_threads: 4
-  tf_data_num_parallel_calls: 4
-  tf_data_private_threadpool_size: 4
+  intra_op_threads: 24
+  inter_op_threads: 6
+  tf_data_num_parallel_calls: 16
+  tf_data_private_threadpool_size: 8
   tf_data_deterministic: false
-  prefetch_buffer: 1
+  prefetch_buffer: 4
   distributed_eval: true
   eval_tta_hflip: true
   train_val_tta_hflip: true
