@@ -3,21 +3,21 @@ seed:
 
 source:
   pytorch_reference_log: "Outputs/figures 75.12% accuracy test run"
-  note: "Clean Kaggle 2-stage config: Stage 1 trains CNN auxiliary head as warm-up; Stage 2 switches to region attention only. No CNN/region logit fusion."
+  note: "Clean Kaggle 2-stage 4-GPU test config: Stage 1 trains CNN auxiliary head as warm-up; Stage 2 switches to region attention only. No CNN/region logit fusion."
 
 runtime:
-  gpu_ids: [0, 1]
-  batch_size_per_gpu: 8
+  gpu_ids: [0, 1, 2, 3]
+  batch_size_per_gpu: 16
   fallback_batch_size_per_gpu: 8
   require_two_gpus: true
-  min_gpus: 2
+  min_gpus: 4
   memory_growth: true
-  intra_op_threads: 2
-  inter_op_threads: 2
-  tf_data_num_parallel_calls: 2
-  tf_data_private_threadpool_size: 2
+  intra_op_threads: 16
+  inter_op_threads: 4
+  tf_data_num_parallel_calls: 8
+  tf_data_private_threadpool_size: 4
   tf_data_deterministic: false
-  prefetch_buffer: 2
+  prefetch_buffer: 4
   distributed_eval: true
   eval_tta_hflip: true
   train_val_tta_hflip: true
@@ -110,15 +110,15 @@ model:
 
 stage_transition:
   enable_2stage_switching: true
-  stage1_end_epoch: 60
-  stage1_batch_size_per_gpu: 4
-  stage2_batch_size_per_gpu: 8
+  stage1_end_epoch: 5
+  stage1_batch_size_per_gpu: 8
+  stage2_batch_size_per_gpu: 16
   stage2_ablation: "region_only"
   stage2_visual_extractor_lr: 0.000002
   stage2_finetune_lr: 0.00004
 
 training:
-  epochs: 300
+  epochs: 20
   patience: 0
   loss: "cross_entropy"
   label_smoothing: 0.12
@@ -136,7 +136,7 @@ training:
   monitor: "val_accuracy"
   resume: false
   best_checkpoint_start_epoch: 1
-  periodic_checkpoint_interval: 20
+  periodic_checkpoint_interval: 5
   progress_interval: 200
 
 paths:
