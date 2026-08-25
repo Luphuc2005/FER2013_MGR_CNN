@@ -1,0 +1,144 @@
+seed:
+  random_seed: 42
+
+source:
+  pytorch_reference_log: "Outputs/figures 75.12% accuracy test run"
+  note: "Local 4-GPU V100 smoke config: 20 epochs, Stage 1 CNN auxiliary warm-up, Stage 2 region attention only. No CNN/region logit fusion."
+
+runtime:
+  gpu_ids: [0, 1, 2, 3]
+  batch_size_per_gpu: 16
+  fallback_batch_size_per_gpu: 8
+  require_two_gpus: true
+  min_gpus: 4
+  memory_growth: true
+  intra_op_threads: 24
+  inter_op_threads: 6
+  tf_data_num_parallel_calls: 16
+  tf_data_private_threadpool_size: 8
+  tf_data_deterministic: false
+  prefetch_buffer: 4
+  distributed_eval: true
+  eval_tta_hflip: true
+  train_val_tta_hflip: true
+
+data:
+  data_path: "data/fer13-split"
+  mask_dir: "data/mediapipe_region_masks"
+  num_classes: 7
+  image_size: 224
+  channels: 3
+  normalize: true
+  predecode_pixels: true
+  preload_masks: true
+  allow_missing_masks: false
+  use_clean_filter: false
+  bad_row_indices_path:
+  mask_ablation: "none"
+  mask_region_permutation: [4, 2, 0, 5, 1, 3]
+  shuffle_buffer: 28709
+  cache: false
+
+augmentation:
+  horizontal_flip: true
+  rotation_degrees: 15.0
+  brightness_delta: 0.15
+  contrast_lower: 0.85
+  contrast_upper: 1.15
+  gamma_prob: 0.5
+  gamma_min: 0.5
+  gamma_max: 2.0
+  random_erasing_prob: 0.4
+  random_erasing_area_min: 0.02
+  random_erasing_area_max: 0.15
+  random_erasing_value: "random"
+
+model:
+  name: "convnext_tiny_mgr_2stage_4gpu_20epochs_v100"
+  arch: "convnext_tiny"
+  pretrained: true
+  use_builtin_convnext: false
+  builtin_include_preprocessing: false
+  weights:
+  checkpoint_path:
+  checkpoint_strict: false
+  num_regions: 6
+  token_grid_size: 7
+  visual_dim: 768
+  embed_dim: 384
+  num_heads: 4
+  num_encoder_layers: 2
+  transformer_dropout: 0.25
+  use_visual_pos_embed: true
+  use_region_slot_embed: true
+  use_global_visual_bias: true
+  region_pooling: "concat"
+  classifier_hidden_dim: 512
+  classifier_dropout1: 0.35
+  classifier_dropout2: 0.25
+  ortho_loss_type: "squared_offdiag"
+  ortho_loss_weight: 0.005
+  use_source_classifier: false
+  use_clip_dictionary: false
+  use_learnable_clip_region_tokens: false
+  mask_guided_attention: true
+  mask_attention_alpha: 0.3
+  mask_floor: 0.05
+  mask_ablation: "none"
+
+  # Required for Stage 1 only. Stage 2 region_only ignores cnn_aux_logits.
+  use_cnn_aux_loss: true
+  use_cnn_aux_logits: true
+  cnn_aux_pooling: "avg"
+  cnn_aux_loss_weight: 0.4
+  cnn_aux_hidden_dim: 768
+  cnn_aux_dropout: 0.25
+
+  # Neutral values because this 2-stage config does not use logit fusion.
+  attention_logit_weight: 1.0
+  cnn_aux_logit_weight: 0.0
+  logit_fusion: "attention"
+  finetune_logit_fusion: "attention"
+
+  freeze_backbone_epochs: 4
+  unfreeze_backbone: true
+  freeze_unfrozen_batchnorm: true
+  use_region_relation_tokens: false
+  region_relation_dropout: 0.1
+  region_relation_pairs: []
+  ablation: "cnn_only"
+
+stage_transition:
+  enable_2stage_switching: true
+  stage1_end_epoch: 5
+  stage1_batch_size_per_gpu: 8
+  stage2_batch_size_per_gpu: 16
+  stage2_ablation: "region_only"
+  stage2_visual_extractor_lr: 0.000002
+  stage2_finetune_lr: 0.00004
+
+training:
+  epochs: 20
+  patience: 0
+  loss: "cross_entropy"
+  label_smoothing: 0.12
+  optimizer: "sam"
+  base_optimizer: "adamw"
+  sam_rho: 0.03
+  sam_adaptive: false
+  lr: 0.0002
+  finetune_lr: 0.00008
+  visual_extractor_lr: 0.000008
+  weight_decay: 0.035
+  scheduler: "cosine"
+  grad_clip_norm: 1.0
+  skip_nonfinite_batches: true
+  monitor: "val_accuracy"
+  resume: false
+  best_checkpoint_start_epoch: 1
+  periodic_checkpoint_interval: 5
+  progress_interval: 100
+
+paths:
+  output_dir: "outputs/tf_runs/convnext_mgr_2stage_4gpu_20epochs_v100"
+  logs_dir: "logs"
