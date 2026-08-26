@@ -50,6 +50,92 @@ class ConvNeXtBlock(tf.keras.layers.Layer):
         return residual + self.drop_path(x, training=training)
 
 
+class GroupNormalization(tf.keras.layers.Layer):
+    """Native GroupNormalization for TensorFlow 2.x compatibility."""
+    def __init__(self, groups: int = 32, epsilon: float = 1e-5):
+        super().__init__()
+        self.groups = int(groups)
+        self.epsilon = float(epsilon)
+
+    def build(self, input_shape):
+        channels = int(input_shape[-1])
+        self.gamma = self.add_weight(
+            name="gamma",
+            shape=(channels,),
+            initializer="ones",
+            trainable=True,
+        )
+        self.beta = self.add_weight(
+            name="beta",
+            shape=(channels,),
+            initializer="zeros",
+            trainable=True,
+        )
+        super().build(input_shape)
+
+    def call(self, x, training=False):
+        shape = tf.shape(x)
+        rank = x.shape.rank
+        if rank == 3:
+            B, N, C = shape[0], shape[1], shape[2]
+            G = min(self.groups, self.gamma.shape[0])
+            x_reshaped = tf.reshape(x, [B, N, G, C // G])
+            mean, variance = tf.nn.moments(x_reshaped, axes=[1, 3], keepdims=True)
+            x_norm = (x_reshaped - mean) / tf.sqrt(variance + self.epsilon)
+            x_norm = tf.reshape(x_norm, [B, N, C])
+        else:
+            B, H, W, C = shape[0], shape[1], shape[2], shape[3]
+            G = min(self.groups, self.gamma.shape[0])
+            x_reshaped = tf.reshape(x, [B, H, W, G, C // G])
+            mean, variance = tf.nn.moments(x_reshaped, axes=[1, 2, 4], keepdims=True)
+            x_norm = (x_reshaped - mean) / tf.sqrt(variance + self.epsilon)
+            x_norm = tf.reshape(x_norm, [B, H, W, C])
+        return self.gamma * x_norm + self.beta
+
+
+class ELABlock(tf.keras.layers.Layer):
+    """
+    Efficient Local Attention (ELA) Block.
+    Input tensor shape: [Batch, Height, Width, Channels]
+    H-branch: AvgPool(W) -> Conv1D(kernel_size) -> GroupNorm -> Sigmoid -> Ah [B, H, 1, C]
+    W-branch: AvgPool(H) -> Conv1D(kernel_size) -> GroupNorm -> Sigmoid -> Aw [B, 1, W, C]
+    Output = X + X * Ah * Aw
+    """
+    def __init__(self, channels: int, kernel_size: int = 7, num_groups: int = 32):
+        super().__init__()
+        self.channels = int(channels)
+        self.conv_h = tf.keras.layers.Conv1D(self.channels, kernel_size, padding="same", use_bias=False)
+        self.conv_w = tf.keras.layers.Conv1D(self.channels, kernel_size, padding="same", use_bias=False)
+        groups = min(num_groups, self.channels)
+        self.gn_h = GroupNormalization(groups=groups)
+        self.gn_w = GroupNormalization(groups=groups)
+        self.gamma = self.add_weight(
+            name="gamma",
+            shape=(1,),
+            initializer=tf.keras.initializers.Zeros(),
+            trainable=True,
+        )
+
+    def call(self, x, training=False):
+        # x: [B, H, W, C]
+        # H branch: pool over W (axis 2) -> [B, H, C]
+        x_h = tf.reduce_mean(x, axis=2)
+        x_h = self.conv_h(x_h)
+        x_h = self.gn_h(x_h, training=training)
+        a_h = tf.nn.sigmoid(x_h)
+        a_h = tf.expand_dims(a_h, axis=2)  # [B, H, 1, C]
+
+        # W branch: pool over H (axis 1) -> [B, W, C]
+        x_w = tf.reduce_mean(x, axis=1)
+        x_w = self.conv_w(x_w)
+        x_w = self.gn_w(x_w, training=training)
+        a_w = tf.nn.sigmoid(x_w)
+        a_w = tf.expand_dims(a_w, axis=1)  # [B, 1, W, C]
+
+        y = x * a_h * a_w
+        return x + self.gamma * y
+
+
 class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
     def __init__(
         self,
@@ -57,17 +143,22 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
         weights: Optional[str] = None,
         use_builtin_convnext: bool = False,
         builtin_include_preprocessing: bool = False,
+        use_ela: bool = False,
+        ela_kernel_size: int = 7,
     ):
         super().__init__()
         self.pretrained = bool(pretrained)
         self.backbone_weights = weights
         self.use_builtin_convnext = bool(use_builtin_convnext)
         self.builtin_include_preprocessing = bool(builtin_include_preprocessing)
+        self.use_ela = bool(use_ela)
         if self.use_builtin_convnext:
             self.app = self._build_builtin_convnext()
             self.downsample_layers = []
             self.stages = []
             self.stage_blocks = []
+            self.ela_stage2 = None
+            self.ela_stage3 = None
             return
 
         dims = [96, 192, 384, 768]
@@ -89,6 +180,12 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
                 cursor += 1
             self.stages.append(blocks)
         self.stage_blocks = [blk for stage in self.stages for blk in stage]
+
+        self.ela_stage2 = None
+        self.ela_stage3 = None
+        if self.use_ela:
+            self.ela_stage2 = ELABlock(dims[2], kernel_size=ela_kernel_size)
+            self.ela_stage3 = ELABlock(dims[3], kernel_size=ela_kernel_size)
 
         if self.pretrained:
             self._load_imagenet_pretrained()
@@ -165,6 +262,11 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
             x = down(x, training=training)
             for block in self.stages[i]:
                 x = block(x, training=training)
+            if self.use_ela:
+                if i == 2 and self.ela_stage2 is not None:
+                    x = self.ela_stage2(x, training=training)
+                elif i == 3 and self.ela_stage3 is not None:
+                    x = self.ela_stage3(x, training=training)
         return x
 
 
@@ -322,6 +424,8 @@ class MGRConvNeXtFER(tf.keras.Model):
             weights=model_cfg.get("weights"),
             use_builtin_convnext=bool(model_cfg.get("use_builtin_convnext", False)),
             builtin_include_preprocessing=bool(model_cfg.get("builtin_include_preprocessing", False)),
+            use_ela=bool(model_cfg.get("use_ela", False)),
+            ela_kernel_size=int(model_cfg.get("ela_kernel_size", 7)),
         )
         self.cnn_se = None
         if bool(model_cfg.get("use_cnn_se", False)):
