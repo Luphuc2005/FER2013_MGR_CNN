@@ -83,6 +83,12 @@ def configure_tensorflow_runtime(cfg: Dict) -> None:
     if inter_threads:
         tf.config.threading.set_inter_op_parallelism_threads(int(inter_threads))
     tf.config.optimizer.set_jit(bool(runtime.get("xla", False)))
+    if bool(runtime.get("use_mixed_precision", True)):
+        try:
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+            print("[INFO] Mixed precision enabled (mixed_float16) for accelerated GPU training", flush=True)
+        except Exception as e:
+            print(f"[WARNING] Could not enable mixed precision: {e}", flush=True)
 
 
 def configure_gpus(cfg: Dict) -> None:

@@ -606,11 +606,15 @@ class MGRConvNeXtFER(tf.keras.Model):
 
         effective_cnn_aux = cnn_aux_logits if self.ablation != "region_only" else None
 
+        fused_logits_f32 = tf.cast(fused_logits, tf.float32) if fused_logits is not None else None
+        logits_f32 = tf.cast(logits, tf.float32) if logits is not None else None
+        effective_cnn_aux_f32 = tf.cast(effective_cnn_aux, tf.float32) if effective_cnn_aux is not None else None
+
         outputs = {
-            "logits": fused_logits,
-            "attention_logits": logits,
-            "cnn_aux_logits": effective_cnn_aux,
-            "ortho_loss": ortho_loss,
+            "logits": fused_logits_f32,
+            "attention_logits": logits_f32,
+            "cnn_aux_logits": effective_cnn_aux_f32,
+            "ortho_loss": tf.cast(ortho_loss, tf.float32),
             "attn_scores": attn_scores,
         }
         if return_region_weights:
