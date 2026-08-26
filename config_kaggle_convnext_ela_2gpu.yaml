@@ -103,7 +103,7 @@ model:
   logit_fusion: "cnn_aux"
   finetune_logit_fusion: "cnn_aux"
 
-  freeze_backbone_epochs: 4
+  freeze_backbone_epochs: 0
   unfreeze_backbone: true
   freeze_unfrozen_batchnorm: true
   use_region_relation_tokens: false
@@ -122,13 +122,13 @@ training:
   patience: 0
   loss: "cross_entropy"
   label_smoothing: 0.12
-  optimizer: "sam"
+  optimizer: "adamw"
   base_optimizer: "adamw"
   sam_rho: 0.03
   sam_adaptive: false
   lr: 0.0002
-  finetune_lr: 0.00008
-  visual_extractor_lr: 0.000008
+  finetune_lr: 0.0002
+  visual_extractor_lr: 0.00005
   weight_decay: 0.035
   scheduler: "cosine"
   grad_clip_norm: 1.0
