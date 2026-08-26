@@ -429,7 +429,8 @@ def _update_lr_escape_state(
 
 
 def classification_ce_loss(labels, logits, num_classes: int, label_smoothing: float):
-    y_true = tf.one_hot(tf.cast(labels, tf.int32), int(num_classes))
+    logits = tf.cast(logits, tf.float32)
+    y_true = tf.one_hot(tf.cast(labels, tf.int32), int(num_classes), dtype=tf.float32)
     return tf.reduce_mean(
         tf.keras.losses.categorical_crossentropy(
             y_true,
