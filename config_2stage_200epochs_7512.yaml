@@ -112,6 +112,22 @@ stage_transition:
   stage2_visual_extractor_lr: 0.000002
   stage2_finetune_lr: 0.00004
 
+lr_escape:
+  enabled: true
+  start_epoch: 81                    # Only active from epoch 81+
+  min_delta: 0.001                   # Minimum val_loss improvement to count
+  plateau_patience: 18               # Epochs without improvement before trigger
+  max_cycles: 2                      # Max full escape cycles allowed
+  level1_duration: 5                 # Epochs at Level 1
+  level2_duration: 4                 # Epochs at Level 2
+  level1_head_lr_multiplier: 2.0     # Head LR = cosine × 2.0
+  level1_backbone_lr_multiplier: 1.5
+  level2_head_lr_multiplier: 3.0     # Head LR = cosine × 3.0
+  level2_backbone_lr_multiplier: 1.5
+  cap_head_lr: 0.0001                # 1e-4 — absolute upper bound
+  cap_backbone_lr: 0.000005          # 5e-6 — absolute upper bound
+  cooldown_epochs: 12                # Freeze plateau counter after success
+
 training:
   epochs: 300
   patience: 0  # 0 means NO early stopping, run full 200 epochs

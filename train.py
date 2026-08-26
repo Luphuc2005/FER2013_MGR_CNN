@@ -246,6 +246,176 @@ def resolve_monitor_value(metrics: Dict[str, object], monitor_name: str) -> floa
     return -value if key == "loss" else value
 
 
+def _apply_escape_lr(
+    cosine_head_lr: float,
+    cosine_backbone_lr: float,
+    state: Dict,
+    esc_cfg: Dict,
+) -> Tuple[float, float]:
+    """Apply LR escape multiplier on top of cosine LR, capped by upper bound."""
+    level = state["escape_level"]
+    if level == 1:
+        head_mult = float(esc_cfg.get("level1_head_lr_multiplier", 2.0))
+        back_mult = float(esc_cfg.get("level1_backbone_lr_multiplier", 1.5))
+    elif level == 2:
+        head_mult = float(esc_cfg.get("level2_head_lr_multiplier", 3.0))
+        back_mult = float(esc_cfg.get("level2_backbone_lr_multiplier", 1.5))
+    else:
+        return cosine_head_lr, cosine_backbone_lr
+    cap_head = float(esc_cfg.get("cap_head_lr", 1e-4))
+    cap_back = float(esc_cfg.get("cap_backbone_lr", 5e-6))
+    return (
+        min(cosine_head_lr * head_mult, cap_head),
+        min(cosine_backbone_lr * back_mult, cap_back),
+    )
+
+
+def _update_lr_escape_state(
+    state: Dict,
+    esc_cfg: Dict,
+    val_metrics: Dict,
+    train_loss: float,
+    epoch: int,
+    best_score: float,
+    best_epoch: int,
+    patience_anchor_epoch: int,
+    checkpoint,
+    best_manager,
+) -> Tuple[float, int, int]:
+    """Update LR escape state machine after validation.
+
+    Returns (best_score, best_epoch, patience_anchor_epoch),
+    possibly modified by rollback.
+    """
+    val_loss = float(val_metrics["loss"])
+    min_delta = float(esc_cfg.get("min_delta", 0.001))
+    max_cycles = int(esc_cfg.get("max_cycles", 2))
+
+    # Overfitting detection: train_loss down but val_loss up
+    is_overfitting = (
+        train_loss < state["prev_train_loss"]
+        and val_loss > state["best_val_loss"]
+    )
+    state["prev_train_loss"] = train_loss
+
+    # ==================== NORMAL MODE ====================
+    if state["mode"] == "normal":
+        # Cooldown: freeze plateau counter but still track best
+        if state["cooldown_remaining"] > 0:
+            state["cooldown_remaining"] -= 1
+            if val_loss < state["best_val_loss"] - min_delta:
+                state["best_val_loss"] = val_loss
+                state["plateau_counter"] = 0
+            return best_score, best_epoch, patience_anchor_epoch
+
+        # Plateau detection: CHECK improvement FIRST, THEN update best
+        improved = val_loss < state["best_val_loss"] - min_delta
+        if improved:
+            state["best_val_loss"] = val_loss
+            state["plateau_counter"] = 0
+        else:
+            state["plateau_counter"] += 1
+
+        patience = int(esc_cfg.get("plateau_patience", 18))
+        if (
+            state["plateau_counter"] >= patience
+            and not is_overfitting
+            and state["cycles_used"] < max_cycles
+        ):
+            # Save full pre-escape snapshot
+            state["snapshot"] = {
+                "best_val_loss": state["best_val_loss"],
+                "best_score": best_score,
+                "best_epoch": best_epoch,
+                "patience_anchor_epoch": patience_anchor_epoch,
+                "prev_train_loss": state["prev_train_loss"],
+            }
+            state["mode"] = "escaping"
+            state["escape_level"] = 1
+            state["escape_epoch_counter"] = 0
+            print(
+                f"[LR_ESCAPE] Cycle {state['cycles_used']+1}/{max_cycles}: "
+                f"entering Level 1 at epoch {epoch+1} "
+                f"(plateau {state['plateau_counter']} eps, "
+                f"best_val_loss={state['best_val_loss']:.5f})",
+                flush=True,
+            )
+        return best_score, best_epoch, patience_anchor_epoch
+
+    # ==================== ESCAPING MODE ====================
+    state["escape_epoch_counter"] += 1
+    pre_best = state["snapshot"]["best_val_loss"]
+    escaped_improved = val_loss < pre_best - min_delta
+
+    if escaped_improved:
+        # ---- Escape SUCCESS ----
+        completed_level = state["escape_level"]
+        cooldown = int(esc_cfg.get("cooldown_epochs", 12))
+        state["best_val_loss"] = val_loss
+        state["plateau_counter"] = 0
+        state["cycles_used"] += 1
+        state["mode"] = "normal"
+        state["escape_level"] = 0
+        state["escape_epoch_counter"] = 0
+        state["cooldown_remaining"] = cooldown
+        state["snapshot"] = None
+        print(
+            f"[LR_ESCAPE] Level {completed_level} succeeded at epoch {epoch+1}! "
+            f"val_loss={val_loss:.5f} < pre_escape={pre_best:.5f}. "
+            f"Entering cooldown ({cooldown} eps).",
+            flush=True,
+        )
+        return best_score, best_epoch, patience_anchor_epoch
+
+    # ---- Check level duration expiry ----
+    if state["escape_level"] == 1:
+        duration = int(esc_cfg.get("level1_duration", 5))
+        if state["escape_epoch_counter"] >= duration:
+            state["escape_level"] = 2
+            state["escape_epoch_counter"] = 0
+            print(
+                f"[LR_ESCAPE] Level 1 failed after {duration} eps. "
+                f"Escalating to Level 2 at epoch {epoch+1}.",
+                flush=True,
+            )
+
+    elif state["escape_level"] == 2:
+        duration = int(esc_cfg.get("level2_duration", 4))
+        if state["escape_epoch_counter"] >= duration:
+            # ---- Full cycle FAILED → ROLLBACK ----
+            snap = state["snapshot"]
+            best_ckpt = best_manager.latest_checkpoint
+            if best_ckpt:
+                checkpoint.restore(best_ckpt).expect_partial()
+                print(
+                    f"[LR_ESCAPE] Rollback: restored checkpoint {best_ckpt}",
+                    flush=True,
+                )
+            # Restore full pre-escape tracking state
+            restored_best_score = snap["best_score"]
+            restored_best_epoch = snap["best_epoch"]
+            restored_patience_anchor = snap["patience_anchor_epoch"]
+            state["best_val_loss"] = snap["best_val_loss"]
+            state["prev_train_loss"] = snap["prev_train_loss"]
+            state["cycles_used"] += 1
+            state["mode"] = "normal"
+            state["escape_level"] = 0
+            state["escape_epoch_counter"] = 0
+            state["plateau_counter"] = 0
+            state["cooldown_remaining"] = 0
+            state["snapshot"] = None
+            print(
+                f"[LR_ESCAPE] Cycle failed at epoch {epoch+1}. "
+                f"Rollback complete. "
+                f"Cycles used: {state['cycles_used']}/{max_cycles}. "
+                f"Training continues.",
+                flush=True,
+            )
+            return restored_best_score, restored_best_epoch, restored_patience_anchor
+
+    return best_score, best_epoch, patience_anchor_epoch
+
+
 def classification_ce_loss(labels, logits, num_classes: int, label_smoothing: float):
     y_true = tf.one_hot(tf.cast(labels, tf.int32), int(num_classes))
     return tf.reduce_mean(
@@ -497,6 +667,9 @@ def main() -> int:
     if global_bs != int(cfg["runtime"]["batch_size_per_gpu"]) * strategy.num_replicas_in_sync:
         raise ValueError("Global batch size mismatch.")
 
+    first_batch = next(iter(train_ds.take(1)))
+    first_inputs, first_labels = first_batch
+
     run_dir = Path(cfg["paths"]["output_dir"])
     run_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = Path(cfg["paths"]["logs_dir"])
@@ -505,9 +678,21 @@ def main() -> int:
 
     with strategy.scope():
         model = MGRConvNeXtFER(cfg)
-        dummy_image = tf.zeros([1, cfg["data"]["image_size"], cfg["data"]["image_size"], cfg["data"]["channels"]], dtype=tf.float32)
-        dummy_mask = tf.zeros([1, cfg["model"]["token_grid_size"], cfg["model"]["token_grid_size"], cfg["model"]["num_regions"]], dtype=tf.float32)
-        smoke = model({"image": dummy_image, "mask": dummy_mask}, training=False)
+        orig_ablation = getattr(model, "ablation", None)
+        orig_disable = getattr(model, "disable_region_branch_when_cnn_only", None)
+        try:
+            if hasattr(model, "ablation"):
+                model.ablation = "no_mask"
+            if hasattr(model, "disable_region_branch_when_cnn_only"):
+                model.disable_region_branch_when_cnn_only = False
+            _ = model(first_inputs, training=False)
+        finally:
+            if orig_ablation is not None:
+                model.ablation = orig_ablation
+            if orig_disable is not None:
+                model.disable_region_branch_when_cnn_only = orig_disable
+
+        smoke = model(first_inputs, training=False)
         total_params, trainable_params = get_param_count(model)
         print(f"Model params: total={total_params:,}, trainable={trainable_params:,}")
         print(f"Smoke logits shape: {smoke['logits'].shape}")
@@ -544,8 +729,6 @@ def main() -> int:
             checkpoint.restore(last_manager.latest_checkpoint).expect_partial()
             print(f"Resumed from {last_manager.latest_checkpoint}")
 
-    first_batch = next(iter(train_ds.take(1)))
-    first_inputs, first_labels = first_batch
     first_outputs = model(first_inputs, training=False)
     first_loss, _ = supervised_mgr_loss(
         first_labels,
@@ -586,6 +769,20 @@ def main() -> int:
     periodic_interval = int(cfg["training"].get("periodic_checkpoint_interval", 10) or 0)
     eval_strategy = strategy if bool(cfg["runtime"].get("distributed_eval", False)) else None
     freeze_epochs = int(cfg["model"].get("freeze_backbone_epochs", 0) or 0)
+    # --- LR Escape State Initialization ---
+    lr_esc_cfg = cfg.get("lr_escape", {})
+    lr_escape_enabled = bool(lr_esc_cfg.get("enabled", False))
+    lr_esc_state = {
+        "mode": "normal",
+        "escape_level": 0,
+        "escape_epoch_counter": 0,
+        "cycles_used": 0,
+        "plateau_counter": 0,
+        "best_val_loss": float("inf"),
+        "prev_train_loss": float("inf"),
+        "cooldown_remaining": 0,
+        "snapshot": None,
+    }
     for epoch in range(start_epoch, int(cfg["training"]["epochs"])):
         train_backbone = bool(cfg["model"].get("unfreeze_backbone", True)) and epoch >= freeze_epochs
         phase_transitioned = bool(train_backbone and epoch == freeze_epochs)
@@ -620,6 +817,16 @@ def main() -> int:
         lr, backbone_lr = resolve_phase_lrs(cfg, epoch, train_backbone)
         set_optimizer_lr(optimizer_head, lr)
         set_optimizer_lr(optimizer_backbone, backbone_lr)
+        # --- LR Escape Override ---
+        if lr_escape_enabled and lr_esc_state["escape_level"] > 0:
+            lr, backbone_lr = _apply_escape_lr(lr, backbone_lr, lr_esc_state, lr_esc_cfg)
+            set_optimizer_lr(optimizer_head, lr)
+            set_optimizer_lr(optimizer_backbone, backbone_lr)
+            print(
+                f"[LR_ESCAPE] Epoch {epoch+1}: Level {lr_esc_state['escape_level']} "
+                f"override lr_head={lr:.6f} lr_backbone={backbone_lr:.6f}",
+                flush=True,
+            )
         losses = []
         correct = 0
         seen = 0
@@ -651,6 +858,13 @@ def main() -> int:
             use_tta_hflip=bool(cfg["runtime"].get("train_val_tta_hflip", False)),
         )
         print(f"[INFO] Epoch {epoch+1}: validation finished", flush=True)
+        # --- LR Escape State Update ---
+        if lr_escape_enabled and (epoch + 1) >= int(lr_esc_cfg.get("start_epoch", 81)):
+            best_score, best_epoch, patience_anchor_epoch = _update_lr_escape_state(
+                lr_esc_state, lr_esc_cfg, val_metrics, train_loss,
+                epoch, best_score, best_epoch, patience_anchor_epoch,
+                checkpoint, best_manager,
+            )
         monitor = resolve_monitor_value(val_metrics, monitor_name)
         checkpoint_eligible = (epoch + 1) >= best_checkpoint_start_epoch
         improved = bool(checkpoint_eligible and monitor > best_score)

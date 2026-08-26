@@ -3,28 +3,28 @@ seed:
 
 source:
   pytorch_reference_log: "Outputs/figures 75.12% accuracy test run"
-  note: "Exact 2-Stage automated pipeline for 75.12%+ reproduction: Global batch size 16 (8 per GPU x 2 GPUs)."
+  note: "2-Stage Automated Pipeline for 4x GPU Server Node (Tesla V100 32GB): Stage 1 (Global BS=32) -> Stage 2 (Global BS=64) 200 Epochs."
 
 runtime:
-  gpu_ids: [0, 1]
-  batch_size_per_gpu: 8
+  gpu_ids: [0, 1, 2, 3]
+  batch_size_per_gpu: 16             # Global Batch Size = 64 (16 per GPU x 4 GPUs in Stage 2)
   fallback_batch_size_per_gpu: 8
-  require_two_gpus: true
-  min_gpus: 2
+  require_two_gpus: false
+  min_gpus: 4
   memory_growth: true
-  intra_op_threads: 2
-  inter_op_threads: 2
-  tf_data_num_parallel_calls: 2
-  tf_data_private_threadpool_size: 2
+  intra_op_threads: 16
+  inter_op_threads: 4
+  tf_data_num_parallel_calls: 8
+  tf_data_private_threadpool_size: 4
   tf_data_deterministic: false
-  prefetch_buffer: 2
+  prefetch_buffer: 4
   distributed_eval: true
   eval_tta_hflip: true
   train_val_tta_hflip: true
 
 data:
-  data_path: "/kaggle/input/datasets/doduyquynii/fer13-split"
-  mask_dir: "/kaggle/input/datasets/lhongphuc2/mediapipe-mask-datasets-35887"
+  data_path: "data/fer13-split"
+  mask_dir: "data/mediapipe_region_masks"
   num_classes: 7
   image_size: 224
   channels: 3
@@ -54,10 +54,10 @@ augmentation:
   random_erasing_value: "random"
 
 model:
-  name: "convnext_tiny_mgr_2stage_200epochs_7512"
+  name: "convnext_tiny_mgr_2stage_4gpu_7512"
   arch: "convnext_tiny"
   pretrained: true
-  use_builtin_convnext: true
+  use_builtin_convnext: false
   builtin_include_preprocessing: false
   weights:
   checkpoint_path:
@@ -105,12 +105,12 @@ model:
 
 stage_transition:
   enable_2stage_switching: true
-  stage1_end_epoch: 60
-  stage1_batch_size_per_gpu: 4     # Global Batch Size = 8 (4 per GPU x 2 GPUs)
-  stage2_batch_size_per_gpu: 8     # Global Batch Size = 16 (8 per GPU x 2 GPUs)
-  stage2_ablation: "region_only"
-  stage2_visual_extractor_lr: 0.000002
-  stage2_finetune_lr: 0.00004
+  stage1_end_epoch: 10             # Stage 1: Epoch 1 - 10 (Warmup)
+  stage1_batch_size_per_gpu: 8     # Global Batch Size = 32 (8 per GPU x 4 GPUs)
+  stage2_batch_size_per_gpu: 16    # Global Batch Size = 64 (16 per GPU x 4 GPUs)
+  stage2_ablation: "region_only"   # Stage 2: Epoch 11 - 20 (Region Attention Only)
+  stage2_visual_extractor_lr: 0.000003
+  stage2_finetune_lr: 0.00005
 
 lr_escape:
   enabled: true
@@ -129,8 +129,8 @@ lr_escape:
   cooldown_epochs: 12                # Freeze plateau counter after success
 
 training:
-  epochs: 300
-  patience: 0  # 0 means NO early stopping, run full 300 epochs
+  epochs: 20
+  patience: 0  # 0 means NO early stopping, run full 200 epochs
   loss: "cross_entropy"
   label_smoothing: 0.12
   optimizer: "sam"
@@ -148,8 +148,8 @@ training:
   resume: false
   best_checkpoint_start_epoch: 1
   periodic_checkpoint_interval: 20
-  progress_interval: 200
+  progress_interval: 100
 
 paths:
-  output_dir: "/kaggle/working/outputs/tf_runs/convnext_mgr_2stage_200epochs_7512"
-  logs_dir: "/kaggle/working/logs"
+  output_dir: "outputs/tf_runs/convnext_mgr_2stage_4gpu_200epochs"
+  logs_dir: "logs"
