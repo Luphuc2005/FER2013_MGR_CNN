@@ -168,6 +168,22 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
         return x
 
 
+class ChannelSE(tf.keras.layers.Layer):
+    def __init__(self, channels: int, reduction: int = 16):
+        super().__init__()
+        hidden = max(int(channels) // int(reduction), 1)
+        self.pool = tf.keras.layers.GlobalAveragePooling2D()
+        self.fc1 = tf.keras.layers.Dense(hidden, activation=tf.nn.gelu)
+        self.fc2 = tf.keras.layers.Dense(int(channels), activation="sigmoid")
+
+    def call(self, x, training=False):
+        scale = self.pool(x)
+        scale = self.fc1(scale, training=training)
+        scale = self.fc2(scale, training=training)
+        scale = tf.reshape(scale, [tf.shape(x)[0], 1, 1, tf.shape(x)[-1]])
+        return x * scale
+
+
 class RegionDictionary(tf.keras.layers.Layer):
     def __init__(self, num_regions: int, embed_dim: int):
         super().__init__()
@@ -291,6 +307,7 @@ class MGRConvNeXtFER(tf.keras.Model):
         self.num_regions = int(model_cfg["num_regions"])
         self.region_pooling = model_cfg.get("region_pooling", "concat")
         self.mask_guided_attention = bool(model_cfg.get("mask_guided_attention", True))
+        self.disable_region_branch_when_cnn_only = bool(model_cfg.get("disable_region_branch_when_cnn_only", False))
         self.use_global_visual_bias = bool(model_cfg.get("use_global_visual_bias", True))
         self.use_region_relation_tokens = bool(model_cfg.get("use_region_relation_tokens", True))
         self.use_cnn_aux_logits = bool(model_cfg.get("use_cnn_aux_logits", True))
@@ -306,6 +323,12 @@ class MGRConvNeXtFER(tf.keras.Model):
             use_builtin_convnext=bool(model_cfg.get("use_builtin_convnext", False)),
             builtin_include_preprocessing=bool(model_cfg.get("builtin_include_preprocessing", False)),
         )
+        self.cnn_se = None
+        if bool(model_cfg.get("use_cnn_se", False)):
+            self.cnn_se = ChannelSE(
+                int(model_cfg.get("cnn_se_channels", self.visual_dim)),
+                int(model_cfg.get("cnn_se_reduction", 16)),
+            )
         self.use_visual_pos_embed = bool(model_cfg.get("use_visual_pos_embed", True))
         if self.use_visual_pos_embed:
             _token_grid = int(model_cfg.get("token_grid_size", 7))
@@ -389,12 +412,29 @@ class MGRConvNeXtFER(tf.keras.Model):
         image = inputs["image"]
         mask = inputs.get("mask")
         feat_map = self.backbone(image, training=training)
+        if self.cnn_se is not None:
+            feat_map = self.cnn_se(feat_map, training=training)
         feat_map = tf.image.resize(feat_map, [7, 7])
         visual_tokens = tf.reshape(feat_map, [tf.shape(feat_map)[0], -1, self.visual_dim])
         if self.use_visual_pos_embed:
             visual_tokens = visual_tokens + self.visual_pos_embed
         global_avg = tf.reduce_mean(visual_tokens, axis=1)
         global_max = tf.reduce_max(visual_tokens, axis=1)
+        skip_region_branch = self.ablation == "cnn_only" and self.disable_region_branch_when_cnn_only
+        if skip_region_branch:
+            if self.cnn_aux_classifier is None:
+                raise ValueError("CNN-only without MGR requires model.use_cnn_aux_logits=true.")
+            cnn_aux_logits = self.cnn_aux_classifier(
+                self._cnn_aux_features(global_avg, global_max),
+                training=training,
+            )
+            return {
+                "logits": cnn_aux_logits,
+                "attention_logits": None,
+                "cnn_aux_logits": None,
+                "ortho_loss": tf.constant(0.0, dtype=tf.float32),
+                "attn_scores": tf.zeros([tf.shape(image)[0], 1, self.num_regions, 49], dtype=cnn_aux_logits.dtype),
+            }
         region_tokens = self.region_dict(tf.shape(image)[0])
         attn_mask = None
         if self.mask_guided_attention and self.ablation not in ("no_mask", "cnn_only"):
