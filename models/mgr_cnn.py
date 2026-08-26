@@ -149,6 +149,95 @@ class PixelUnshuffle(tf.keras.layers.Layer):
         return tf.nn.space_to_depth(x, block_size=self.downscale_factor)
 
 
+class LocalExpert(tf.keras.layers.Layer):
+    """
+    Local Expert for capturing fine-grained facial expression details (eyes, mouth corners, wrinkles).
+    Pipeline: DWConv 3x3 (groups=channels) -> GELU -> ELA Attention
+    Input shape: [B, H, W, C]
+    Output shape: [B, H, W, C]
+    """
+    def __init__(self, channels: int, ela_kernel_size: int = 7):
+        super().__init__()
+        self.channels = int(channels)
+        self.dwconv = tf.keras.layers.DepthwiseConv2D(
+            kernel_size=3, strides=1, padding="same", use_bias=False
+        )
+        self.ela = ELABlock(channels=self.channels, kernel_size=ela_kernel_size)
+
+    def call(self, x, training=False):
+        l = self.dwconv(x)
+        l = tf.nn.gelu(l)
+        f_l = self.ela(l, training=training)
+        return f_l
+
+
+class GlobalExpert(tf.keras.layers.Layer):
+    """
+    Global Expert for capturing multi-scale spatial receptive fields across facial regions.
+    Pipeline: 3 Parallel Dilated DWConvs (dilation=1, 2, 3) -> Element-wise mean
+    Input shape: [B, H, W, C]
+    Output shape: [B, H, W, C]
+    """
+    def __init__(self, channels: int):
+        super().__init__()
+        self.channels = int(channels)
+        self.dwconv_d1 = tf.keras.layers.DepthwiseConv2D(
+            kernel_size=3, strides=1, dilation_rate=1, padding="same", use_bias=False
+        )
+        self.dwconv_d2 = tf.keras.layers.DepthwiseConv2D(
+            kernel_size=3, strides=1, dilation_rate=2, padding="same", use_bias=False
+        )
+        self.dwconv_d3 = tf.keras.layers.DepthwiseConv2D(
+            kernel_size=3, strides=1, dilation_rate=3, padding="same", use_bias=False
+        )
+
+    def call(self, x, training=False):
+        g1 = self.dwconv_d1(x)
+        g2 = self.dwconv_d2(x)
+        g3 = self.dwconv_d3(x)
+        f_g = (g1 + g2 + g3) / 3.0
+        return f_g, g1, g2, g3
+
+
+class LocalGlobalExpertBlock(tf.keras.layers.Layer):
+    """
+    Local-Global Expert Block (LGEB) inserted after Stage 3 (14x14x384).
+    Local Expert captures micro-details; Global Expert captures macro spatial relations.
+    Run 1 Fusion: F = F_L + F_G (optional residual: F = X + F_L + F_G if use_residual=True).
+    Input shape: [B, H, W, C] (e.g. [B, 14, 14, 384])
+    Output shape: [B, H, W, C]
+    """
+    def __init__(self, dim: int, use_residual: bool = False, debug: bool = True):
+        super().__init__()
+        self.dim = int(dim)
+        self.use_residual = bool(use_residual)
+        self.debug = bool(debug)
+        self.local_expert = LocalExpert(channels=self.dim)
+        self.global_expert = GlobalExpert(channels=self.dim)
+        self._printed_debug = False
+
+    def call(self, x, training=False):
+        f_l = self.local_expert(x, training=training)
+        f_g, g1, g2, g3 = self.global_expert(x, training=training)
+
+        if self.use_residual:
+            f = x + f_l + f_g
+        else:
+            f = f_l + f_g
+
+        if self.debug and not self._printed_debug:
+            self._printed_debug = True
+            print(f"[DEBUG LGEB] Stage3 X      : {x.shape}")
+            print(f"[DEBUG LGEB] Local F_L     : {f_l.shape}")
+            print(f"[DEBUG LGEB] Global G1     : {g1.shape}")
+            print(f"[DEBUG LGEB] Global G2     : {g2.shape}")
+            print(f"[DEBUG LGEB] Global G3     : {g3.shape}")
+            print(f"[DEBUG LGEB] Global F_G    : {f_g.shape}")
+            print(f"[DEBUG LGEB] LGEB output   : {f.shape}")
+
+        return f
+
+
 class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
     def __init__(
         self,
@@ -159,6 +248,8 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
         use_ela: bool = False,
         ela_kernel_size: int = 7,
         use_pixel_unshuffle: bool = False,
+        use_lgeb: bool = False,
+        lgeb_use_residual: bool = False,
     ):
         super().__init__()
         self.pretrained = bool(pretrained)
@@ -167,6 +258,8 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
         self.builtin_include_preprocessing = bool(builtin_include_preprocessing)
         self.use_ela = bool(use_ela)
         self.use_pixel_unshuffle = bool(use_pixel_unshuffle)
+        self.use_lgeb = bool(use_lgeb)
+        self.lgeb_use_residual = bool(lgeb_use_residual)
         if self.use_builtin_convnext:
             self.app = self._build_builtin_convnext()
             self.downsample_layers = []
@@ -174,6 +267,7 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
             self.stage_blocks = []
             self.ela_stage2 = None
             self.ela_stage3 = None
+            self.lgeb_stage3 = None
             return
 
         dims = [96, 192, 384, 768]
@@ -210,6 +304,10 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
         if self.use_ela:
             self.ela_stage2 = ELABlock(dims[2], kernel_size=ela_kernel_size)
             self.ela_stage3 = ELABlock(dims[3], kernel_size=ela_kernel_size)
+
+        self.lgeb_stage3 = None
+        if self.use_lgeb:
+            self.lgeb_stage3 = LocalGlobalExpertBlock(dim=dims[2], use_residual=self.lgeb_use_residual)
 
         if self.pretrained:
             self._load_imagenet_pretrained()
@@ -289,6 +387,8 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
             x = down(x, training=training)
             for block in self.stages[i]:
                 x = block(x, training=training)
+            if i == 2 and self.use_lgeb and self.lgeb_stage3 is not None:
+                x = self.lgeb_stage3(x, training=training)
             if self.use_ela:
                 if i == 2 and self.ela_stage2 is not None:
                     x = self.ela_stage2(x, training=training)
@@ -446,6 +546,7 @@ class MGRConvNeXtFER(tf.keras.Model):
         self.cnn_aux_logit_weight = float(model_cfg.get("cnn_aux_logit_weight", 0.8))
         self.attention_logit_weight = float(model_cfg.get("attention_logit_weight", 0.2))
         self.ortho_loss_type = model_cfg.get("ortho_loss_type", "squared_offdiag")
+        use_lgeb_flag = bool(model_cfg.get("use_lgeb", False)) or (model_cfg.get("ablation") == "lgeb_stage3")
         self.backbone = ConvNeXtTinyBackbone(
             pretrained=bool(model_cfg.get("pretrained", False)),
             weights=model_cfg.get("weights"),
@@ -454,6 +555,8 @@ class MGRConvNeXtFER(tf.keras.Model):
             use_ela=bool(model_cfg.get("use_ela", False)),
             ela_kernel_size=int(model_cfg.get("ela_kernel_size", 7)),
             use_pixel_unshuffle=bool(model_cfg.get("use_pixel_unshuffle", False)),
+            use_lgeb=use_lgeb_flag,
+            lgeb_use_residual=bool(model_cfg.get("lgeb_use_residual", False)),
         )
         self.cnn_se = None
         if bool(model_cfg.get("use_cnn_se", False)):
