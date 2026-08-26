@@ -120,6 +120,7 @@ lr_escape:
 training:
   epochs: 100
   patience: 0
+  warmup_epochs: 5
   loss: "cross_entropy"
   label_smoothing: 0.12
   optimizer: "adamw"

@@ -197,10 +197,15 @@ def set_optimizer_lr(optimizer, lr_value: float):
             pass
 
 
-def cosine_lr(base_lr: float, epoch: int, epochs: int, min_lr: float = 1e-6) -> float:
+def cosine_lr(base_lr: float, epoch: int, epochs: int, min_lr: float = 1e-6, warmup_epochs: int = 5) -> float:
     if epochs <= 1:
         return base_lr
-    ratio = epoch / float(max(epochs - 1, 1))
+    if warmup_epochs > 0 and epoch < warmup_epochs:
+        warmup_factor = float(epoch + 1) / float(warmup_epochs)
+        return float(min_lr + (base_lr - min_lr) * warmup_factor)
+    decay_epochs = max(1, epochs - warmup_epochs)
+    decay_epoch = epoch - warmup_epochs
+    ratio = min(1.0, max(0.0, float(decay_epoch) / float(max(decay_epochs - 1, 1))))
     cosine = 0.5 * (1.0 + np.cos(np.pi * ratio))
     return float(min_lr + (base_lr - min_lr) * cosine)
 
@@ -208,6 +213,7 @@ def cosine_lr(base_lr: float, epoch: int, epochs: int, min_lr: float = 1e-6) -> 
 def resolve_phase_lrs(cfg: Dict, epoch: int, train_backbone: bool) -> Tuple[float, float]:
     training_cfg = cfg["training"]
     total_epochs = int(training_cfg["epochs"])
+    warmup_epochs = int(training_cfg.get("warmup_epochs", 5))
     stage_tr = cfg.get("stage_transition", {})
     if bool(stage_tr.get("enable_2stage_switching", False)) and epoch >= int(stage_tr.get("stage1_end_epoch", 60)):
         stage2_start = int(stage_tr.get("stage1_end_epoch", 60))
@@ -216,8 +222,8 @@ def resolve_phase_lrs(cfg: Dict, epoch: int, train_backbone: bool) -> Tuple[floa
         head_base_lr = float(stage_tr.get("stage2_finetune_lr", training_cfg.get("finetune_lr", 0.00004)))
         visual_base_lr = float(stage_tr.get("stage2_visual_extractor_lr", training_cfg.get("visual_extractor_lr", 0.000002)))
         return (
-            cosine_lr(head_base_lr, phase2_epoch, phase2_total),
-            cosine_lr(visual_base_lr, phase2_epoch, phase2_total),
+            cosine_lr(head_base_lr, phase2_epoch, phase2_total, warmup_epochs=min(warmup_epochs, phase2_total)),
+            cosine_lr(visual_base_lr, phase2_epoch, phase2_total, warmup_epochs=min(warmup_epochs, phase2_total)),
         )
     if train_backbone:
         freeze_epochs = int(cfg["model"].get("freeze_backbone_epochs", 0) or 0)
@@ -225,10 +231,10 @@ def resolve_phase_lrs(cfg: Dict, epoch: int, train_backbone: bool) -> Tuple[floa
         head_base_lr = float(training_cfg.get("finetune_lr", training_cfg["lr"]))
         visual_base_lr = float(training_cfg.get("visual_extractor_lr", head_base_lr))
         return (
-            cosine_lr(head_base_lr, phase_epoch, total_epochs),
-            cosine_lr(visual_base_lr, phase_epoch, total_epochs),
+            cosine_lr(head_base_lr, phase_epoch, total_epochs, warmup_epochs=warmup_epochs),
+            cosine_lr(visual_base_lr, phase_epoch, total_epochs, warmup_epochs=warmup_epochs),
         )
-    return cosine_lr(float(training_cfg["lr"]), int(epoch), total_epochs), 0.0
+    return cosine_lr(float(training_cfg["lr"]), int(epoch), total_epochs, warmup_epochs=warmup_epochs), 0.0
 
 
 def resolve_monitor_value(metrics: Dict[str, object], monitor_name: str) -> float:
