@@ -120,7 +120,7 @@ training:
   patience: 0
   loss: "cross_entropy"
   label_smoothing: 0.12
-  optimizer: "sam"
+  optimizer: "adamw"
   base_optimizer: "adamw"
   sam_rho: 0.03
   sam_adaptive: false
