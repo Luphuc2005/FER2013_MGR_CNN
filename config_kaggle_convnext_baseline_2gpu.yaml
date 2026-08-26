@@ -23,7 +23,7 @@ runtime:
   train_val_tta_hflip: false
 
 data:
-  data_path: "data/fer13-split"
+  data_path: "/kaggle/input/datasets/doduyquynii/fer13-split"
   mask_dir:
   num_classes: 7
   image_size: 224
@@ -33,7 +33,7 @@ data:
   preload_masks: false
   allow_missing_masks: false
   use_clean_filter: true
-  bad_row_indices_path: "../dataset/bad_row_indices_drop345_mediapipe_failed.txt"
+  bad_row_indices_path: "/kaggle/input/datasets/doduyquynii/bad_row_indices_drop345_mediapipe_failed.txt"
   mask_ablation: "none"
   mask_region_permutation: [4, 2, 0, 5, 1, 3]
   shuffle_buffer: 28709

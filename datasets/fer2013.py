@@ -42,9 +42,17 @@ def _limit_records(records: SplitRecords, limit: Optional[int]) -> SplitRecords:
 
 
 def _load_bad_indices(path: Optional[Path]) -> set:
-    if path is None or not path.exists():
+    target_path = path if (path is not None and path.exists()) else None
+    if target_path is None:
+        kaggle_input = Path("/kaggle/input")
+        if kaggle_input.exists():
+            for p in kaggle_input.rglob("bad_row_indices_drop345_mediapipe_failed.txt"):
+                target_path = p
+                print(f"[INFO] Auto-resolved bad_row_indices file: {target_path}")
+                break
+    if target_path is None or not target_path.exists():
         return set()
-    with path.open("r", encoding="utf-8") as f:
+    with target_path.open("r", encoding="utf-8") as f:
         return {int(line.strip()) for line in f if line.strip()}
 
 
@@ -74,13 +82,21 @@ def _verify_mask_paths(mask_paths: np.ndarray, split: str, *, allow_missing: boo
 
 
 def _resolve_split_csv_dir(data_dir: Path) -> Path:
-    if all((data_dir / f"{split}.csv").exists() for split in ("train", "val", "test")):
+    if data_dir.exists() and all((data_dir / f"{split}.csv").exists() for split in ("train", "val", "test")):
         return data_dir
-    candidates = sorted({p.parent for p in data_dir.rglob("train.csv")})
-    for candidate in candidates:
-        if all((candidate / f"{split}.csv").exists() for split in ("train", "val", "test")):
-            print(f"[INFO] Resolved FER split CSV directory: {candidate}")
-            return candidate
+    if data_dir.exists():
+        candidates = sorted({p.parent for p in data_dir.rglob("train.csv")})
+        for candidate in candidates:
+            if all((candidate / f"{split}.csv").exists() for split in ("train", "val", "test")):
+                print(f"[INFO] Resolved FER split CSV directory: {candidate}")
+                return candidate
+    kaggle_input = Path("/kaggle/input")
+    if kaggle_input.exists():
+        candidates = sorted({p.parent for p in kaggle_input.rglob("train.csv")})
+        for candidate in candidates:
+            if all((candidate / f"{split}.csv").exists() for split in ("train", "val", "test")):
+                print(f"[INFO] Auto-resolved Kaggle FER split CSV directory: {candidate}")
+                return candidate
     return data_dir
 
 
