@@ -136,6 +136,19 @@ class ELABlock(tf.keras.layers.Layer):
         return x + self.gamma * y
 
 
+class PixelUnshuffle(tf.keras.layers.Layer):
+    """
+    PixelUnshuffle (Space-to-Depth) layer.
+    Transforms tensor of shape [B, H, W, C] to [B, H//r, W//r, C * (r**2)]
+    """
+    def __init__(self, downscale_factor: int = 2):
+        super().__init__()
+        self.downscale_factor = int(downscale_factor)
+
+    def call(self, x):
+        return tf.nn.space_to_depth(x, block_size=self.downscale_factor)
+
+
 class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
     def __init__(
         self,
@@ -145,6 +158,7 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
         builtin_include_preprocessing: bool = False,
         use_ela: bool = False,
         ela_kernel_size: int = 7,
+        use_pixel_unshuffle: bool = False,
     ):
         super().__init__()
         self.pretrained = bool(pretrained)
@@ -152,6 +166,7 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
         self.use_builtin_convnext = bool(use_builtin_convnext)
         self.builtin_include_preprocessing = bool(builtin_include_preprocessing)
         self.use_ela = bool(use_ela)
+        self.use_pixel_unshuffle = bool(use_pixel_unshuffle)
         if self.use_builtin_convnext:
             self.app = self._build_builtin_convnext()
             self.downsample_layers = []
@@ -167,9 +182,18 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
             tf.keras.Sequential([tf.keras.layers.Conv2D(dims[0], 4, strides=4, padding="same"), _norm()])
         ]
         for i in range(3):
-            self.downsample_layers.append(
-                tf.keras.Sequential([_norm(), tf.keras.layers.Conv2D(dims[i + 1], 2, strides=2, padding="same")])
-            )
+            if self.use_pixel_unshuffle:
+                self.downsample_layers.append(
+                    tf.keras.Sequential([
+                        PixelUnshuffle(2),
+                        tf.keras.layers.Conv2D(dims[i + 1], 1, strides=1, padding="same", use_bias=False),
+                        _norm(),
+                    ])
+                )
+            else:
+                self.downsample_layers.append(
+                    tf.keras.Sequential([_norm(), tf.keras.layers.Conv2D(dims[i + 1], 2, strides=2, padding="same")])
+                )
         rates = tf.linspace(0.0, 0.1, sum(depths))
         self.stages = []
         cursor = 0
@@ -235,10 +259,13 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
             self.downsample_layers[0].layers[0].set_weights(stem_app.layers[0].get_weights())
             self.downsample_layers[0].layers[1].set_weights(stem_app.layers[1].get_weights())
 
-            for idx in range(3):
-                ds_app = app.get_layer(f"convnext_tiny_downsampling_block_{idx}")
-                self.downsample_layers[idx + 1].layers[0].set_weights(ds_app.layers[0].get_weights())
-                self.downsample_layers[idx + 1].layers[1].set_weights(ds_app.layers[1].get_weights())
+            if not self.use_pixel_unshuffle:
+                for idx in range(3):
+                    ds_app = app.get_layer(f"convnext_tiny_downsampling_block_{idx}")
+                    self.downsample_layers[idx + 1].layers[0].set_weights(ds_app.layers[0].get_weights())
+                    self.downsample_layers[idx + 1].layers[1].set_weights(ds_app.layers[1].get_weights())
+            else:
+                print("[INFO] PixelUnshuffle enabled for downsampling: loaded 100% ImageNet weights for Stem and 18 Stage blocks, downsample Conv1x1 initialized freshly.")
 
             depths = [3, 3, 9, 3]
             for i, d in enumerate(depths):
@@ -426,6 +453,7 @@ class MGRConvNeXtFER(tf.keras.Model):
             builtin_include_preprocessing=bool(model_cfg.get("builtin_include_preprocessing", False)),
             use_ela=bool(model_cfg.get("use_ela", False)),
             ela_kernel_size=int(model_cfg.get("ela_kernel_size", 7)),
+            use_pixel_unshuffle=bool(model_cfg.get("use_pixel_unshuffle", False)),
         )
         self.cnn_se = None
         if bool(model_cfg.get("use_cnn_se", False)):
