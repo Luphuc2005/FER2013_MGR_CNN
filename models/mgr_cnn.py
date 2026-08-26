@@ -46,7 +46,7 @@ class ConvNeXtBlock(tf.keras.layers.Layer):
         x = self.pw1(x)
         x = self.act(x)
         x = self.pw2(x)
-        x = x * self.gamma
+        x = x * tf.cast(self.gamma, x.dtype)
         return residual + self.drop_path(x, training=training)
 
 
@@ -90,7 +90,7 @@ class GroupNormalization(tf.keras.layers.Layer):
             mean, variance = tf.nn.moments(x_reshaped, axes=[1, 2, 4], keepdims=True)
             x_norm = (x_reshaped - mean) / tf.sqrt(variance + self.epsilon)
             x_norm = tf.reshape(x_norm, [B, H, W, C])
-        return self.gamma * x_norm + self.beta
+        return tf.cast(self.gamma, x_norm.dtype) * x_norm + tf.cast(self.beta, x_norm.dtype)
 
 
 class ELABlock(tf.keras.layers.Layer):
@@ -133,7 +133,7 @@ class ELABlock(tf.keras.layers.Layer):
         a_w = tf.expand_dims(a_w, axis=1)  # [B, 1, W, C]
 
         y = x * a_h * a_w
-        return x + self.gamma * y
+        return x + tf.cast(self.gamma, x.dtype) * y
 
 
 class PixelUnshuffle(tf.keras.layers.Layer):
@@ -370,7 +370,7 @@ class CrossAttentionWithMask(tf.keras.layers.Layer):
         scores = tf.einsum("bhqd,bhkd->bhqk", q, k) * self.scale
         if region_masks is not None and self.mask_attention_alpha > 0.0:
             mask = tf.clip_by_value(region_masks, self.mask_floor, 1.0)
-            scores = scores + tf.expand_dims(tf.math.log(mask + 1e-6) * self.mask_attention_alpha, axis=1)
+            scores = scores + tf.cast(tf.expand_dims(tf.math.log(mask + 1e-6) * self.mask_attention_alpha, axis=1), scores.dtype)
         attn = tf.nn.softmax(scores, axis=-1)
         attn = self.attn_drop(attn, training=training)
         context = tf.einsum("bhqk,bhkd->bhqd", attn, v)
@@ -549,7 +549,7 @@ class MGRConvNeXtFER(tf.keras.Model):
         feat_map = tf.image.resize(feat_map, [7, 7])
         visual_tokens = tf.reshape(feat_map, [tf.shape(feat_map)[0], -1, self.visual_dim])
         if self.use_visual_pos_embed:
-            visual_tokens = visual_tokens + self.visual_pos_embed
+            visual_tokens = visual_tokens + tf.cast(self.visual_pos_embed, visual_tokens.dtype)
         global_avg = tf.reduce_mean(visual_tokens, axis=1)
         global_max = tf.reduce_max(visual_tokens, axis=1)
         skip_region_branch = self.ablation == "cnn_only" and self.disable_region_branch_when_cnn_only
@@ -576,9 +576,9 @@ class MGRConvNeXtFER(tf.keras.Model):
         region_features, attn_scores = self.cross_attention(region_tokens, visual_tokens, region_masks=attn_mask, training=training)
         if self.relation_builder is not None:
             region_features = self.relation_builder(region_features, training=training)
-        region_features = region_features + self.pos_embed[:, : region_features.shape[1], :]
+        region_features = region_features + tf.cast(self.pos_embed[:, : region_features.shape[1], :], region_features.dtype)
         if self.use_global_visual_bias:
-            region_features = region_features + tf.expand_dims(self.global_proj(global_avg, training=training), axis=1)
+            region_features = region_features + tf.cast(tf.expand_dims(self.global_proj(global_avg, training=training), axis=1), region_features.dtype)
         encoded = region_features
         for block in self.encoder:
             encoded = block(encoded, training=training)
