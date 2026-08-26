@@ -55,7 +55,7 @@ augmentation:
   random_erasing_value: "random"
 
 model:
-  name: "convnext_tiny_baseline_2gpu_sam_100ep"
+  name: "convnext_tiny_baseline_2gpu_sam_60ep"
   arch: "convnext_tiny"
   pretrained: true
   use_builtin_convnext: false
@@ -120,7 +120,7 @@ lr_escape:
   enabled: false
 
 training:
-  epochs: 100
+  epochs: 60
   patience: 0
   warmup_epochs: 5
   loss: "cross_entropy"
@@ -143,5 +143,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/tf_runs/convnext_baseline_2gpu_sam_100ep"
+  output_dir: "outputs/tf_runs/convnext_baseline_2gpu_sam_60ep"
   logs_dir: "logs"
