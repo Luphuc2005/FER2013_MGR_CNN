@@ -495,6 +495,7 @@ class CrossAttentionWithMask(tf.keras.layers.Layer):
         self.drop_path = DropPath(dropout if dropout > 0.0 else 0.0)
         self.norm1 = _norm(1e-5)
         self.ffn = tf.keras.Sequential([
+            tf.keras.Input(shape=(embed_dim,)),
             tf.keras.layers.Dense(embed_dim * 2, activation=tf.nn.gelu),
             tf.keras.layers.Dropout(dropout),
             tf.keras.layers.Dense(embed_dim),
@@ -535,6 +536,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         self.drop = tf.keras.layers.Dropout(dropout)
         self.norm1 = _norm(1e-5)
         self.ffn = tf.keras.Sequential([
+            tf.keras.Input(shape=(embed_dim,)),
             tf.keras.layers.Dense(embed_dim * 2, activation=tf.nn.gelu),
             tf.keras.layers.Dropout(dropout),
             tf.keras.layers.Dense(embed_dim),
@@ -554,6 +556,7 @@ class RelationTokenBuilder(tf.keras.layers.Layer):
         self.relation_pairs = list(relation_pairs)
         self.fusions = [
             tf.keras.Sequential([
+                tf.keras.Input(shape=(embed_dim * 2,)),
                 tf.keras.layers.LayerNormalization(epsilon=1e-5),
                 tf.keras.layers.Dense(embed_dim),
                 tf.keras.layers.Activation(tf.nn.gelu),
@@ -646,13 +649,19 @@ class MGRConvNeXtFER(tf.keras.Model):
             initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
             trainable=True,
         )
-        self.global_proj = tf.keras.Sequential([_norm(1e-5), tf.keras.layers.Dense(self.embed_dim), tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25)))])
-        self.global_proj.build([None, self.visual_dim])
+        self.global_proj = tf.keras.Sequential([
+            tf.keras.Input(shape=(self.visual_dim,)),
+            _norm(1e-5),
+            tf.keras.layers.Dense(self.embed_dim),
+            tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25)))
+        ])
         self.encoder = [
             TransformerEncoderBlock(self.embed_dim, int(model_cfg["num_heads"]), float(model_cfg.get("transformer_dropout", 0.25)))
             for _ in range(int(model_cfg["num_encoder_layers"]))
         ]
+        classifier_in_dim = self.region_token_count * self.embed_dim if self.region_pooling == "concat" else self.embed_dim
         self.classifier = tf.keras.Sequential([
+            tf.keras.Input(shape=(classifier_in_dim,)),
             _norm(1e-5),
             tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.45))),
             tf.keras.layers.Dense(int(model_cfg.get("classifier_hidden_dim", 512))),
@@ -660,12 +669,11 @@ class MGRConvNeXtFER(tf.keras.Model):
             tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout2", 0.35))),
             tf.keras.layers.Dense(self.num_classes),
         ])
-        classifier_in_dim = self.region_token_count * self.embed_dim if self.region_pooling == "concat" else self.embed_dim
-        self.classifier.build([None, classifier_in_dim])
         self.cnn_aux_classifier = None
         if self.use_cnn_aux_logits:
             cnn_aux_in_dim = self.visual_dim if self.cnn_aux_pooling == "avg" else self.visual_dim * 2
             self.cnn_aux_classifier = tf.keras.Sequential([
+                tf.keras.Input(shape=(cnn_aux_in_dim,)),
                 _norm(1e-5),
                 tf.keras.layers.Dropout(float(model_cfg.get("cnn_aux_dropout", 0.2))),
                 tf.keras.layers.Dense(int(model_cfg.get("cnn_aux_hidden_dim", 768))),
@@ -673,7 +681,6 @@ class MGRConvNeXtFER(tf.keras.Model):
                 tf.keras.layers.Dropout(float(model_cfg.get("cnn_aux_dropout", 0.2))),
                 tf.keras.layers.Dense(self.num_classes),
             ])
-            self.cnn_aux_classifier.build([None, cnn_aux_in_dim])
 
     def _pool_regions(self, encoded):
         if self.region_pooling == "concat":
