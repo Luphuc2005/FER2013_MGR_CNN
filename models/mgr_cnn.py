@@ -635,6 +635,8 @@ class MGRConvNeXtFER(tf.keras.Model):
         self.num_regions = int(model_cfg["num_regions"])
         self.region_pooling = model_cfg.get("region_pooling", "concat")
         self.mask_guided_attention = bool(model_cfg.get("mask_guided_attention", True))
+        self.mgr_mask_resize_method = str(model_cfg.get("mgr_mask_resize_method", "area"))
+        self.mgr_soft_mask = bool(model_cfg.get("mgr_soft_mask", True))
         self.disable_region_branch_when_cnn_only = bool(model_cfg.get("disable_region_branch_when_cnn_only", False))
         self.use_global_visual_bias = bool(model_cfg.get("use_global_visual_bias", True))
         self.use_region_relation_tokens = bool(model_cfg.get("use_region_relation_tokens", True))
