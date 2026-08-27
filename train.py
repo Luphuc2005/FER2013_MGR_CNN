@@ -132,8 +132,16 @@ def build_optimizer(cfg: Dict, learning_rate: float):
 
 
 def get_param_count(model: tf.keras.Model) -> Tuple[int, int]:
-    total = int(np.sum([np.prod(v.shape) for v in model.variables]))
-    trainable = int(np.sum([np.prod(v.shape) for v in model.trainable_variables]))
+    try:
+        vars_list = model.variables
+    except Exception:
+        vars_list = []
+    try:
+        trainable_vars_list = model.trainable_variables
+    except Exception:
+        trainable_vars_list = []
+    total = int(np.sum([np.prod(v.shape) for v in vars_list])) if vars_list else 0
+    trainable = int(np.sum([np.prod(v.shape) for v in trainable_vars_list])) if trainable_vars_list else 0
     return total, trainable
 
 
