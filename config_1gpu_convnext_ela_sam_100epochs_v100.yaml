@@ -21,7 +21,7 @@ runtime:
   prefetch_buffer: 2
   distributed_eval: false
   eval_tta_hflip: true
-  train_val_tta_hflip: false
+  train_val_tta_hflip: true
 
 data:
   data_path: "data/fer13-split"
