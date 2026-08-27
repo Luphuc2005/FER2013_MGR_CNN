@@ -11,7 +11,7 @@ export TF_FORCE_GPU_ALLOW_GROWTH=true
 export MGR_GPU_IDS=0
 export MGR_REQUIRE_TWO_GPUS=0
 export MGR_MIN_GPUS=1
-export MGR_BATCH_SIZE_PER_GPU=16
+export MGR_BATCH_SIZE_PER_GPU=8
 
 mkdir -p logs
 STAMP="$(date +%Y%m%d_%H%M%S)"
