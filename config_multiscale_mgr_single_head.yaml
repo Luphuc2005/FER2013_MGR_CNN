@@ -70,6 +70,7 @@ model:
   num_regions: 6
   token_grid_size: 7
   multi_scale_mgr: true
+  use_dynamic_region_gate: false
   stage3_token_grid_size: 14
   stage4_token_grid_size: 7
   stage3_visual_dim: 384

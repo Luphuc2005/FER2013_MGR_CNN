@@ -593,6 +593,31 @@ class RelationTokenBuilder(tf.keras.layers.Layer):
         return region_features if not tokens else tf.concat([region_features] + tokens, axis=1)
 
 
+class DynamicRegionGate(tf.keras.layers.Layer):
+    """
+    Dynamic Region-wise Gate for Multi-Scale MGR (Stage 3 + Stage 4).
+    Dynamically computes a soft gating vector g in (0, 1) per region token to adaptively
+    balance fine-grained Stage 3 features (14x14) and high-level Stage 4 features (7x7).
+    """
+    def __init__(self, embed_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.embed_dim = int(embed_dim)
+        self.gate_net = tf.keras.Sequential([
+            tf.keras.Input(shape=(None, embed_dim * 2)),
+            tf.keras.layers.Dense(embed_dim, activation=tf.nn.gelu),
+            tf.keras.layers.Dropout(dropout),
+            tf.keras.layers.Dense(embed_dim, activation=tf.nn.sigmoid),
+        ])
+        self.proj = tf.keras.layers.Dense(embed_dim)
+
+    def call(self, r3, r4, training=False):
+        concat_feat = tf.concat([r3, r4], axis=-1)
+        gate = self.gate_net(concat_feat, training=training)
+        gated_blend = gate * r3 + (1.0 - gate) * r4
+        fused = gated_blend + self.proj(concat_feat)
+        return fused, gate
+
+
 class MGRConvNeXtFER(tf.keras.Model):
     def __init__(self, cfg: Dict):
         super().__init__(name=cfg["model"]["name"])
@@ -700,6 +725,7 @@ class MGRConvNeXtFER(tf.keras.Model):
             tf.keras.layers.Dense(self.embed_dim),
             tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25)))
         ])
+        self.use_dynamic_region_gate = bool(model_cfg.get("use_dynamic_region_gate", True))
         self.global_proj_stage3 = None
         self.multi_scale_fusion = None
         if self.multi_scale_mgr:
@@ -709,7 +735,10 @@ class MGRConvNeXtFER(tf.keras.Model):
                 tf.keras.layers.Dense(self.embed_dim),
                 tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25)))
             ])
-            self.multi_scale_fusion = tf.keras.layers.Dense(self.embed_dim)
+            if self.use_dynamic_region_gate:
+                self.multi_scale_fusion = DynamicRegionGate(self.embed_dim, float(model_cfg.get("transformer_dropout", 0.25)))
+            else:
+                self.multi_scale_fusion = tf.keras.layers.Dense(self.embed_dim)
         self.encoder = [
             TransformerEncoderBlock(self.embed_dim, int(model_cfg["num_heads"]), float(model_cfg.get("transformer_dropout", 0.25)))
             for _ in range(int(model_cfg["num_encoder_layers"]))
