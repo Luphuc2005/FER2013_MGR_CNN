@@ -504,7 +504,7 @@ class CrossAttentionWithMask(tf.keras.layers.Layer):
         self.drop_path = DropPath(dropout if dropout > 0.0 else 0.0)
         self.norm1 = _norm(1e-5)
         self.ffn = tf.keras.Sequential([
-            tf.keras.Input(shape=(embed_dim,)),
+            tf.keras.Input(shape=(None, embed_dim)),
             tf.keras.layers.Dense(embed_dim * 2, activation=tf.nn.gelu),
             tf.keras.layers.Dropout(dropout),
             tf.keras.layers.Dense(embed_dim),
@@ -545,7 +545,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         self.drop = tf.keras.layers.Dropout(dropout)
         self.norm1 = _norm(1e-5)
         self.ffn = tf.keras.Sequential([
-            tf.keras.Input(shape=(embed_dim,)),
+            tf.keras.Input(shape=(None, embed_dim)),
             tf.keras.layers.Dense(embed_dim * 2, activation=tf.nn.gelu),
             tf.keras.layers.Dropout(dropout),
             tf.keras.layers.Dense(embed_dim),
