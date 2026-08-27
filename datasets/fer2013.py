@@ -210,9 +210,10 @@ def _load_mask_npy(mask_path: tf.Tensor, *, allow_missing: bool = False) -> tf.T
     return mask
 
 
-def _resize_mask(mask: tf.Tensor, grid_size: int) -> tf.Tensor:
+def _resize_mask(mask: tf.Tensor, grid_size: int, method: str = "area") -> tf.Tensor:
     mask = tf.transpose(mask, [1, 2, 0])
-    mask = tf.image.resize(mask, [grid_size, grid_size], method="bilinear")
+    if mask.shape[0] != grid_size or mask.shape[1] != grid_size:
+        mask = tf.image.resize(mask, [grid_size, grid_size], method=method)
     return tf.clip_by_value(mask, 0.0, 1.0)
 
 
@@ -234,6 +235,7 @@ def _apply_mask_ablation(mask: tf.Tensor, ablation: str, mask_floor: float, perm
         perm = tf.constant(list(permutation or [4, 2, 0, 5, 1, 3]), dtype=tf.int32)
         mask = tf.gather(mask, perm, axis=-1)
     return tf.clip_by_value(mask, mask_floor, 1.0)
+
 
 
 def _random_erasing(image: tf.Tensor, cfg: Dict) -> tf.Tensor:
@@ -330,12 +332,14 @@ def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dic
     image = _decode_pixels(pixels, int(cfg["data"]["image_size"]), int(cfg["data"]["channels"]))
     mask = None
     mask_grid_size = _target_mask_grid_size(cfg)
+    resize_method = str(cfg["model"].get("mgr_mask_resize_method", "area"))
     if mask_tensor is not None:
-        mask = _resize_mask(tf.cast(mask_tensor, tf.float32), mask_grid_size)
+        mask = _resize_mask(tf.cast(mask_tensor, tf.float32), mask_grid_size, method=resize_method)
     elif mask_path is not None:
         mask = _resize_mask(
             _load_mask_npy(mask_path, allow_missing=bool(cfg["data"].get("allow_missing_masks", False))),
             mask_grid_size,
+            method=resize_method,
         )
     if mask is not None:
         mask = _apply_mask_ablation(

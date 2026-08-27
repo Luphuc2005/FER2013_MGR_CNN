@@ -719,13 +719,8 @@ class MGRConvNeXtFER(tf.keras.Model):
             initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
             trainable=True,
         )
-        self.global_proj = tf.keras.Sequential([
-            tf.keras.Input(shape=(self.visual_dim,)),
-            _norm(1e-5),
-            tf.keras.layers.Dense(self.embed_dim),
-            tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25)))
-        ])
-        self.use_dynamic_region_gate = bool(model_cfg.get("use_dynamic_region_gate", True))
+
+        self.use_dynamic_region_gate = bool(model_cfg.get("use_dynamic_region_gate", False))
         self.global_proj_stage3 = None
         self.multi_scale_fusion = None
         if self.multi_scale_mgr:
@@ -739,11 +734,41 @@ class MGRConvNeXtFER(tf.keras.Model):
                 self.multi_scale_fusion = DynamicRegionGate(self.embed_dim, float(model_cfg.get("transformer_dropout", 0.25)))
             else:
                 self.multi_scale_fusion = tf.keras.layers.Dense(self.embed_dim)
+
+        self.global_proj = tf.keras.Sequential([
+            tf.keras.Input(shape=(self.visual_dim,)),
+            _norm(1e-5),
+            tf.keras.layers.Dense(self.embed_dim),
+            tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25))),
+        ])
+        self.pos_embed = self.add_weight(
+            name="pos_embed",
+            shape=(1, self.num_regions + len(model_cfg.get("region_relation_pairs", [])), self.embed_dim),
+            initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
+            trainable=True,
+        )
+
+        self.relation_builder = None
+        if self.use_region_relation_tokens and model_cfg.get("region_relation_pairs"):
+            self.relation_builder = RelationTokenBuilder(
+                embed_dim=self.embed_dim,
+                relation_pairs=model_cfg.get("region_relation_pairs", []),
+                dropout=float(model_cfg.get("region_relation_dropout", 0.1)),
+            )
+
         self.encoder = [
-            TransformerEncoderBlock(self.embed_dim, int(model_cfg["num_heads"]), float(model_cfg.get("transformer_dropout", 0.25)))
-            for _ in range(int(model_cfg["num_encoder_layers"]))
+            TransformerEncoderBlock(
+                embed_dim=self.embed_dim,
+                num_heads=int(model_cfg.get("num_heads", 4)),
+                dropout=float(model_cfg.get("transformer_dropout", 0.25)),
+            )
+            for _ in range(int(model_cfg.get("num_encoder_layers", 2)))
         ]
-        classifier_in_dim = self.region_token_count * self.embed_dim if self.region_pooling == "concat" else self.embed_dim
+
+        self.region_token_count = self.num_regions + len(model_cfg.get("region_relation_pairs", []))
+        classifier_in_dim = (
+            self.region_token_count * self.embed_dim if self.region_pooling == "concat" else self.embed_dim
+        )
         self.classifier = tf.keras.Sequential([
             tf.keras.Input(shape=(classifier_in_dim,)),
             _norm(1e-5),
@@ -765,6 +790,19 @@ class MGRConvNeXtFER(tf.keras.Model):
                 tf.keras.layers.Dropout(float(model_cfg.get("cnn_aux_dropout", 0.2))),
                 tf.keras.layers.Dense(self.num_classes),
             ])
+
+        print(f"[MGR] Original mask shape: [6, 7, 7]", flush=True)
+        if self.multi_scale_mgr:
+            print(
+                f"[MGR] Stage3 mask: {self.stage3_token_grid_size}x{self.stage3_token_grid_size}, "
+                f"soft={self.mgr_soft_mask}, resize={self.mgr_mask_resize_method}",
+                flush=True,
+            )
+        print(
+            f"[MGR] Stage4 mask: {self.stage4_token_grid_size}x{self.stage4_token_grid_size}, "
+            f"soft={self.mgr_soft_mask}, resize={self.mgr_mask_resize_method}",
+            flush=True,
+        )
 
     def _pool_regions(self, encoded):
         if self.region_pooling == "concat":
@@ -799,9 +837,25 @@ class MGRConvNeXtFER(tf.keras.Model):
     def _attention_mask(self, mask, grid_size: int):
         if mask is None:
             return None
-        mask = tf.image.resize(mask, [grid_size, grid_size], method="bilinear")
-        mask = tf.clip_by_value(mask, 0.0, 1.0)
-        return tf.transpose(tf.reshape(mask, [tf.shape(mask)[0], -1, self.num_regions]), [0, 2, 1])
+        if tf.shape(mask)[1] != grid_size or tf.shape(mask)[2] != grid_size:
+            mask = tf.image.resize(mask, [grid_size, grid_size], method=self.mgr_mask_resize_method)
+        if self.mgr_soft_mask:
+            mask = tf.clip_by_value(mask, 0.0, 1.0)
+        mask_flat = tf.reshape(mask, [tf.shape(mask)[0], -1, self.num_regions])
+        return tf.transpose(mask_flat, [0, 2, 1])
+
+    @staticmethod
+    def _normalized_weighted_pooling(visual_tokens, region_masks, epsilon: float = 1e-6):
+        """
+        Computes normalized weighted pooling per facial region:
+        region_feature = sum(visual_tokens * mask) / (sum(mask) + epsilon)
+        """
+        mask_exp = tf.expand_dims(region_masks, axis=-1)  # [B, R, N, 1]
+        vis_exp = tf.expand_dims(visual_tokens, axis=1)    # [B, 1, N, C]
+        mask_sum = tf.reduce_sum(region_masks, axis=-1, keepdims=True)  # [B, R, 1]
+        weighted_sum = tf.reduce_sum(vis_exp * tf.cast(mask_exp, vis_exp.dtype), axis=2)  # [B, R, C]
+        denom = tf.cast(mask_sum, vis_exp.dtype) + tf.cast(epsilon, vis_exp.dtype)
+        return weighted_sum / denom
 
     def call(self, inputs, training=False, return_attn=False, return_region_weights=False):
         image = inputs["image"]
