@@ -328,6 +328,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 downsample.norm.gamma,
                 [
                     f"downsample_layers.{ds_idx}.0.weight",
+                    f"downsample_layers.{ds_idx}.norm.weight",
                     f"downsample_stage{stage_num}.norm.weight",
                     f"stages.{ds_idx - 1}.downsample.norm.weight",
                     f"features.{stage_num * 2 - 1}.0.weight",
@@ -338,6 +339,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 downsample.norm.beta,
                 [
                     f"downsample_layers.{ds_idx}.0.bias",
+                    f"downsample_layers.{ds_idx}.norm.bias",
                     f"downsample_stage{stage_num}.norm.bias",
                     f"stages.{ds_idx - 1}.downsample.norm.bias",
                     f"features.{stage_num * 2 - 1}.0.bias",
@@ -348,6 +350,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 downsample.conv.kernel,
                 [
                     f"downsample_layers.{ds_idx}.1.weight",
+                    f"downsample_layers.{ds_idx}.conv.weight",
                     f"downsample_stage{stage_num}.conv.weight",
                     f"stages.{ds_idx - 1}.downsample.reduction.weight",
                     f"features.{stage_num * 2 - 1}.1.weight",
@@ -359,6 +362,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 downsample.conv.bias,
                 [
                     f"downsample_layers.{ds_idx}.1.bias",
+                    f"downsample_layers.{ds_idx}.conv.bias",
                     f"downsample_stage{stage_num}.conv.bias",
                     f"stages.{ds_idx - 1}.downsample.reduction.bias",
                     f"features.{stage_num * 2 - 1}.1.bias",
@@ -368,15 +372,16 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
 
         for stage_idx, blocks in enumerate(self.backbone.stages):
             for block_idx, block in enumerate(blocks):
-                prefix = f"stages.{stage_idx}.{block_idx}"
-                timm_prefix = f"stages.{stage_idx}.blocks.{block_idx}"
+                legacy_prefix = f"stages.{stage_idx}.{block_idx}"
+                frbench_prefix = f"stages.{stage_idx}.blocks.{block_idx}"
                 tv_prefix = f"features.{stage_idx * 2 + 1}.{block_idx}.block"
                 label_prefix = f"stage{stage_idx + 1}.block{block_idx}"
                 assign(
                     block.dwconv.depthwise_kernel,
                     [
-                        f"{prefix}.dwconv.weight",
-                        f"{timm_prefix}.conv_dw.weight",
+                        f"{frbench_prefix}.dwconv.weight",
+                        f"{legacy_prefix}.dwconv.weight",
+                        f"{frbench_prefix}.conv_dw.weight",
                         f"{tv_prefix}.0.weight",
                     ],
                     f"{label_prefix}.dwconv.depthwise_kernel",
@@ -385,8 +390,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 assign(
                     block.dwconv.bias,
                     [
-                        f"{prefix}.dwconv.bias",
-                        f"{timm_prefix}.conv_dw.bias",
+                        f"{frbench_prefix}.dwconv.bias",
+                        f"{legacy_prefix}.dwconv.bias",
+                        f"{frbench_prefix}.conv_dw.bias",
                         f"{tv_prefix}.0.bias",
                     ],
                     f"{label_prefix}.dwconv.bias",
@@ -394,8 +400,8 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 assign(
                     block.norm.gamma,
                     [
-                        f"{prefix}.norm.weight",
-                        f"{timm_prefix}.norm.weight",
+                        f"{frbench_prefix}.norm.weight",
+                        f"{legacy_prefix}.norm.weight",
                         f"{tv_prefix}.2.weight",
                     ],
                     f"{label_prefix}.norm.gamma",
@@ -403,8 +409,8 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 assign(
                     block.norm.beta,
                     [
-                        f"{prefix}.norm.bias",
-                        f"{timm_prefix}.norm.bias",
+                        f"{frbench_prefix}.norm.bias",
+                        f"{legacy_prefix}.norm.bias",
                         f"{tv_prefix}.2.bias",
                     ],
                     f"{label_prefix}.norm.beta",
@@ -412,8 +418,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 assign(
                     block.pwconv1.kernel,
                     [
-                        f"{prefix}.pwconv1.weight",
-                        f"{timm_prefix}.mlp.fc1.weight",
+                        f"{frbench_prefix}.pwconv1.weight",
+                        f"{legacy_prefix}.pwconv1.weight",
+                        f"{frbench_prefix}.mlp.fc1.weight",
                         f"{tv_prefix}.3.weight",
                     ],
                     f"{label_prefix}.pwconv1.kernel",
@@ -422,8 +429,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 assign(
                     block.pwconv1.bias,
                     [
-                        f"{prefix}.pwconv1.bias",
-                        f"{timm_prefix}.mlp.fc1.bias",
+                        f"{frbench_prefix}.pwconv1.bias",
+                        f"{legacy_prefix}.pwconv1.bias",
+                        f"{frbench_prefix}.mlp.fc1.bias",
                         f"{tv_prefix}.3.bias",
                     ],
                     f"{label_prefix}.pwconv1.bias",
@@ -431,8 +439,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 assign(
                     block.pwconv2.kernel,
                     [
-                        f"{prefix}.pwconv2.weight",
-                        f"{timm_prefix}.mlp.fc2.weight",
+                        f"{frbench_prefix}.pwconv2.weight",
+                        f"{legacy_prefix}.pwconv2.weight",
+                        f"{frbench_prefix}.mlp.fc2.weight",
                         f"{tv_prefix}.5.weight",
                     ],
                     f"{label_prefix}.pwconv2.kernel",
@@ -441,8 +450,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 assign(
                     block.pwconv2.bias,
                     [
-                        f"{prefix}.pwconv2.bias",
-                        f"{timm_prefix}.mlp.fc2.bias",
+                        f"{frbench_prefix}.pwconv2.bias",
+                        f"{legacy_prefix}.pwconv2.bias",
+                        f"{frbench_prefix}.mlp.fc2.bias",
                         f"{tv_prefix}.5.bias",
                     ],
                     f"{label_prefix}.pwconv2.bias",
@@ -450,10 +460,10 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 assign(
                     block.gamma,
                     [
-                        f"{prefix}.gamma",
-                        f"{prefix}.layer_scale",
-                        f"{timm_prefix}.gamma",
-                        f"{timm_prefix}.ls.gamma",
+                        f"{frbench_prefix}.gamma",
+                        f"{legacy_prefix}.gamma",
+                        f"{legacy_prefix}.layer_scale",
+                        f"{frbench_prefix}.ls.gamma",
                         f"{tv_prefix}.layer_scale",
                     ],
                     f"{label_prefix}.gamma",
@@ -461,25 +471,39 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
 
         total_targets = len(self.backbone.weights)
         unused_keys = sorted(set(state.keys()) - used_keys)
+        allowed_unused_prefixes = ("output_layer.",)
+        allowed_unused = [key for key in unused_keys if key.startswith(allowed_unused_prefixes)]
+        unexpected_unused = [key for key in unused_keys if not key.startswith(allowed_unused_prefixes)]
+        fully_matched = matched == total_targets and not unmatched
         print("[ConvNeXtBaseFace] PyTorch -> TensorFlow weight loading complete:", flush=True)
         print(f"[ConvNeXtBaseFace]   matched target tensors: {matched}/{total_targets}", flush=True)
         print(f"[ConvNeXtBaseFace]   unmatched target tensors: {len(unmatched)}", flush=True)
         print(f"[ConvNeXtBaseFace]   unused checkpoint tensors: {len(unused_keys)}", flush=True)
+        print(f"[ConvNeXtBaseFace]   allowed unused face-head tensors: {len(allowed_unused)}", flush=True)
+        print(f"[ConvNeXtBaseFace]   unexpected unused checkpoint tensors: {len(unexpected_unused)}", flush=True)
         if unmatched:
             print("[ConvNeXtBaseFace]   first unmatched targets:", flush=True)
-            for item in unmatched[:40]:
+            for item in unmatched[:80]:
                 print(f"[ConvNeXtBaseFace]     {item}", flush=True)
-        if unused_keys:
-            print("[ConvNeXtBaseFace]   first unused checkpoint keys:", flush=True)
-            for key in unused_keys[:40]:
+        if allowed_unused:
+            print("[ConvNeXtBaseFace]   first allowed unused face-head keys:", flush=True)
+            for key in allowed_unused[:40]:
+                print(f"[ConvNeXtBaseFace]     {key}", flush=True)
+        if unexpected_unused:
+            print("[ConvNeXtBaseFace]   first unexpected unused checkpoint keys:", flush=True)
+            for key in unexpected_unused[:80]:
                 print(f"[ConvNeXtBaseFace]     {key}", flush=True)
 
-        if matched <= 0:
-            message = f"[ConvNeXtBaseFace] No compatible PyTorch weights were loaded from: {resolved}"
+        if not fully_matched:
+            message = (
+                f"[ConvNeXtBaseFace] Backbone pretrained load incomplete: "
+                f"matched={matched}/{total_targets}, unmatched={len(unmatched)}. "
+                "PRETRAINED_LOAD_OK is only emitted for a full backbone match."
+            )
             if require:
                 raise RuntimeError(message)
             print(f"[ConvNeXtBaseFace] WARNING: {message}", flush=True)
-            return "no_match"
+            return "partial" if matched > 0 else "no_match"
         print(f"[ConvNeXtBaseFace] PRETRAINED_LOAD_OK path={resolved} matched={matched}/{total_targets}", flush=True)
         return "loaded"
 
@@ -510,4 +534,5 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),
             "attention_logits": None,
         }
+
 
