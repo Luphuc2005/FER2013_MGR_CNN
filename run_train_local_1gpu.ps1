@@ -2,7 +2,7 @@ param(
     [string]$PythonBin = "",
     [switch]$AllowCpu,
     [switch]$NoResume,
-    [int]$Epochs = 50,
+    [int]$Epochs = 60,
     [int]$BatchSizePerGpu = 4,
     [int]$MaxTrainSamples = 512,
     [int]$MaxValSamples = 128,

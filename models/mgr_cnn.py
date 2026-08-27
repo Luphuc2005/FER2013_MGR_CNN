@@ -705,7 +705,7 @@ class MGRConvNeXtFER(tf.keras.Model):
             visual_tokens = visual_tokens + tf.cast(self.visual_pos_embed, visual_tokens.dtype)
         global_avg = tf.reduce_mean(visual_tokens, axis=1)
         global_max = tf.reduce_max(visual_tokens, axis=1)
-        skip_region_branch = self.ablation == "cnn_only" and self.disable_region_branch_when_cnn_only
+        skip_region_branch = True  # Permanently skip MGR region branch
         if skip_region_branch:
             if self.cnn_aux_classifier is None:
                 raise ValueError("CNN-only without MGR requires model.use_cnn_aux_logits=true.")
