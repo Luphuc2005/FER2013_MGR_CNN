@@ -839,7 +839,6 @@ class MGRConvNeXtFER(tf.keras.Model):
     def _attention_mask(self, mask, grid_size: int):
         if mask is None:
             return None
-        mask = tf.cast(mask, tf.float32)
         if tf.shape(mask)[1] != grid_size or tf.shape(mask)[2] != grid_size:
             mask = tf.image.resize(mask, [grid_size, grid_size], method=self.mgr_mask_resize_method)
         if self.mgr_soft_mask:

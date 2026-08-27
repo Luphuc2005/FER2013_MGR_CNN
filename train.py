@@ -34,7 +34,7 @@ from config import load_config, global_batch_size
 from datasets.fer2013 import EMOTION_NAMES, build_datasets
 from losses.classification import supervised_mgr_loss
 from metrics.classification import classification_metrics, save_metrics
-from models import MGRConvNeXtFER
+from models import IR50FERBaseline, MGRConvNeXtFER
 
 
 class LegacyDecoupledAdamW(tf.keras.optimizers.Adam):
@@ -166,6 +166,14 @@ def split_variables(model: MGRConvNeXtFER) -> Tuple[List[tf.Variable], List[tf.V
     backbone = [v for v in model.trainable_variables if variable_key(v) in backbone_ids]
     head = [v for v in model.trainable_variables if variable_key(v) not in backbone_ids]
     return backbone, head
+
+
+def build_model(cfg: Dict) -> tf.keras.Model:
+    arch = str(cfg.get("model", {}).get("arch", "convnext_tiny")).lower()
+    name = str(cfg.get("model", {}).get("name", "")).lower()
+    if arch in ("ir50", "iresnet50", "insightface_ir50") or name.startswith("ir50"):
+        return IR50FERBaseline(cfg)
+    return MGRConvNeXtFER(cfg)
 
 
 def ensure_optimizer_built(optimizer, variables: Sequence[tf.Variable], strategy: Optional[tf.distribute.Strategy] = None) -> None:
@@ -699,7 +707,7 @@ def main() -> int:
     checkpoint_root = run_dir / "checkpoints"
 
     with strategy.scope():
-        model = MGRConvNeXtFER(cfg)
+        model = build_model(cfg)
         orig_ablation = getattr(model, "ablation", None)
         orig_disable = getattr(model, "disable_region_branch_when_cnn_only", None)
         try:
