@@ -433,9 +433,12 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
         except Exception as exc:
             print(f"[WARNING] Failed to load ImageNet pretrained weights: {exc}")
 
-    def call(self, x, training=False):
+    def call(self, x, training=False, return_endpoints=False):
         if self.use_builtin_convnext:
+            if return_endpoints:
+                raise ValueError("return_endpoints=True is only supported by the custom ConvNeXtTinyBackbone.")
             return self.app(x, training=training)
+        endpoints = {}
         for i, down in enumerate(self.downsample_layers):
             x = down(x, training=training)
             for block in self.stages[i]:
@@ -451,6 +454,12 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
                     x = self.ela_stage2(x, training=training)
                 elif i == 3 and self.ela_stage3 is not None:
                     x = self.ela_stage3(x, training=training)
+            if return_endpoints and i == 2:
+                endpoints["stage3"] = x
+            elif return_endpoints and i == 3:
+                endpoints["stage4"] = x
+        if return_endpoints:
+            return endpoints
         return x
 
 
@@ -593,6 +602,11 @@ class MGRConvNeXtFER(tf.keras.Model):
         self.num_classes = int(cfg["data"]["num_classes"])
         self.embed_dim = int(model_cfg["embed_dim"])
         self.visual_dim = int(model_cfg.get("visual_dim", 768))
+        self.multi_scale_mgr = bool(model_cfg.get("multi_scale_mgr", False))
+        self.stage3_visual_dim = int(model_cfg.get("stage3_visual_dim", 384))
+        self.stage4_visual_dim = int(model_cfg.get("stage4_visual_dim", self.visual_dim))
+        self.stage3_token_grid_size = int(model_cfg.get("stage3_token_grid_size", 14))
+        self.stage4_token_grid_size = int(model_cfg.get("stage4_token_grid_size", model_cfg.get("token_grid_size", 7)))
         self.num_regions = int(model_cfg["num_regions"])
         self.region_pooling = model_cfg.get("region_pooling", "concat")
         self.mask_guided_attention = bool(model_cfg.get("mask_guided_attention", True))
@@ -640,6 +654,13 @@ class MGRConvNeXtFER(tf.keras.Model):
                 initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
                 trainable=True,
             )
+            if self.multi_scale_mgr:
+                self.visual_pos_embed_stage3 = self.add_weight(
+                    name="visual_pos_embed_stage3",
+                    shape=(1, self.stage3_token_grid_size * self.stage3_token_grid_size, self.stage3_visual_dim),
+                    initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
+                    trainable=True,
+                )
         self.region_dict = RegionDictionary(self.num_regions, self.embed_dim)
         self.cross_attention = CrossAttentionWithMask(
             self.embed_dim,
@@ -649,6 +670,16 @@ class MGRConvNeXtFER(tf.keras.Model):
             float(model_cfg.get("mask_attention_alpha", 0.3)),
             float(model_cfg.get("mask_floor", 0.05)),
         )
+        self.cross_attention_stage3 = None
+        if self.multi_scale_mgr:
+            self.cross_attention_stage3 = CrossAttentionWithMask(
+                self.embed_dim,
+                self.stage3_visual_dim,
+                int(model_cfg["num_heads"]),
+                float(model_cfg.get("transformer_dropout", 0.25)),
+                float(model_cfg.get("mask_attention_alpha", 0.3)),
+                float(model_cfg.get("mask_floor", 0.05)),
+            )
         relation_pairs = model_cfg.get("region_relation_pairs", [])
         self.relation_builder = RelationTokenBuilder(
             self.embed_dim,
@@ -669,6 +700,16 @@ class MGRConvNeXtFER(tf.keras.Model):
             tf.keras.layers.Dense(self.embed_dim),
             tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25)))
         ])
+        self.global_proj_stage3 = None
+        self.multi_scale_fusion = None
+        if self.multi_scale_mgr:
+            self.global_proj_stage3 = tf.keras.Sequential([
+                tf.keras.Input(shape=(self.stage3_visual_dim,)),
+                _norm(1e-5),
+                tf.keras.layers.Dense(self.embed_dim),
+                tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25)))
+            ])
+            self.multi_scale_fusion = tf.keras.layers.Dense(self.embed_dim)
         self.encoder = [
             TransformerEncoderBlock(self.embed_dim, int(model_cfg["num_heads"]), float(model_cfg.get("transformer_dropout", 0.25)))
             for _ in range(int(model_cfg["num_encoder_layers"]))
@@ -719,16 +760,37 @@ class MGRConvNeXtFER(tf.keras.Model):
             return global_avg
         return tf.concat([global_avg, global_max], axis=-1)
 
+    def _visual_tokens(self, feat_map, grid_size: int, visual_dim: int, pos_embed=None):
+        feat_map = tf.image.resize(feat_map, [grid_size, grid_size])
+        visual_tokens = tf.reshape(feat_map, [tf.shape(feat_map)[0], -1, visual_dim])
+        if pos_embed is not None:
+            visual_tokens = visual_tokens + tf.cast(pos_embed, visual_tokens.dtype)
+        return visual_tokens
+
+    def _attention_mask(self, mask, grid_size: int):
+        if mask is None:
+            return None
+        mask = tf.image.resize(mask, [grid_size, grid_size], method="bilinear")
+        mask = tf.clip_by_value(mask, 0.0, 1.0)
+        return tf.transpose(tf.reshape(mask, [tf.shape(mask)[0], -1, self.num_regions]), [0, 2, 1])
+
     def call(self, inputs, training=False, return_attn=False, return_region_weights=False):
         image = inputs["image"]
         mask = inputs.get("mask")
-        feat_map = self.backbone(image, training=training)
+        if self.multi_scale_mgr:
+            endpoints = self.backbone(image, training=training, return_endpoints=True)
+            feat_map_stage3 = endpoints["stage3"]
+            feat_map = endpoints["stage4"]
+        else:
+            feat_map = self.backbone(image, training=training)
         if self.cnn_se is not None:
             feat_map = self.cnn_se(feat_map, training=training)
-        feat_map = tf.image.resize(feat_map, [7, 7])
-        visual_tokens = tf.reshape(feat_map, [tf.shape(feat_map)[0], -1, self.visual_dim])
-        if self.use_visual_pos_embed:
-            visual_tokens = visual_tokens + tf.cast(self.visual_pos_embed, visual_tokens.dtype)
+        visual_tokens = self._visual_tokens(
+            feat_map,
+            self.stage4_token_grid_size,
+            self.stage4_visual_dim,
+            self.visual_pos_embed if self.use_visual_pos_embed else None,
+        )
         global_avg = tf.reduce_mean(visual_tokens, axis=1)
         global_max = tf.reduce_max(visual_tokens, axis=1)
         skip_region_branch = (self.ablation == "cnn_only") and self.disable_region_branch_when_cnn_only
@@ -747,16 +809,41 @@ class MGRConvNeXtFER(tf.keras.Model):
                 "attn_scores": tf.zeros([tf.shape(image)[0], 1, self.num_regions, 49], dtype=cnn_aux_logits.dtype),
             }
         region_tokens = self.region_dict(tf.shape(image)[0])
-        attn_mask = None
-        if self.mask_guided_attention and self.ablation not in ("no_mask", "cnn_only"):
-            if mask is None:
-                raise ValueError("Mask guidance is enabled but no mask tensor was provided.")
-            attn_mask = tf.transpose(tf.reshape(mask, [tf.shape(mask)[0], -1, self.num_regions]), [0, 2, 1])
+        use_mask_guidance = self.mask_guided_attention and self.ablation not in ("no_mask", "cnn_only")
+        if use_mask_guidance and mask is None:
+            raise ValueError("Mask guidance is enabled but no mask tensor was provided.")
+        attn_mask = self._attention_mask(mask, self.stage4_token_grid_size) if use_mask_guidance else None
         region_features, attn_scores = self.cross_attention(region_tokens, visual_tokens, region_masks=attn_mask, training=training)
+        attn_scores_stage3 = None
+        if self.multi_scale_mgr:
+            visual_tokens_stage3 = self._visual_tokens(
+                feat_map_stage3,
+                self.stage3_token_grid_size,
+                self.stage3_visual_dim,
+                self.visual_pos_embed_stage3 if self.use_visual_pos_embed else None,
+            )
+            attn_mask_stage3 = self._attention_mask(mask, self.stage3_token_grid_size) if use_mask_guidance else None
+            region_features_stage3, attn_scores_stage3 = self.cross_attention_stage3(
+                region_tokens,
+                visual_tokens_stage3,
+                region_masks=attn_mask_stage3,
+                training=training,
+            )
+            if self.use_global_visual_bias:
+                global_avg_stage3 = tf.reduce_mean(visual_tokens_stage3, axis=1)
+                region_features_stage3 = region_features_stage3 + tf.cast(
+                    tf.expand_dims(self.global_proj_stage3(global_avg_stage3, training=training), axis=1),
+                    region_features_stage3.dtype,
+                )
+                region_features = region_features + tf.cast(
+                    tf.expand_dims(self.global_proj(global_avg, training=training), axis=1),
+                    region_features.dtype,
+                )
+            region_features = self.multi_scale_fusion(tf.concat([region_features_stage3, region_features], axis=-1))
         if self.relation_builder is not None:
             region_features = self.relation_builder(region_features, training=training)
         region_features = region_features + tf.cast(self.pos_embed[:, : region_features.shape[1], :], region_features.dtype)
-        if self.use_global_visual_bias:
+        if self.use_global_visual_bias and not self.multi_scale_mgr:
             region_features = region_features + tf.cast(tf.expand_dims(self.global_proj(global_avg, training=training), axis=1), region_features.dtype)
         encoded = region_features
         for block in self.encoder:
@@ -796,6 +883,8 @@ class MGRConvNeXtFER(tf.keras.Model):
             "ortho_loss": tf.cast(ortho_loss, tf.float32),
             "attn_scores": attn_scores,
         }
+        if self.multi_scale_mgr:
+            outputs["attn_scores_stage3"] = attn_scores_stage3
         if return_region_weights:
             outputs["region_weights"] = None
         return outputs

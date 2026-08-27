@@ -216,6 +216,17 @@ def _resize_mask(mask: tf.Tensor, grid_size: int) -> tf.Tensor:
     return tf.clip_by_value(mask, 0.0, 1.0)
 
 
+
+def _target_mask_grid_size(cfg: Dict) -> int:
+    model_cfg = cfg["model"]
+    if bool(model_cfg.get("multi_scale_mgr", False)):
+        return max(
+            int(model_cfg.get("stage3_token_grid_size", 14)),
+            int(model_cfg.get("stage4_token_grid_size", model_cfg.get("token_grid_size", 7))),
+        )
+    return int(model_cfg["token_grid_size"])
+
+
 def _apply_mask_ablation(mask: tf.Tensor, ablation: str, mask_floor: float, permutation) -> tf.Tensor:
     if ablation == "uniform":
         mask = tf.ones_like(mask)
@@ -318,12 +329,13 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
 def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dict, split: str):
     image = _decode_pixels(pixels, int(cfg["data"]["image_size"]), int(cfg["data"]["channels"]))
     mask = None
+    mask_grid_size = _target_mask_grid_size(cfg)
     if mask_tensor is not None:
-        mask = _resize_mask(tf.cast(mask_tensor, tf.float32), int(cfg["model"]["token_grid_size"]))
+        mask = _resize_mask(tf.cast(mask_tensor, tf.float32), mask_grid_size)
     elif mask_path is not None:
         mask = _resize_mask(
             _load_mask_npy(mask_path, allow_missing=bool(cfg["data"].get("allow_missing_masks", False))),
-            int(cfg["model"]["token_grid_size"]),
+            mask_grid_size,
         )
     if mask is not None:
         mask = _apply_mask_ablation(
