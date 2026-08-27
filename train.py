@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import gc
@@ -34,7 +34,7 @@ from config import load_config, global_batch_size
 from datasets.fer2013 import EMOTION_NAMES, build_datasets
 from losses.classification import supervised_mgr_loss
 from metrics.classification import classification_metrics, save_metrics
-from models import IR50FERBaseline, MGRConvNeXtFER
+from models import ConvNeXtBaseFaceFERBaseline, IR50FERBaseline, MGRConvNeXtFER
 
 
 class LegacyDecoupledAdamW(tf.keras.optimizers.Adam):
@@ -173,6 +173,8 @@ def build_model(cfg: Dict) -> tf.keras.Model:
     name = str(cfg.get("model", {}).get("name", "")).lower()
     if arch in ("ir50", "iresnet50", "insightface_ir50") or name.startswith("ir50"):
         return IR50FERBaseline(cfg)
+    if arch in ("convnext_base", "convnext_base_face", "convnext_base_ms1m_arcface") or name.startswith("convnext_base"):
+        return ConvNeXtBaseFaceFERBaseline(cfg)
     return MGRConvNeXtFER(cfg)
 
 
@@ -1027,3 +1029,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
