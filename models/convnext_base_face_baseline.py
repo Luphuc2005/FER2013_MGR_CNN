@@ -285,6 +285,8 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         matched = 0
         unmatched: List[str] = []
 
+        unmatched_targets = []
+
         def assign(target, candidates, label, transform=None):
             nonlocal matched
             ok, msg = self._assign_from_candidates(
@@ -298,6 +300,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             matched += ok
             if not ok:
                 unmatched.append(msg)
+                unmatched_targets.append((target, label, transform))
 
         # Stem: official ConvNeXt uses downsample_layers.0.{0,1} for stem.
         assign(
@@ -486,62 +489,46 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 )
 
         # Fallback shape matching for any unassigned backbone variable
-        if len(unmatched) > 0:
-            print(f"[ConvNeXtBaseFace] Attempting shape-based fallback matching for {len(unmatched)} unmatched targets...", flush=True)
+        if len(unmatched_targets) > 0:
+            print(f"[ConvNeXtBaseFace] Attempting shape-based fallback matching for {len(unmatched_targets)} unmatched targets...", flush=True)
             unused_pt_keys = [k for k in state.keys() if k not in used_keys and not k.startswith("output_layer.")]
             
-            # Map of target TF variable name to (target_var, transform_func)
-            target_map = {}
-            # Re-collect all backbone target variables
-            for var in self.backbone.weights:
-                target_map[var.name] = var
-
-            new_unmatched = []
-            for msg in unmatched:
-                # Extract variable label from error message
-                label = msg.split()[1] if len(msg.split()) > 1 else msg
+            still_unmatched = []
+            for target_var, label, transform in unmatched_targets:
+                target_shape = tuple(target_var.shape)
                 matched_key = None
                 matched_val = None
-                matched_transform = None
 
-                # Find a target var matching this label
-                target_var = None
-                for name, var in target_map.items():
-                    if label in name or name.endswith(label.replace(".", "/")):
-                        target_var = var
+                for pt_k in list(unused_pt_keys):
+                    pt_v = state[pt_k]
+                    # Try direct shape match
+                    if pt_v.shape == target_shape:
+                        matched_key, matched_val = pt_k, pt_v
                         break
-                
-                if target_var is not None:
-                    target_shape = tuple(target_var.shape)
-                    for pt_k in list(unused_pt_keys):
-                        pt_v = state[pt_k]
-                        # Try direct shape
-                        if pt_v.shape == target_shape:
-                            matched_key, matched_val, matched_transform = pt_k, pt_v, None
-                            break
-                        # Try 4D conv transpose
-                        elif pt_v.ndim == 4 and self._conv_kernel_pt_to_tf(pt_v).shape == target_shape:
-                            matched_key, matched_val, matched_transform = pt_k, self._conv_kernel_pt_to_tf(pt_v), None
-                            break
-                        # Try depthwise conv transpose
-                        elif pt_v.ndim == 4 and pt_v.shape[1] == 1 and self._depthwise_kernel_pt_to_tf(pt_v).shape == target_shape:
-                            matched_key, matched_val, matched_transform = pt_k, self._depthwise_kernel_pt_to_tf(pt_v), None
-                            break
-                        # Try 2D linear transpose
-                        elif pt_v.ndim == 2 and self._linear_kernel_pt_to_tf(pt_v).shape == target_shape:
-                            matched_key, matched_val, matched_transform = pt_k, self._linear_kernel_pt_to_tf(pt_v), None
-                            break
+                    # Try 4D conv transpose
+                    elif pt_v.ndim == 4 and self._conv_kernel_pt_to_tf(pt_v).shape == target_shape:
+                        matched_key, matched_val = pt_k, self._conv_kernel_pt_to_tf(pt_v)
+                        break
+                    # Try depthwise conv transpose
+                    elif pt_v.ndim == 4 and pt_v.shape[1] == 1 and self._depthwise_kernel_pt_to_tf(pt_v).shape == target_shape:
+                        matched_key, matched_val = pt_k, self._depthwise_kernel_pt_to_tf(pt_v)
+                        break
+                    # Try 2D linear transpose
+                    elif pt_v.ndim == 2 and self._linear_kernel_pt_to_tf(pt_v).shape == target_shape:
+                        matched_key, matched_val = pt_k, self._linear_kernel_pt_to_tf(pt_v)
+                        break
 
-                if matched_key is not None and target_var is not None:
+                if matched_key is not None:
                     target_var.assign(matched_val)
                     used_keys.add(matched_key)
                     unused_pt_keys.remove(matched_key)
                     matched += 1
                     print(f"[ConvNeXtBaseFace] Fallback matched {label} -> {matched_key}", flush=True)
                 else:
-                    new_unmatched.append(msg)
+                    still_unmatched.append(f"missing: {label}")
 
-            unmatched = new_unmatched
+            unmatched = still_unmatched
+
 
 
         total_targets = len(self.backbone.weights)
