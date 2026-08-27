@@ -1,0 +1,147 @@
+seed:
+  random_seed: 42
+
+source:
+  note: "TensorFlow FER2013_SGU Baseline: ConvNeXt-Tiny with SAM Optimizer on 1x V100 GPU (Batch size 16, 100 epochs)."
+
+runtime:
+  gpu_ids: [0]
+  batch_size_per_gpu: 16
+  fallback_batch_size_per_gpu: 8
+  require_two_gpus: false
+  min_gpus: 1
+  allow_cpu_fallback: false
+  memory_growth: true
+  use_mixed_precision: true
+  intra_op_threads: 8
+  inter_op_threads: 2
+  tf_data_num_parallel_calls: 8
+  tf_data_private_threadpool_size: 4
+  tf_data_deterministic: false
+  prefetch_buffer: 2
+  distributed_eval: false
+  eval_tta_hflip: true
+  train_val_tta_hflip: false
+
+data:
+  data_path: "data/fer13-split"
+  mask_dir: null
+  num_classes: 7
+  image_size: 224
+  channels: 3
+  normalize: true
+  predecode_pixels: true
+  preload_masks: false
+  allow_missing_masks: false
+  use_clean_filter: true
+  bad_row_indices_path: "data/bad_row_indices_drop345_mediapipe_failed.txt"
+  mask_ablation: "none"
+  mask_region_permutation: [4, 2, 0, 5, 1, 3]
+  shuffle_buffer: 28709
+  cache: false
+
+augmentation:
+  horizontal_flip: true
+  rotation_degrees: 15.0
+  brightness_delta: 0.15
+  contrast_lower: 0.85
+  contrast_upper: 1.15
+  gamma_prob: 0.5
+  gamma_min: 0.5
+  gamma_max: 2.0
+  random_erasing_prob: 0.4
+  random_erasing_area_min: 0.02
+  random_erasing_area_max: 0.15
+  random_erasing_value: "random"
+
+model:
+  name: "convnext_baseline_1gpu_sam_100ep_v100"
+  arch: "convnext_tiny"
+  pretrained: true
+  use_builtin_convnext: false
+  builtin_include_preprocessing: false
+  weights: null
+  checkpoint_path: null
+  checkpoint_strict: false
+  use_pixel_unshuffle: false
+  use_ela: false
+  ela_kernel_size: 7
+  num_regions: 6
+  token_grid_size: 7
+  visual_dim: 768
+  embed_dim: 384
+  num_heads: 4
+  num_encoder_layers: 2
+  transformer_dropout: 0.30
+  use_visual_pos_embed: true
+  use_region_slot_embed: true
+  use_global_visual_bias: true
+  region_pooling: "concat"
+  classifier_hidden_dim: 512
+  classifier_dropout1: 0.35
+  classifier_dropout2: 0.25
+  ortho_loss_type: "squared_offdiag"
+  ortho_loss_weight: 0.0
+  use_source_classifier: false
+  use_clip_dictionary: false
+  use_learnable_clip_region_tokens: false
+  mask_guided_attention: false
+  mask_attention_alpha: 0.0
+  mask_floor: 0.05
+  mask_ablation: "none"
+
+  use_cnn_se: false
+  disable_region_branch_when_cnn_only: true
+
+  use_cnn_aux_loss: true
+  use_cnn_aux_logits: true
+  cnn_aux_pooling: "avg"
+  cnn_aux_loss_weight: 0.0
+  cnn_aux_hidden_dim: 768
+  cnn_aux_dropout: 0.25
+
+  attention_logit_weight: 0.0
+  cnn_aux_logit_weight: 1.0
+  logit_fusion: "cnn_aux"
+  finetune_logit_fusion: "cnn_aux"
+
+  freeze_backbone_epochs: 5
+  unfreeze_backbone: true
+  freeze_unfrozen_batchnorm: true
+  use_region_relation_tokens: false
+  region_relation_dropout: 0.1
+  region_relation_pairs: []
+  ablation: "cnn_only"
+
+stage_transition:
+  enable_2stage_switching: false
+
+lr_escape:
+  enabled: false
+
+training:
+  epochs: 100
+  patience: 0
+  warmup_epochs: 5
+  loss: "cross_entropy"
+  label_smoothing: 0.12
+  optimizer: "sam"
+  base_optimizer: "adamw"
+  sam_rho: 0.03
+  sam_adaptive: false
+  lr: 0.0002
+  finetune_lr: 0.0002
+  visual_extractor_lr: 0.00002
+  weight_decay: 0.035
+  scheduler: "cosine"
+  grad_clip_norm: 1.0
+  skip_nonfinite_batches: true
+  monitor: "val_accuracy"
+  resume: true
+  best_checkpoint_start_epoch: 1
+  periodic_checkpoint_interval: 20
+  progress_interval: 100
+
+paths:
+  output_dir: "outputs/tf_runs/convnext_baseline_1gpu_sam_100ep_v100"
+  logs_dir: "logs"
