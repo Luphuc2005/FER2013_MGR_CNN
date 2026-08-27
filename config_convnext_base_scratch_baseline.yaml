@@ -1,0 +1,113 @@
+﻿seed:
+  random_seed: 42
+
+source:
+  note: "ConvNeXt-Base scratch CNN baseline for FER2013. Same FRBench-style backbone shape, random initialization, no MGR, no mask, no attention, no local branch."
+
+runtime:
+  gpu_ids: [0]
+  batch_size_per_gpu: 32
+  fallback_batch_size_per_gpu: 16
+  require_two_gpus: false
+  min_gpus: 1
+  memory_growth: true
+  use_mixed_precision: true
+  intra_op_threads: 16
+  inter_op_threads: 4
+  tf_data_num_parallel_calls: 4
+  tf_data_private_threadpool_size: 4
+  tf_data_deterministic: false
+  prefetch_buffer: 2
+  distributed_eval: false
+  eval_tta_hflip: true
+  train_val_tta_hflip: true
+
+data:
+  data_path: "data/fer13-split"
+  mask_dir: null
+  num_classes: 7
+  image_size: 112
+  channels: 3
+  normalize: true
+  predecode_pixels: true
+  preload_masks: false
+  allow_missing_masks: true
+  use_clean_filter: false
+  bad_row_indices_path: null
+  mask_ablation: "none"
+  shuffle_buffer: 28709
+  cache: false
+
+augmentation:
+  horizontal_flip: true
+  rotation_degrees: 15.0
+  brightness_delta: 0.15
+  contrast_lower: 0.85
+  contrast_upper: 1.15
+  gamma_prob: 0.5
+  gamma_min: 0.5
+  gamma_max: 2.0
+  random_erasing_prob: 0.40
+  random_erasing_area_min: 0.02
+  random_erasing_area_max: 0.15
+  random_erasing_value: "random"
+
+model:
+  name: "convnext_base_scratch_baseline"
+  arch: "convnext_base_scratch"
+  pretrained: false
+  convnext_base_pretrained_path: null
+  convnext_base_require_pretrained: false
+  drop_path_rate: 0.1
+  layer_scale_init_value: 0.000001
+
+  checkpoint_path: null
+  checkpoint_strict: false
+  classifier_dropout1: 0.35
+  classifier_dropout2: 0.0
+  ortho_loss_weight: 0.0
+
+  use_cnn_aux_loss: false
+  use_cnn_aux_logits: false
+  cnn_aux_loss_weight: 0.0
+
+  attention_logit_weight: 1.0
+  cnn_aux_logit_weight: 0.0
+  logit_fusion: "single_head"
+  finetune_logit_fusion: "single_head"
+
+  freeze_backbone_epochs: 4
+  unfreeze_backbone: true
+  freeze_unfrozen_batchnorm: true
+  ablation: "cnn_only"
+
+stage_transition:
+  enable_2stage_switching: false
+
+training:
+  epochs: 60
+  patience: 15
+  warmup_epochs: 5
+  loss: "cross_entropy"
+  label_smoothing: 0.10
+  optimizer: "sam"
+  base_optimizer: "adamw"
+  sam_rho: 0.03
+  sam_adaptive: false
+  lr: 0.0003
+  finetune_lr: 0.0003
+  visual_extractor_lr: 0.00003
+  weight_decay: 0.035
+  scheduler: "cosine"
+  grad_clip_norm: 1.0
+  skip_nonfinite_batches: true
+  monitor: "val_accuracy"
+  resume: false
+  best_checkpoint_start_epoch: 1
+  periodic_checkpoint_interval: 10
+  progress_interval: 100
+
+paths:
+  output_dir: "outputs/tf_runs/convnext_base_scratch_baseline"
+  logs_dir: "logs"
+
