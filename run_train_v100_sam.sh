@@ -17,4 +17,4 @@ mkdir -p logs
 STAMP="$(date +%Y%m%d_%H%M%S)"
 echo "[INFO] Starting 1x V100 SAM Training (100 Epochs)..."
 "${PYTHON_BIN}" check_environment.py | tee "logs/check_environment_v100_sam_${STAMP}.log"
-"${PYTHON_BIN}" train.py --config config_1gpu_convnext_baseline_sam_100epochs_v100.yaml --resume 2>&1 | tee "logs/train_v100_sam_${STAMP}.log"
+"${PYTHON_BIN}" train.py --config config_1gpu_convnext_baseline_sam_100epochs_v100.yaml 2>&1 | tee "logs/train_v100_sam_${STAMP}.log"

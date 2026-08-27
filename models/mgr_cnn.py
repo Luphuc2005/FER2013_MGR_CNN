@@ -348,10 +348,15 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
         if convnext_tiny is None:
             return
         try:
-            with tf.init_scope():
-                app = convnext_tiny(include_top=False, include_preprocessing=False, weights="imagenet")
-                dummy = tf.zeros([1, 224, 224, 3])
-                _ = self(dummy, training=False)
+            old_policy = tf.keras.mixed_precision.global_policy()
+            tf.keras.mixed_precision.set_global_policy("float32")
+            try:
+                with tf.init_scope():
+                    app = convnext_tiny(include_top=False, include_preprocessing=False, weights="imagenet")
+                    dummy = tf.cast(tf.zeros([1, 224, 224, 3]), tf.float32)
+                    _ = self(dummy, training=False)
+            finally:
+                tf.keras.mixed_precision.set_global_policy(old_policy)
 
             stem_app = app.get_layer("convnext_tiny_stem")
             self.downsample_layers[0].layers[0].set_weights(stem_app.layers[0].get_weights())

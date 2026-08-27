@@ -4,6 +4,7 @@ import argparse
 import gc
 import json
 import os
+import time
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
@@ -797,6 +798,7 @@ def main() -> int:
         "snapshot": None,
     }
     for epoch in range(start_epoch, int(cfg["training"]["epochs"])):
+        epoch_start_time = time.time()
         train_backbone = bool(cfg["model"].get("unfreeze_backbone", True)) and epoch >= freeze_epochs
         phase_transitioned = bool(train_backbone and epoch == freeze_epochs)
         if phase_transitioned:
@@ -907,8 +909,12 @@ def main() -> int:
             periodic_manager.save(checkpoint_number=epoch + 1)
         patience_limit = int(cfg["training"].get("patience", 75))
         patience_counter = 0 if not checkpoint_eligible else (epoch + 1) - patience_anchor_epoch
+        epoch_time_sec = time.time() - epoch_start_time
+        mins, secs = divmod(int(epoch_time_sec), 60)
+        time_str = f"{mins}m {secs:02d}s" if mins > 0 else f"{epoch_time_sec:.1f}s"
         row = {
             "epoch": epoch + 1,
+            "epoch_time_sec": round(epoch_time_sec, 2),
             "train_loss": train_loss,
             "train_accuracy": train_acc,
             "val_loss": float(val_metrics["loss"]),
@@ -929,7 +935,7 @@ def main() -> int:
         }
         history.append(row)
         print(
-            f"Epoch {epoch+1}/{cfg['training']['epochs']} "
+            f"Epoch {epoch+1}/{cfg['training']['epochs']} [{time_str}] "
             f"loss={train_loss:.4f} acc={train_acc:.4f} "
             f"val_loss={row['val_loss']:.4f} val_acc={row['val_accuracy']:.4f} "
             f"val_macro_f1={row['val_macro_f1']:.4f} "
