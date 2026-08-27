@@ -1,4 +1,4 @@
-﻿"""
+"""
 ConvNeXt-Base MS1M/ArcFace baseline for FER2013.
 
 FRBench-style shape contract used here:
@@ -330,7 +330,10 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     f"downsample_layers.{ds_idx}.0.weight",
                     f"downsample_layers.{ds_idx}.norm.weight",
                     f"downsample_stage{stage_num}.norm.weight",
+                    f"stages.{ds_idx - 1}.downsample.0.weight",
                     f"stages.{ds_idx - 1}.downsample.norm.weight",
+                    f"stages.{ds_idx}.downsample.0.weight",
+                    f"stages.{ds_idx}.downsample.norm.weight",
                     f"features.{stage_num * 2 - 1}.0.weight",
                 ],
                 f"downsample_stage{stage_num}.norm.gamma",
@@ -341,7 +344,10 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     f"downsample_layers.{ds_idx}.0.bias",
                     f"downsample_layers.{ds_idx}.norm.bias",
                     f"downsample_stage{stage_num}.norm.bias",
+                    f"stages.{ds_idx - 1}.downsample.0.bias",
                     f"stages.{ds_idx - 1}.downsample.norm.bias",
+                    f"stages.{ds_idx}.downsample.0.bias",
+                    f"stages.{ds_idx}.downsample.norm.bias",
                     f"features.{stage_num * 2 - 1}.0.bias",
                 ],
                 f"downsample_stage{stage_num}.norm.beta",
@@ -352,7 +358,12 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     f"downsample_layers.{ds_idx}.1.weight",
                     f"downsample_layers.{ds_idx}.conv.weight",
                     f"downsample_stage{stage_num}.conv.weight",
+                    f"stages.{ds_idx - 1}.downsample.1.weight",
+                    f"stages.{ds_idx - 1}.downsample.conv.weight",
                     f"stages.{ds_idx - 1}.downsample.reduction.weight",
+                    f"stages.{ds_idx}.downsample.1.weight",
+                    f"stages.{ds_idx}.downsample.conv.weight",
+                    f"stages.{ds_idx}.downsample.reduction.weight",
                     f"features.{stage_num * 2 - 1}.1.weight",
                 ],
                 f"downsample_stage{stage_num}.conv.kernel",
@@ -364,7 +375,12 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     f"downsample_layers.{ds_idx}.1.bias",
                     f"downsample_layers.{ds_idx}.conv.bias",
                     f"downsample_stage{stage_num}.conv.bias",
+                    f"stages.{ds_idx - 1}.downsample.1.bias",
+                    f"stages.{ds_idx - 1}.downsample.conv.bias",
                     f"stages.{ds_idx - 1}.downsample.reduction.bias",
+                    f"stages.{ds_idx}.downsample.1.bias",
+                    f"stages.{ds_idx}.downsample.conv.bias",
+                    f"stages.{ds_idx}.downsample.reduction.bias",
                     f"features.{stage_num * 2 - 1}.1.bias",
                 ],
                 f"downsample_stage{stage_num}.conv.bias",
@@ -468,6 +484,65 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     ],
                     f"{label_prefix}.gamma",
                 )
+
+        # Fallback shape matching for any unassigned backbone variable
+        if len(unmatched) > 0:
+            print(f"[ConvNeXtBaseFace] Attempting shape-based fallback matching for {len(unmatched)} unmatched targets...", flush=True)
+            unused_pt_keys = [k for k in state.keys() if k not in used_keys and not k.startswith("output_layer.")]
+            
+            # Map of target TF variable name to (target_var, transform_func)
+            target_map = {}
+            # Re-collect all backbone target variables
+            for var in self.backbone.weights:
+                target_map[var.name] = var
+
+            new_unmatched = []
+            for msg in unmatched:
+                # Extract variable label from error message
+                label = msg.split()[1] if len(msg.split()) > 1 else msg
+                matched_key = None
+                matched_val = None
+                matched_transform = None
+
+                # Find a target var matching this label
+                target_var = None
+                for name, var in target_map.items():
+                    if label in name or name.endswith(label.replace(".", "/")):
+                        target_var = var
+                        break
+                
+                if target_var is not None:
+                    target_shape = tuple(target_var.shape)
+                    for pt_k in list(unused_pt_keys):
+                        pt_v = state[pt_k]
+                        # Try direct shape
+                        if pt_v.shape == target_shape:
+                            matched_key, matched_val, matched_transform = pt_k, pt_v, None
+                            break
+                        # Try 4D conv transpose
+                        elif pt_v.ndim == 4 and self._conv_kernel_pt_to_tf(pt_v).shape == target_shape:
+                            matched_key, matched_val, matched_transform = pt_k, self._conv_kernel_pt_to_tf(pt_v), None
+                            break
+                        # Try depthwise conv transpose
+                        elif pt_v.ndim == 4 and pt_v.shape[1] == 1 and self._depthwise_kernel_pt_to_tf(pt_v).shape == target_shape:
+                            matched_key, matched_val, matched_transform = pt_k, self._depthwise_kernel_pt_to_tf(pt_v), None
+                            break
+                        # Try 2D linear transpose
+                        elif pt_v.ndim == 2 and self._linear_kernel_pt_to_tf(pt_v).shape == target_shape:
+                            matched_key, matched_val, matched_transform = pt_k, self._linear_kernel_pt_to_tf(pt_v), None
+                            break
+
+                if matched_key is not None and target_var is not None:
+                    target_var.assign(matched_val)
+                    used_keys.add(matched_key)
+                    unused_pt_keys.remove(matched_key)
+                    matched += 1
+                    print(f"[ConvNeXtBaseFace] Fallback matched {label} -> {matched_key}", flush=True)
+                else:
+                    new_unmatched.append(msg)
+
+            unmatched = new_unmatched
+
 
         total_targets = len(self.backbone.weights)
         unused_keys = sorted(set(state.keys()) - used_keys)
