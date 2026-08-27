@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -225,7 +225,7 @@ def _target_mask_grid_size(cfg: Dict) -> int:
             int(model_cfg.get("stage3_token_grid_size", 14)),
             int(model_cfg.get("stage4_token_grid_size", model_cfg.get("token_grid_size", 7))),
         )
-    return int(model_cfg["token_grid_size"])
+    return int(model_cfg.get("token_grid_size", model_cfg.get("stage4_token_grid_size", 7)))
 
 
 def _apply_mask_ablation(mask: tf.Tensor, ablation: str, mask_floor: float, permutation) -> tf.Tensor:
@@ -331,11 +331,12 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
 def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dict, split: str):
     image = _decode_pixels(pixels, int(cfg["data"]["image_size"]), int(cfg["data"]["channels"]))
     mask = None
-    mask_grid_size = _target_mask_grid_size(cfg)
     resize_method = str(cfg["model"].get("mgr_mask_resize_method", "area"))
     if mask_tensor is not None:
+        mask_grid_size = _target_mask_grid_size(cfg)
         mask = _resize_mask(tf.cast(mask_tensor, tf.float32), mask_grid_size, method=resize_method)
     elif mask_path is not None:
+        mask_grid_size = _target_mask_grid_size(cfg)
         mask = _resize_mask(
             _load_mask_npy(mask_path, allow_missing=bool(cfg["data"].get("allow_missing_masks", False))),
             mask_grid_size,
@@ -438,3 +439,4 @@ def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.D
         make_dataset(records["val"], cfg, split="val", training=False, replicas=replicas),
         make_dataset(records["test"], cfg, split="test", training=False, replicas=replicas),
     )
+
