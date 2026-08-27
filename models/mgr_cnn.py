@@ -285,6 +285,9 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
         use_lgeb: bool = False,
         lgeb_use_residual: bool = False,
         use_local_expert: bool = False,
+        use_local_expert_stage4: bool = False,
+        local_expert_stage3_k: int = 7,
+        local_expert_stage4_k: int = 3,
     ):
         super().__init__()
         self.pretrained = bool(pretrained)
@@ -305,6 +308,7 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
             self.ela_stage3 = None
             self.lgeb_stage3 = None
             self.local_expert_stage3 = None
+            self.local_expert_stage4 = None
             return
 
         dims = [96, 192, 384, 768]
@@ -347,8 +351,11 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
             self.lgeb_stage3 = LocalGlobalExpertBlock(dim=dims[2], use_residual=self.lgeb_use_residual)
 
         self.local_expert_stage3 = None
+        self.local_expert_stage4 = None
         if self.use_local_expert:
-            self.local_expert_stage3 = LocalExpertBlock(dim=dims[2], ela_kernel_size=ela_kernel_size)
+            self.local_expert_stage3 = LocalExpertBlock(dim=dims[2], ela_kernel_size=local_expert_stage3_k)
+        if use_local_expert_stage4:
+            self.local_expert_stage4 = LocalExpertBlock(dim=dims[3], ela_kernel_size=local_expert_stage4_k)
 
         if self.pretrained:
             self._load_imagenet_pretrained()
@@ -435,6 +442,8 @@ class ConvNeXtTinyBackbone(tf.keras.layers.Layer):
                 x = block(x, training=training)
             if i == 2 and self.use_local_expert and self.local_expert_stage3 is not None:
                 x = self.local_expert_stage3(x, training=training)
+            if i == 3 and self.local_expert_stage4 is not None:
+                x = self.local_expert_stage4(x, training=training)
             if i == 2 and self.use_lgeb and self.lgeb_stage3 is not None:
                 x = self.lgeb_stage3(x, training=training)
             if self.use_ela:
@@ -598,7 +607,9 @@ class MGRConvNeXtFER(tf.keras.Model):
         self.attention_logit_weight = float(model_cfg.get("attention_logit_weight", 0.2))
         self.ortho_loss_type = model_cfg.get("ortho_loss_type", "squared_offdiag")
         use_lgeb_flag = bool(model_cfg.get("use_lgeb", False)) or (model_cfg.get("ablation") == "lgeb_stage3")
-        use_local_expert_flag = bool(model_cfg.get("use_local_expert", False)) or (model_cfg.get("ablation") == "local_expert_stage3")
+        use_local_expert_flag = bool(model_cfg.get("use_local_expert", False)) or (model_cfg.get("ablation") in ("local_expert_stage3", "local_expert_multistage"))
+        use_local_expert_stage4_flag = bool(model_cfg.get("use_local_expert_stage4", False)) or (model_cfg.get("ablation") == "local_expert_multistage")
+
         self.backbone = ConvNeXtTinyBackbone(
             pretrained=bool(model_cfg.get("pretrained", False)),
             weights=model_cfg.get("weights"),
@@ -610,6 +621,9 @@ class MGRConvNeXtFER(tf.keras.Model):
             use_lgeb=use_lgeb_flag,
             lgeb_use_residual=bool(model_cfg.get("lgeb_use_residual", False)),
             use_local_expert=use_local_expert_flag,
+            use_local_expert_stage4=use_local_expert_stage4_flag,
+            local_expert_stage3_k=int(model_cfg.get("local_expert_stage3_k", 7)),
+            local_expert_stage4_k=int(model_cfg.get("local_expert_stage4_k", 3)),
         )
         self.cnn_se = None
         if bool(model_cfg.get("use_cnn_se", False)):
