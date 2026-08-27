@@ -32,8 +32,8 @@ data:
   predecode_pixels: true
   preload_masks: false
   allow_missing_masks: false
-  use_clean_filter: true
-  bad_row_indices_path: "data/bad_row_indices_drop345_mediapipe_failed.txt"
+  use_clean_filter: false
+  bad_row_indices_path: null
   mask_ablation: "none"
   mask_region_permutation: [4, 2, 0, 5, 1, 3]
   shuffle_buffer: 28709
