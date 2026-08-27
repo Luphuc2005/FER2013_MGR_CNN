@@ -120,7 +120,7 @@ lr_escape:
   enabled: false
 
 training:
-  epochs: 60
+  epochs: 100
   patience: 0
   warmup_epochs: 5
   loss: "cross_entropy"
