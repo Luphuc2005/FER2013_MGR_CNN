@@ -868,7 +868,11 @@ class MGRConvNeXtFER(tf.keras.Model):
                     tf.expand_dims(self.global_proj(global_avg, training=training), axis=1),
                     region_features.dtype,
                 )
-            region_features = self.multi_scale_fusion(tf.concat([region_features_stage3, region_features], axis=-1))
+            gate_weights = None
+            if self.use_dynamic_region_gate:
+                region_features, gate_weights = self.multi_scale_fusion(region_features_stage3, region_features, training=training)
+            else:
+                region_features = self.multi_scale_fusion(tf.concat([region_features_stage3, region_features], axis=-1))
         if self.relation_builder is not None:
             region_features = self.relation_builder(region_features, training=training)
         region_features = region_features + tf.cast(self.pos_embed[:, : region_features.shape[1], :], region_features.dtype)
@@ -914,6 +918,8 @@ class MGRConvNeXtFER(tf.keras.Model):
         }
         if self.multi_scale_mgr:
             outputs["attn_scores_stage3"] = attn_scores_stage3
+            if self.use_dynamic_region_gate and gate_weights is not None:
+                outputs["gate_weights"] = gate_weights
         if return_region_weights:
             outputs["region_weights"] = None
         return outputs
