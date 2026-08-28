@@ -4,35 +4,12 @@ import argparse
 import gc
 import json
 import os
+import sys
 import time
+
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=0 --tf_xla_enable_xla_devices=false"
 os.environ["TF_DISABLE_XLA"] = "1"
-os.environ["TF_DISABLE_XLA_COMPILATION"] = "1"
-os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
-os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
-import sys
-
-if sys.platform == "win32":
-    env_dir = os.path.dirname(sys.executable)
-    lib_bin = os.path.join(env_dir, "Library", "bin")
-    if os.path.exists(lib_bin):
-        os.environ["PATH"] = lib_bin + os.path.pathsep + os.environ.get("PATH", "")
-        if hasattr(os, "add_dll_directory"):
-            try:
-                os.add_dll_directory(lib_bin)
-            except Exception:
-                pass
-
-import numpy as np
-import tensorflow as tf
-from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
-import warnings
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", message=".*calling iterator did not fully read the dataset being cached.*")
-tf.get_logger().setLevel('ERROR')
-
 from config import load_config, global_batch_size
 from datasets.fer2013 import EMOTION_NAMES, build_datasets
 from losses.classification import supervised_mgr_loss
