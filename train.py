@@ -6,6 +6,7 @@ import json
 import os
 import time
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=0"
 os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 import sys
@@ -1035,5 +1036,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
 
 
