@@ -1,4 +1,4 @@
-﻿"""
+"""
 ConvNeXt-Base MS1M/ArcFace baseline for FER2013.
 
 FRBench-style shape contract used here:
@@ -76,6 +76,52 @@ class ConvNeXtDownsample(tf.keras.layers.Layer):
         return self.conv(x)
 
 
+class LocalMultiScaleConvAdapter(tf.keras.layers.Layer):
+    """
+    Local Multi-Scale Conv Adapter after Stage 3 (B, 14, 14, 512).
+    Branches: DepthwiseConv 3x3, 5x5, 7x7.
+    Fusion: Learnable softmax weights -> Conv 1x1 (512 out) -> LayerNorm -> GELU.
+    Residual connection: X_out = X + alpha * F, with alpha trainable and initialized to 0.0.
+    """
+
+    def __init__(self, channels: int = 512, name: str = "stage3_multiscale_adapter", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.channels = int(channels)
+        self.dw3 = tf.keras.layers.DepthwiseConv2D(3, padding="same", name="dw_3x3")
+        self.dw5 = tf.keras.layers.DepthwiseConv2D(5, padding="same", name="dw_5x5")
+        self.dw7 = tf.keras.layers.DepthwiseConv2D(7, padding="same", name="dw_7x7")
+        self.pwconv = tf.keras.layers.Conv2D(self.channels, 1, padding="valid", name="pwconv_1x1")
+        self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="norm")
+        self.act = tf.keras.layers.Activation(tf.nn.gelu, name="gelu")
+
+        self.w_branches = self.add_weight(
+            name="w_branches",
+            shape=(3,),
+            initializer=tf.keras.initializers.Zeros(),
+            trainable=True,
+        )
+        self.alpha = self.add_weight(
+            name="alpha",
+            shape=(),
+            initializer=tf.keras.initializers.Zeros(),
+            trainable=True,
+        )
+
+    def call(self, x, training=False):
+        b3 = self.dw3(x)
+        b5 = self.dw5(x)
+        b7 = self.dw7(x)
+
+        weights = tf.nn.softmax(self.w_branches)
+        fused = weights[0] * b3 + weights[1] * b5 + weights[2] * b7
+
+        f = self.pwconv(fused)
+        f = self.norm(f)
+        f = self.act(f)
+
+        return x + tf.cast(self.alpha, x.dtype) * f
+
+
 class ConvNeXtBaseFRBackbone(tf.keras.layers.Layer):
     """ConvNeXt-B variant used by the requested FRBench checkpoint shape."""
 
@@ -109,7 +155,7 @@ class ConvNeXtBaseFRBackbone(tf.keras.layers.Layer):
                 cursor += 1
             self.stages.append(blocks)
 
-    def call(self, x, training=False, return_endpoints: bool = False):
+    def call(self, x, training=False, return_endpoints: bool = False, stage3_adapter=None):
         endpoints = {}
         x = self.stem_conv(x)
         x = self.stem_norm(x)
@@ -123,6 +169,9 @@ class ConvNeXtBaseFRBackbone(tf.keras.layers.Layer):
             for block in self.stages[stage_offset]:
                 x = block(x, training=training)
             endpoints[f"stage{stage_offset + 1}"] = x
+            if stage_offset == 2 and stage3_adapter is not None:
+                x = stage3_adapter(x, training=training)
+                endpoints["stage3_adapter"] = x
         if return_endpoints:
             return endpoints
         return endpoints["stage4"]
@@ -145,6 +194,14 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             layer_scale_init_value=float(model_cfg.get("layer_scale_init_value", 1e-6)),
             name="convnext_base_fr_backbone",
         )
+        self.use_multiscale_adapter = bool(
+            model_cfg.get("use_multiscale_adapter", False)
+            or model_cfg.get("ablation") == "multiscale_adapter"
+        )
+        if self.use_multiscale_adapter:
+            self.stage3_adapter = LocalMultiScaleConvAdapter(channels=512, name="stage3_multiscale_adapter")
+        else:
+            self.stage3_adapter = None
         self.gap = tf.keras.layers.GlobalAveragePooling2D(name="fer_gap")
         self.head_dropout = tf.keras.layers.Dropout(
             float(model_cfg.get("classifier_dropout1", 0.35)),
@@ -576,15 +633,31 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         self._shape_logged = True
         print("[ConvNeXtBaseFace] Shape trace:", flush=True)
         print(f"[ConvNeXtBaseFace]   input: {image.shape}", flush=True)
-        for key in ("stem", "stage1", "stage2", "stage3", "stage4"):
-            print(f"[ConvNeXtBaseFace]   {key}: {endpoints[key].shape}", flush=True)
+        for key in ("stem", "stage1", "stage2", "stage3"):
+            if key in endpoints:
+                print(f"[ConvNeXtBaseFace]   {key}: {endpoints[key].shape}", flush=True)
+        if "stage3_adapter" in endpoints:
+            print(f"[ConvNeXtBaseFace]   stage3_adapter: {endpoints['stage3_adapter'].shape}", flush=True)
+        if "stage4" in endpoints:
+            print(f"[ConvNeXtBaseFace]   stage4: {endpoints['stage4'].shape}", flush=True)
         print(f"[ConvNeXtBaseFace]   gap: {pooled.shape}", flush=True)
         print(f"[ConvNeXtBaseFace]   dropout: {dropped.shape}", flush=True)
         print(f"[ConvNeXtBaseFace]   logits: {logits.shape}", flush=True)
 
+        if self.use_multiscale_adapter and self.stage3_adapter is not None:
+            adapter_params = int(np.sum([np.prod(v.shape) for v in self.stage3_adapter.trainable_variables]))
+            backbone_params = int(np.sum([np.prod(v.shape) for v in self.backbone.trainable_variables]))
+            total_params = int(np.sum([np.prod(v.shape) for v in self.trainable_variables]))
+            print(f"[ConvNeXtBaseFace] Local Multi-Scale Adapter Enabled:", flush=True)
+            print(f"[ConvNeXtBaseFace]   Adapter trainable params: {adapter_params:,}", flush=True)
+            print(f"[ConvNeXtBaseFace]   Backbone trainable params: {backbone_params:,}", flush=True)
+            print(f"[ConvNeXtBaseFace]   Total trainable params: {total_params:,}", flush=True)
+
     def call(self, inputs, training=False, **kwargs):
         image = inputs["image"] if isinstance(inputs, dict) else inputs
-        endpoints = self.backbone(image, training=training, return_endpoints=True)
+        endpoints = self.backbone(
+            image, training=training, return_endpoints=True, stage3_adapter=self.stage3_adapter
+        )
         feat = endpoints["stage4"]
         pooled = self.gap(feat)
         dropped = self.head_dropout(pooled, training=training)
