@@ -817,6 +817,16 @@ class MGRConvNeXtFER(tf.keras.Model):
                 tf.keras.layers.Dense(self.num_classes),
             ])
 
+        self.logit_fusion = str(model_cfg.get("logit_fusion", "weighted_sum")).lower()
+        self.dynamic_logit_gate = None
+        if self.use_cnn_aux_logits and self.logit_fusion in ("dynamic", "dynamic_gate"):
+            self.dynamic_logit_gate = tf.keras.Sequential([
+                tf.keras.Input(shape=(self.num_classes * 2,)),
+                tf.keras.layers.Dense(32, activation="relu", name="dynamic_logit_gate_dense"),
+                tf.keras.layers.Dense(2, activation="softmax", name="dynamic_logit_gate_softmax"),
+            ], name="dynamic_logit_gate")
+            print("[MGR] Enabled Dynamic Logit Fusion Gate (MLP Softmax Gating)", flush=True)
+
         print(f"[MGR] Original mask shape: [6, 7, 7]", flush=True)
         if self.multi_scale_mgr:
             print(
@@ -845,6 +855,12 @@ class MGRConvNeXtFER(tf.keras.Model):
         if self.ablation == "region_only":
             return logits
         if self.ablation in ("full", "no_mask", "shuffled_mask") and cnn_aux_logits is not None:
+            if self.dynamic_logit_gate is not None:
+                gate_inputs = tf.concat([logits, cnn_aux_logits], axis=-1)
+                gate_weights = self.dynamic_logit_gate(gate_inputs)
+                w_mgr = tf.expand_dims(gate_weights[:, 0], axis=-1)
+                w_cnn = tf.expand_dims(gate_weights[:, 1], axis=-1)
+                return w_mgr * logits + w_cnn * cnn_aux_logits
             return self.attention_logit_weight * logits + self.cnn_aux_logit_weight * cnn_aux_logits
         return logits
 
