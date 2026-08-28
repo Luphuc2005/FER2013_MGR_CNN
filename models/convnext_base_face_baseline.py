@@ -598,3 +598,105 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         }
 
 
+
+class ConvNeXtBaseImageNetFERBaseline(tf.keras.Model):
+    """Single-head ConvNeXt-Base ImageNet-1K pretrained FER baseline."""
+
+    def __init__(self, cfg: Dict):
+        model_cfg = cfg["model"]
+        super().__init__(name=model_cfg.get("name", "convnext_base_imagenet1k_baseline"))
+        self.num_classes = int(cfg["data"]["num_classes"])
+        self.ablation = model_cfg.get("ablation", "cnn_only")
+        self.input_size = int(cfg["data"].get("image_size", 112))
+        self.channels = int(cfg["data"].get("channels", 3))
+        self._shape_logged = False
+
+        if self.channels != 3:
+            raise ValueError("ConvNeXt-Base ImageNet-1K baseline requires RGB input channels=3.")
+        if not bool(model_cfg.get("pretrained", True)):
+            raise ValueError(
+                "ConvNeXt-Base ImageNet-1K baseline requires model.pretrained=true; "
+                "use config_convnext_base_scratch_baseline.yaml for random initialization."
+            )
+
+        source = str(model_cfg.get("convnext_base_pretrained_source", "imagenet")).lower()
+        if source not in ("imagenet", "imagenet1k", "imagenet-1k"):
+            raise ValueError(
+                "ConvNeXt-Base ImageNet-1K baseline only supports "
+                "convnext_base_pretrained_source='imagenet'."
+            )
+
+        print("ConvNeXt-Base + ImageNet-1K Pretrained Baseline", flush=True)
+        print(
+            "[ConvNeXtBaseImageNet] Loading tf.keras.applications.ConvNeXtBase "
+            f"with weights='imagenet', include_top=False, input_size={self.input_size}",
+            flush=True,
+        )
+        self.backbone = self._build_imagenet_backbone(model_cfg)
+        self.gap = tf.keras.layers.GlobalAveragePooling2D(name="fer_gap")
+        self.head_dropout = tf.keras.layers.Dropout(
+            float(model_cfg.get("classifier_dropout1", 0.35)),
+            name="fer_dropout",
+        )
+        self.classifier = tf.keras.layers.Dense(
+            self.num_classes,
+            kernel_initializer="he_normal",
+            name="fer_classifier",
+        )
+        self.pretrained_load_status = "loaded"
+        print(
+            "[ConvNeXtBaseImageNet] PRETRAINED_LOAD_OK "
+            "source=tf.keras.applications.ConvNeXtBase(weights='imagenet')",
+            flush=True,
+        )
+        print(
+            f"[ConvNeXtBaseImageNet] FER classifier head: fer_classifier units={self.num_classes}",
+            flush=True,
+        )
+
+    def _build_imagenet_backbone(self, model_cfg: Dict) -> tf.keras.Model:
+        convnext_base = getattr(tf.keras.applications, "ConvNeXtBase", None)
+        if convnext_base is None:
+            raise RuntimeError("tf.keras.applications.ConvNeXtBase is not available in this TensorFlow build.")
+
+        kwargs = {
+            "include_top": False,
+            "weights": "imagenet",
+            "input_shape": (self.input_size, self.input_size, self.channels),
+        }
+        include_preprocessing = bool(model_cfg.get("builtin_include_preprocessing", False))
+        try:
+            return convnext_base(include_preprocessing=include_preprocessing, **kwargs)
+        except TypeError:
+            return convnext_base(**kwargs)
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to load ConvNeXt-Base ImageNet-1K pretrained weights; "
+                "random initialization fallback is disabled."
+            ) from exc
+
+    def _log_shapes_once(self, image, feat, pooled, dropped, logits) -> None:
+        if self._shape_logged:
+            return
+        self._shape_logged = True
+        print("[ConvNeXtBaseImageNet] Shape trace:", flush=True)
+        print(f"[ConvNeXtBaseImageNet]   input: {image.shape}", flush=True)
+        print(f"[ConvNeXtBaseImageNet]   backbone: {feat.shape}", flush=True)
+        print(f"[ConvNeXtBaseImageNet]   gap: {pooled.shape}", flush=True)
+        print(f"[ConvNeXtBaseImageNet]   dropout: {dropped.shape}", flush=True)
+        print(f"[ConvNeXtBaseImageNet]   logits: {logits.shape}", flush=True)
+
+    def call(self, inputs, training=False, **kwargs):
+        image = inputs["image"] if isinstance(inputs, dict) else inputs
+        feat = self.backbone(image, training=training)
+        pooled = self.gap(feat)
+        dropped = self.head_dropout(pooled, training=training)
+        logits = self.classifier(dropped)
+        self._log_shapes_once(image, feat, pooled, dropped, logits)
+        return {
+            "logits": logits,
+            "cnn_aux_logits": None,
+            "ortho_loss": tf.constant(0.0, dtype=tf.float32),
+            "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),
+            "attention_logits": None,
+        }
