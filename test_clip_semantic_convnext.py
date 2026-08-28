@@ -111,9 +111,9 @@ def test_3_semantic_metrics_and_loss_formula():
 
 
 def test_4_full_smoke_test_batch_size_2():
-    print("=== Task 4. Full Smoke Test (Batch Size 2) across Models ===")
+    print("=== Task 4. Full Smoke Test (Batch Size 2 & Mixed Precision) across Models ===")
     
-    # 1. Baseline Model
+    # 1. Baseline Model (float32)
     cfg_base = load_config("config_convnext_base_ms1m_arcface_clip_semantic.yaml")
     cfg_base["model"]["convnext_base_require_pretrained"] = False
     model_base = ConvNeXtBaseFaceFERBaseline(cfg_base["model"])
@@ -124,14 +124,23 @@ def test_4_full_smoke_test_batch_size_2():
     out_base = model_base(batch_img, training=True)
     loss_base, _ = supervised_mgr_loss(batch_lbl, out_base, num_classes=7)
     
-    print("ConvNeXt Base Baseline Output:")
-    print(f"  logits shape          : {out_base['logits'].shape}")
-    print(f"  semantic_logits shape : {out_base['semantic_logits'].shape}")
+    print("ConvNeXt Base Baseline Output (float32):")
+    print(f"  logits shape          : {out_base['logits'].shape} (dtype: {out_base['logits'].dtype})")
+    print(f"  semantic_logits shape : {out_base['semantic_logits'].shape} (dtype: {out_base['semantic_logits'].dtype})")
     print(f"  loss value            : {loss_base.numpy():.4f}")
     assert out_base["logits"].shape == (2, 7)
     assert out_base["semantic_logits"].shape == (2, 7)
     
-    # 2. MGR-CNN Model
+    # 2. Baseline Model (mixed_float16 input)
+    batch_img_f16 = tf.random.normal([2, 112, 112, 3], dtype=tf.float16)
+    out_base_f16 = model_base({"image": batch_img_f16}, training=True)
+    loss_base_f16, _ = supervised_mgr_loss(batch_lbl, out_base_f16, num_classes=7)
+    print("ConvNeXt Base Baseline Output (float16 input):")
+    print(f"  logits shape          : {out_base_f16['logits'].shape} (dtype: {out_base_f16['logits'].dtype})")
+    print(f"  semantic_logits shape : {out_base_f16['semantic_logits'].shape} (dtype: {out_base_f16['semantic_logits'].dtype})")
+    print(f"  loss value            : {loss_base_f16.numpy():.4f}")
+    
+    # 3. MGR-CNN Model
     cfg_mgr = load_config("config_pure_mgr_single_head.yaml")
     cfg_mgr["model"]["use_semantic_branch"] = True
     cfg_mgr["model"]["lambda_sem"] = 0.2
@@ -152,7 +161,7 @@ def test_4_full_smoke_test_batch_size_2():
     assert out_mgr["logits"].shape == (2, 7)
     assert out_mgr["semantic_logits"].shape == (2, 7)
     
-    print("[SUCCESS] Task 4 passed: Batch Size 2 Smoke test succeeded for all models!\n")
+    print("[SUCCESS] Task 4 passed: Batch Size 2 and Mixed Precision Smoke test succeeded!\n")
 
 
 if __name__ == "__main__":

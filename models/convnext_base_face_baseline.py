@@ -783,15 +783,16 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         if self.use_semantic_branch and self.visual_projector is not None:
             v_proj = self.visual_projector(pooled, training=training)
             v_norm = tf.math.l2_normalize(v_proj, axis=-1)
-            t_norm = tf.math.l2_normalize(self.text_prototypes, axis=-1)
+            text_protos = tf.cast(self.text_prototypes, dtype=v_norm.dtype)
+            t_norm = tf.math.l2_normalize(text_protos, axis=-1)
             cos_sim = tf.matmul(v_norm, t_norm, transpose_b=True)
-            semantic_logits = cos_sim * self.semantic_logit_scale
+            semantic_logits = tf.cast(cos_sim * self.semantic_logit_scale, tf.float32)
             endpoints["visual_projector"] = v_proj
             endpoints["semantic_logits"] = semantic_logits
 
         self._log_shapes_once(image, endpoints, pooled, dropped, logits)
         return {
-            "logits": logits,
+            "logits": tf.cast(logits, tf.float32),
             "semantic_logits": semantic_logits,
             "lambda_sem": self.lambda_sem,
             "cnn_aux_logits": None,
