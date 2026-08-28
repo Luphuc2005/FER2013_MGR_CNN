@@ -84,17 +84,17 @@ model:
   
   # DISABLING MASK GUIDANCE (ABLATION STUDY)
   mask_guided_attention: false
+  mask_floor: 0.05
   ablation: "no_mask"
 
-  use_cnn_aux_loss: true
-  use_cnn_aux_logits: true
-  cnn_aux_loss_weight: 0.35
-  cnn_aux_pooling: "avgmax"
+  use_cnn_aux_loss: false
+  use_cnn_aux_logits: false
+  cnn_aux_loss_weight: 0.0
 
-  attention_logit_weight: 0.70
-  cnn_aux_logit_weight: 0.30
-  logit_fusion: "weighted_sum"
-  finetune_logit_fusion: "weighted_sum"
+  attention_logit_weight: 1.0
+  cnn_aux_logit_weight: 0.0
+  logit_fusion: "single_head"
+  finetune_logit_fusion: "single_head"
 
   freeze_backbone_epochs: 4
   unfreeze_backbone: true

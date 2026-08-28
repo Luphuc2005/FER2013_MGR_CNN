@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -346,7 +346,7 @@ def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dic
         mask = _apply_mask_ablation(
             mask,
             cfg["data"].get("mask_ablation", "none"),
-            float(cfg["model"]["mask_floor"]),
+            float(cfg["model"].get("mask_floor", 0.05)),
             cfg["data"].get("mask_region_permutation"),
         )
     image, mask = _augment_pair(image, mask, sample_id, cfg["augmentation"], split)
