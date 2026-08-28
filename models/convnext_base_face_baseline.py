@@ -22,6 +22,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import tensorflow as tf
 
+from .clip_text_encoder import get_or_compute_clip_text_prototypes
+
 
 class DropPath(tf.keras.layers.Layer):
     def __init__(self, drop_prob: float = 0.0, **kwargs):
@@ -122,6 +124,53 @@ class LocalMultiScaleConvAdapter(tf.keras.layers.Layer):
         return x + tf.cast(self.alpha, x.dtype) * f
 
 
+class ECALayer(tf.keras.layers.Layer):
+    """
+    Efficient Channel Attention (ECA) Layer.
+    Ref: ECA-Net: Efficient Channel Attention for Deep Convolutional Neural Networks (CVPR 2020)
+
+    Performs 1D convolution over the channel dimension after Global Average Pooling.
+    Adaptive kernel size k = |(log2(C) + b) / gamma|_odd.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        gamma: float = 2.0,
+        b: float = 1.0,
+        k_size: Optional[int] = None,
+        name: str = "stage4_eca",
+        **kwargs,
+    ):
+        super().__init__(name=name, **kwargs)
+        self.channels = int(channels)
+        self.gamma = float(gamma)
+        self.b = float(b)
+        if k_size is None:
+            t = int(abs((np.log2(self.channels) + self.b) / self.gamma))
+            k_size = t if t % 2 != 0 else t + 1
+        self.k_size = int(k_size)
+        self.gap = tf.keras.layers.GlobalAveragePooling2D(keepdims=True, name="gap")
+        self.conv1d = tf.keras.layers.Conv1D(
+            filters=1,
+            kernel_size=self.k_size,
+            padding="same",
+            use_bias=False,
+            name="conv1d",
+        )
+        self.sigmoid = tf.keras.layers.Activation("sigmoid", name="sigmoid")
+
+    def call(self, x, training=False):
+        # Input x shape: [B, H, W, C]
+        y = self.gap(x)  # [B, 1, 1, C]
+        batch_size = tf.shape(y)[0]
+        y_1d = tf.reshape(y, [batch_size, self.channels, 1])  # [B, C, 1]
+        y_conv = self.conv1d(y_1d)  # [B, C, 1]
+        y_att = self.sigmoid(y_conv)  # [B, C, 1]
+        y_att = tf.reshape(y_att, [batch_size, 1, 1, self.channels])  # [B, 1, 1, C]
+        return x * tf.cast(y_att, x.dtype)
+
+
 class ConvNeXtBaseFRBackbone(tf.keras.layers.Layer):
     """ConvNeXt-B variant used by the requested FRBench checkpoint shape."""
 
@@ -181,12 +230,13 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
     """Single-head ConvNeXt-Base face-pretrained FER baseline."""
 
     def __init__(self, cfg: Dict):
-        model_cfg = cfg["model"]
+        model_cfg = cfg.get("model", cfg)
+        data_cfg = cfg.get("data", cfg)
         super().__init__(name=model_cfg.get("name", "convnext_base_ms1m_arcface_baseline"))
-        self.num_classes = int(cfg["data"]["num_classes"])
+        self.num_classes = int(data_cfg.get("num_classes", 7))
         self.ablation = model_cfg.get("ablation", "cnn_only")
-        self.input_size = int(cfg["data"].get("image_size", 112))
-        self.channels = int(cfg["data"].get("channels", 3))
+        self.input_size = int(data_cfg.get("image_size", 112))
+        self.channels = int(data_cfg.get("channels", 3))
         self._shape_logged = False
 
         self.backbone = ConvNeXtBaseFRBackbone(
@@ -202,6 +252,14 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             self.stage3_adapter = LocalMultiScaleConvAdapter(channels=512, name="stage3_multiscale_adapter")
         else:
             self.stage3_adapter = None
+        self.use_eca = bool(
+            model_cfg.get("use_eca", False)
+            or model_cfg.get("ablation") in ("eca", "eca_stage4")
+        )
+        if self.use_eca:
+            self.stage4_eca = ECALayer(channels=self.backbone.dims[3], name="stage4_eca")
+        else:
+            self.stage4_eca = None
         self.gap = tf.keras.layers.GlobalAveragePooling2D(name="fer_gap")
         self.head_dropout = tf.keras.layers.Dropout(
             float(model_cfg.get("classifier_dropout1", 0.35)),
@@ -212,6 +270,36 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             kernel_initializer="he_normal",
             name="fer_classifier",
         )
+
+        self.use_semantic_branch = bool(
+            model_cfg.get("use_semantic_branch", False)
+            or model_cfg.get("use_clip_semantic", False)
+            or model_cfg.get("ablation") in ("semantic_clip", "clip_semantic", "semantic")
+        )
+        self.lambda_sem = float(model_cfg.get("lambda_sem", 0.2))
+        self.semantic_logit_scale = float(model_cfg.get("semantic_logit_scale", 20.0))
+
+        if self.use_semantic_branch:
+            embed_dim = int(model_cfg.get("clip_embedding_dim", 512))
+            self.visual_projector = tf.keras.Sequential([
+                tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
+                tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
+                tf.keras.layers.Activation("gelu", name="gelu"),
+                tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
+            ], name="visual_semantic_projector")
+
+            clip_model_name = model_cfg.get("clip_model_name", "openai/clip-vit-base-patch32")
+            cache_path = model_cfg.get("clip_prototypes_path", "pretrained/clip_text_prototypes_7emotions.npy")
+            text_proto_array = get_or_compute_clip_text_prototypes(
+                model_name=clip_model_name,
+                cache_path=cache_path,
+                embedding_dim=embed_dim,
+            )
+            self.text_prototypes = tf.constant(text_proto_array, dtype=tf.float32, name="frozen_clip_text_prototypes")
+        else:
+            self.visual_projector = None
+            self.text_prototypes = None
 
         self.pretrained_load_status = "not_requested"
         pretrained_path = model_cfg.get("convnext_base_pretrained_path") or model_cfg.get("pretrained_path")
@@ -639,7 +727,14 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         if "stage3_adapter" in endpoints:
             print(f"[ConvNeXtBaseFace]   stage3_adapter: {endpoints['stage3_adapter'].shape}", flush=True)
         if "stage4" in endpoints:
-            print(f"[ConvNeXtBaseFace]   stage4: {endpoints['stage4'].shape}", flush=True)
+            print(f"[ConvNeXtBaseFace]   stage4 (before ECA): {endpoints['stage4'].shape}", flush=True)
+        if "stage4_eca" in endpoints:
+            print(f"[ConvNeXtBaseFace]   stage4_eca (after ECA): {endpoints['stage4_eca'].shape}", flush=True)
+        if "visual_projector" in endpoints:
+            print(f"[ConvNeXtBaseFace]   visual_projector: {endpoints['visual_projector'].shape}", flush=True)
+            print(f"[ConvNeXtBaseFace]   text_prototypes (frozen): {self.text_prototypes.shape}", flush=True)
+            print(f"[ConvNeXtBaseFace]   semantic_logits: {endpoints['semantic_logits'].shape}", flush=True)
+
         print(f"[ConvNeXtBaseFace]   gap: {pooled.shape}", flush=True)
         print(f"[ConvNeXtBaseFace]   dropout: {dropped.shape}", flush=True)
         print(f"[ConvNeXtBaseFace]   logits: {logits.shape}", flush=True)
@@ -653,18 +748,52 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             print(f"[ConvNeXtBaseFace]   Backbone trainable params: {backbone_params:,}", flush=True)
             print(f"[ConvNeXtBaseFace]   Total trainable params: {total_params:,}", flush=True)
 
+        if self.use_eca and self.stage4_eca is not None:
+            eca_params = int(np.sum([np.prod(v.shape) for v in self.stage4_eca.trainable_variables]))
+            backbone_params = int(np.sum([np.prod(v.shape) for v in self.backbone.trainable_variables]))
+            total_params = int(np.sum([np.prod(v.shape) for v in self.trainable_variables]))
+            print(f"[ConvNeXtBaseFace] ECA Stage4 Attention Enabled:", flush=True)
+            print(f"[ConvNeXtBaseFace]   ECA kernel size: {self.stage4_eca.k_size}", flush=True)
+            print(f"[ConvNeXtBaseFace]   ECA trainable params: {eca_params:,}", flush=True)
+
+        if self.use_semantic_branch and self.visual_projector is not None:
+            proj_params = int(np.sum([np.prod(v.shape) for v in self.visual_projector.trainable_variables]))
+            total_params = int(np.sum([np.prod(v.shape) for v in self.trainable_variables]))
+            print(f"[ConvNeXtBaseFace] CLIP Text Semantic Alignment Branch Enabled:", flush=True)
+            print(f"[ConvNeXtBaseFace]   Visual Projector trainable params: {proj_params:,}", flush=True)
+            print(f"[ConvNeXtBaseFace]   Frozen CLIP Text Prototypes params: 0 (Non-trainable {self.text_prototypes.shape})", flush=True)
+            print(f"[ConvNeXtBaseFace]   lambda_sem: {self.lambda_sem}", flush=True)
+            print(f"[ConvNeXtBaseFace]   semantic_logit_scale: {self.semantic_logit_scale}", flush=True)
+            print(f"[ConvNeXtBaseFace]   Total trainable params: {total_params:,}", flush=True)
+
     def call(self, inputs, training=False, **kwargs):
         image = inputs["image"] if isinstance(inputs, dict) else inputs
         endpoints = self.backbone(
             image, training=training, return_endpoints=True, stage3_adapter=self.stage3_adapter
         )
         feat = endpoints["stage4"]
+        if self.use_eca and self.stage4_eca is not None:
+            feat = self.stage4_eca(feat, training=training)
+            endpoints["stage4_eca"] = feat
         pooled = self.gap(feat)
         dropped = self.head_dropout(pooled, training=training)
         logits = self.classifier(dropped)
+
+        semantic_logits = None
+        if self.use_semantic_branch and self.visual_projector is not None:
+            v_proj = self.visual_projector(pooled, training=training)
+            v_norm = tf.math.l2_normalize(v_proj, axis=-1)
+            t_norm = tf.math.l2_normalize(self.text_prototypes, axis=-1)
+            cos_sim = tf.matmul(v_norm, t_norm, transpose_b=True)
+            semantic_logits = cos_sim * self.semantic_logit_scale
+            endpoints["visual_projector"] = v_proj
+            endpoints["semantic_logits"] = semantic_logits
+
         self._log_shapes_once(image, endpoints, pooled, dropped, logits)
         return {
             "logits": logits,
+            "semantic_logits": semantic_logits,
+            "lambda_sem": self.lambda_sem,
             "cnn_aux_logits": None,
             "ortho_loss": tf.constant(0.0, dtype=tf.float32),
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),
@@ -707,6 +836,14 @@ class ConvNeXtBaseImageNetFERBaseline(tf.keras.Model):
             flush=True,
         )
         self.backbone = self._build_imagenet_backbone(model_cfg)
+        self.use_eca = bool(
+            model_cfg.get("use_eca", False)
+            or model_cfg.get("ablation") in ("eca", "eca_stage4")
+        )
+        if self.use_eca:
+            self.stage4_eca = ECALayer(channels=1024, name="stage4_eca")
+        else:
+            self.stage4_eca = None
         self.gap = tf.keras.layers.GlobalAveragePooling2D(name="fer_gap")
         self.head_dropout = tf.keras.layers.Dropout(
             float(model_cfg.get("classifier_dropout1", 0.35)),
@@ -780,24 +917,35 @@ class ConvNeXtBaseImageNetFERBaseline(tf.keras.Model):
             if patch_layerscale and original_layerscale is not None:
                 setattr(convnext_module, "LayerScale", original_layerscale)
 
-    def _log_shapes_once(self, image, feat, pooled, dropped, logits) -> None:
+    def _log_shapes_once(self, image, feat_before, feat_after, pooled, dropped, logits) -> None:
         if self._shape_logged:
             return
         self._shape_logged = True
         print("[ConvNeXtBaseImageNet] Shape trace:", flush=True)
         print(f"[ConvNeXtBaseImageNet]   input: {image.shape}", flush=True)
-        print(f"[ConvNeXtBaseImageNet]   backbone: {feat.shape}", flush=True)
+        print(f"[ConvNeXtBaseImageNet]   backbone (stage4): {feat_before.shape}", flush=True)
+        if feat_after is not None:
+            print(f"[ConvNeXtBaseImageNet]   stage4_eca (after ECA): {feat_after.shape}", flush=True)
         print(f"[ConvNeXtBaseImageNet]   gap: {pooled.shape}", flush=True)
         print(f"[ConvNeXtBaseImageNet]   dropout: {dropped.shape}", flush=True)
         print(f"[ConvNeXtBaseImageNet]   logits: {logits.shape}", flush=True)
 
+        if self.use_eca and self.stage4_eca is not None:
+            eca_params = int(np.sum([np.prod(v.shape) for v in self.stage4_eca.trainable_variables]))
+            print(f"[ConvNeXtBaseImageNet] ECA Stage4 Attention Enabled:", flush=True)
+            print(f"[ConvNeXtBaseImageNet]   ECA kernel size: {self.stage4_eca.k_size}", flush=True)
+            print(f"[ConvNeXtBaseImageNet]   ECA trainable params: {eca_params:,}", flush=True)
+
     def call(self, inputs, training=False, **kwargs):
         image = inputs["image"] if isinstance(inputs, dict) else inputs
         feat = self.backbone(image, training=training)
+        feat_before = feat
+        if self.use_eca and self.stage4_eca is not None:
+            feat = self.stage4_eca(feat, training=training)
         pooled = self.gap(feat)
         dropped = self.head_dropout(pooled, training=training)
         logits = self.classifier(dropped)
-        self._log_shapes_once(image, feat, pooled, dropped, logits)
+        self._log_shapes_once(image, feat_before, feat if self.use_eca else None, pooled, dropped, logits)
         return {
             "logits": logits,
             "cnn_aux_logits": None,

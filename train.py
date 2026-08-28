@@ -512,7 +512,11 @@ def make_step_function(
         preds = tf.argmax(outputs["logits"], axis=-1, output_type=tf.int32)
         correct = tf.reduce_sum(tf.cast(tf.equal(preds, labels), tf.int32))
         count = tf.shape(labels)[0]
-        return correct, count
+        sem_correct = tf.constant(0, dtype=tf.int32)
+        if outputs.get("semantic_logits") is not None:
+            sem_preds = tf.argmax(outputs["semantic_logits"], axis=-1, output_type=tf.int32)
+            sem_correct = tf.reduce_sum(tf.cast(tf.equal(sem_preds, labels), tf.int32))
+        return correct, sem_correct, count
 
     def _clip_gradients(grads):
         if grad_clip_norm:
@@ -547,8 +551,8 @@ def make_step_function(
 
         if not use_sam:
             _apply_gradients(grads, trainable_vars)
-            correct, count = _batch_stats(outputs, labels)
-            return raw_loss, correct, count, tf.constant(1, tf.int32)
+            fer_correct, sem_correct, count = _batch_stats(outputs, labels)
+            return raw_loss, parts["ce"], parts["semantic"], fer_correct, sem_correct, count, tf.constant(1, tf.int32)
 
         grads = _clip_gradients(grads)
         grad_norm = tf.linalg.global_norm([g for g in grads if g is not None])
@@ -588,8 +592,8 @@ def make_step_function(
             grads_2 = [tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) if g is not None else None for g in grads_2]
 
         _apply_gradients(grads_2, trainable_vars)
-        correct, count = _batch_stats(outputs, labels)
-        return raw_loss, correct, count, tf.constant(1, tf.int32)
+        fer_correct, sem_correct, count = _batch_stats(outputs, labels)
+        return raw_loss, parts["ce"], parts["semantic"], fer_correct, sem_correct, count, tf.constant(1, tf.int32)
 
     def train_step_head(features, labels):
         return _step_impl(features, labels, head_vars)
@@ -603,50 +607,69 @@ def make_step_function(
 def make_distributed_train_step(strategy: tf.distribute.Strategy, train_step):
     @tf.function(reduce_retracing=True, jit_compile=False)
     def distributed_step(batch):
-        per_loss, per_correct, per_count, per_ok = strategy.run(train_step, args=batch)
+        per_loss, per_ce, per_sem, per_correct, per_sem_correct, per_count, per_ok = strategy.run(train_step, args=batch)
         ok = strategy.reduce(tf.distribute.ReduceOp.SUM, per_ok, axis=None)
         loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_loss, axis=None)
+        ce = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_ce, axis=None)
+        sem = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_sem, axis=None)
         correct = strategy.reduce(tf.distribute.ReduceOp.SUM, per_correct, axis=None)
+        sem_correct = strategy.reduce(tf.distribute.ReduceOp.SUM, per_sem_correct, axis=None)
         count = strategy.reduce(tf.distribute.ReduceOp.SUM, per_count, axis=None)
-        return loss, correct, count, ok
+        return loss, ce, sem, correct, sem_correct, count, ok
 
     return distributed_step
 
 
 def evaluate_dataset(
-    model: MGRConvNeXtFER,
+    model: tf.keras.Model,
     dataset: tf.data.Dataset,
     cfg: Dict,
     strategy: Optional[tf.distribute.Strategy] = None,
     use_tta_hflip: bool = False,
 ) -> Dict[str, object]:
-    def _forward_logits(inputs):
+    def _forward_outputs(inputs):
         outputs = model(inputs, training=False)
-        logits = outputs["logits"]
         if not use_tta_hflip:
-            return logits
+            return outputs
         flipped_inputs = dict(inputs)
         flipped_inputs["image"] = tf.image.flip_left_right(inputs["image"])
         if "mask" in inputs:
             flipped_inputs["mask"] = tf.image.flip_left_right(inputs["mask"])
         flipped_outputs = model(flipped_inputs, training=False)
-        return (logits + flipped_outputs["logits"]) * 0.5
+        avg_outputs = dict(outputs)
+        avg_outputs["logits"] = (outputs["logits"] + flipped_outputs["logits"]) * 0.5
+        if outputs.get("semantic_logits") is not None and flipped_outputs.get("semantic_logits") is not None:
+            avg_outputs["semantic_logits"] = (outputs["semantic_logits"] + flipped_outputs["semantic_logits"]) * 0.5
+        return avg_outputs
 
     @tf.function(reduce_retracing=True, jit_compile=False)
     def _eval_step(inputs, labels):
-        logits = _forward_logits(inputs)
-        loss = classification_ce_loss(
+        outputs = _forward_outputs(inputs)
+        total_l, parts = supervised_mgr_loss(
             labels,
-            logits,
+            outputs,
             num_classes=cfg["data"]["num_classes"],
             label_smoothing=float(cfg["training"].get("label_smoothing", 0.0)),
+            ortho_weight=float(cfg["model"].get("ortho_loss_weight", 0.003)),
+            cnn_aux_weight=float(cfg["model"].get("cnn_aux_loss_weight", 0.4)),
         )
-        preds = tf.argmax(logits, axis=-1, output_type=tf.int32)
-        return loss, tf.shape(labels)[0], preds, labels
+        fer_preds = tf.argmax(outputs["logits"], axis=-1, output_type=tf.int32)
+        fer_correct = tf.reduce_sum(tf.cast(tf.equal(fer_preds, labels), tf.int32))
+        
+        sem_correct = tf.constant(0, dtype=tf.int32)
+        if outputs.get("semantic_logits") is not None:
+            sem_preds = tf.argmax(outputs["semantic_logits"], axis=-1, output_type=tf.int32)
+            sem_correct = tf.reduce_sum(tf.cast(tf.equal(sem_preds, labels), tf.int32))
+            
+        return total_l, parts["ce"], parts["semantic"], fer_correct, sem_correct, tf.shape(labels)[0], fer_preds, labels
 
     y_true: List[int] = []
     y_pred: List[int] = []
-    total_loss = 0.0
+    total_loss_sum = 0.0
+    total_ce_sum = 0.0
+    total_sem_sum = 0.0
+    total_fer_correct = 0
+    total_sem_correct = 0
     total_count = 0
 
     if strategy is not None and strategy.num_replicas_in_sync > 1:
@@ -656,41 +679,61 @@ def evaluate_dataset(
             return strategy.run(_eval_step, args=batch)
 
         for batch in dist_dataset:
-            per_replica_loss, per_replica_count, per_replica_preds, per_replica_labels = _distributed_eval_step(batch)
-            local_losses = strategy.experimental_local_results(per_replica_loss)
-            local_counts = strategy.experimental_local_results(per_replica_count)
-            local_preds = strategy.experimental_local_results(per_replica_preds)
-            local_labels = strategy.experimental_local_results(per_replica_labels)
-            for loss_tensor, count_tensor, preds_tensor, labels_tensor in zip(
-                local_losses,
-                local_counts,
-                local_preds,
-                local_labels,
+            local_total_l, local_ce_l, local_sem_l, local_fer_c, local_sem_c, local_counts, local_preds, local_labels = strategy.run(_eval_step, args=batch)
+            local_losses = strategy.experimental_local_results(local_total_l)
+            local_ces = strategy.experimental_local_results(local_ce_l)
+            local_sems = strategy.experimental_local_results(local_sem_l)
+            local_fer_cs = strategy.experimental_local_results(local_fer_c)
+            local_sem_cs = strategy.experimental_local_results(local_sem_c)
+            local_cnts = strategy.experimental_local_results(local_counts)
+            local_pds = strategy.experimental_local_results(local_preds)
+            local_lbs = strategy.experimental_local_results(local_labels)
+            for l_tot, l_ce, l_sem, l_fer_c, l_sem_c, l_cnt, l_pd, l_lb in zip(
+                local_losses, local_ces, local_sems, local_fer_cs, local_sem_cs, local_cnts, local_pds, local_lbs
             ):
-                count = int(count_tensor.numpy())
+                count = int(l_cnt.numpy())
                 if count == 0:
                     continue
-                total_loss += float(loss_tensor.numpy()) * count
+                total_loss_sum += float(l_tot.numpy()) * count
+                total_ce_sum += float(l_ce.numpy()) * count
+                total_sem_sum += float(l_sem.numpy()) * count
+                total_fer_correct += int(l_fer_c.numpy())
+                total_sem_correct += int(l_sem_c.numpy())
                 total_count += count
-                y_true.extend(labels_tensor.numpy().tolist())
-                y_pred.extend(preds_tensor.numpy().tolist())
+                y_true.extend(l_lb.numpy().tolist())
+                y_pred.extend(l_pd.numpy().tolist())
         metrics = classification_metrics(y_true, y_pred, EMOTION_NAMES)
-        metrics["loss"] = total_loss / max(total_count, 1)
+        c_norm = max(total_count, 1)
+        metrics["loss"] = total_loss_sum / c_norm
+        metrics["total_loss"] = total_loss_sum / c_norm
+        metrics["ce_loss"] = total_ce_sum / c_norm
+        metrics["semantic_loss"] = total_sem_sum / c_norm
+        metrics["fer_accuracy"] = total_fer_correct / c_norm
+        metrics["semantic_accuracy"] = total_sem_correct / c_norm
         metrics["tta_hflip"] = bool(use_tta_hflip)
         return metrics
 
     for batch in dataset:
         inputs, labels = batch
-        loss, count, preds, _ = _eval_step(inputs, labels)
+        total_l, ce_l, sem_l, fer_c, sem_c, count, preds, _ = _eval_step(inputs, labels)
         c = int(count.numpy())
-        l = float(loss.numpy())
         y_true.extend(labels.numpy().tolist())
         y_pred.extend(preds.numpy().tolist())
-        total_loss += l * c
+        total_loss_sum += float(total_l.numpy()) * c
+        total_ce_sum += float(ce_l.numpy()) * c
+        total_sem_sum += float(sem_l.numpy()) * c
+        total_fer_correct += int(fer_c.numpy())
+        total_sem_correct += int(sem_c.numpy())
         total_count += c
-        del loss, count, preds, inputs, labels
+        del total_l, ce_l, sem_l, fer_c, sem_c, count, preds, inputs, labels
     metrics = classification_metrics(y_true, y_pred, EMOTION_NAMES)
-    metrics["loss"] = total_loss / max(total_count, 1)
+    c_norm = max(total_count, 1)
+    metrics["loss"] = total_loss_sum / c_norm
+    metrics["total_loss"] = total_loss_sum / c_norm
+    metrics["ce_loss"] = total_ce_sum / c_norm
+    metrics["semantic_loss"] = total_sem_sum / c_norm
+    metrics["fer_accuracy"] = total_fer_correct / c_norm
+    metrics["semantic_accuracy"] = total_sem_correct / c_norm
     metrics["tta_hflip"] = bool(use_tta_hflip)
     gc.collect()
     return metrics
@@ -884,28 +927,40 @@ def main() -> int:
                 f"override lr_head={lr:.6f} lr_backbone={backbone_lr:.6f}",
                 flush=True,
             )
-        losses = []
-        correct = 0
+        total_losses = []
+        ce_losses = []
+        sem_losses = []
+        fer_correct = 0
+        sem_correct = 0
         seen = 0
         total_steps = int(tf.data.experimental.cardinality(train_ds).numpy())
         for step_index, batch in enumerate(train_loop_ds, start=1):
-            loss, batch_correct, batch_count, ok = distributed_train_step(batch)
+            loss, ce_l, sem_l, batch_correct, batch_sem_correct, batch_count, ok = distributed_train_step(batch)
             if int(ok.numpy()) == 0:
                 continue
-            correct += int(batch_correct.numpy())
+            fer_correct += int(batch_correct.numpy())
+            sem_correct += int(batch_sem_correct.numpy())
             seen += int(batch_count.numpy())
-            losses.append(float(loss.numpy()))
+            total_losses.append(float(loss.numpy()))
+            ce_losses.append(float(ce_l.numpy()))
+            sem_losses.append(float(sem_l.numpy()))
             if progress_interval and step_index % progress_interval == 0:
                 print(
                     f"Epoch {epoch+1}/{cfg['training']['epochs']} "
                     f"step {step_index}/{total_steps} "
-                    f"loss={float(loss.numpy()):.4f} "
-                    f"running_acc={correct / max(seen, 1):.4f} "
+                    f"total_loss={float(loss.numpy()):.4f} "
+                    f"ce_loss={float(ce_l.numpy()):.4f} "
+                    f"sem_loss={float(sem_l.numpy()):.4f} "
+                    f"fer_acc={fer_correct / max(seen, 1):.4f} "
+                    f"sem_acc={sem_correct / max(seen, 1):.4f} "
                     f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f}",
                     flush=True,
                 )
-        train_loss = float(np.mean(losses)) if losses else float("nan")
-        train_acc = correct / max(seen, 1)
+        train_loss = float(np.mean(total_losses)) if total_losses else float("nan")
+        train_ce_loss = float(np.mean(ce_losses)) if ce_losses else float("nan")
+        train_sem_loss = float(np.mean(sem_losses)) if sem_losses else float("nan")
+        train_acc = fer_correct / max(seen, 1)
+        train_sem_acc = sem_correct / max(seen, 1)
         print(f"[INFO] Epoch {epoch+1}: starting validation", flush=True)
         val_metrics = evaluate_dataset(
             model,
@@ -958,9 +1013,17 @@ def main() -> int:
             "epoch": epoch + 1,
             "epoch_time_sec": round(epoch_time_sec, 2),
             "train_loss": train_loss,
+            "train_ce_loss": train_ce_loss,
+            "train_semantic_loss": train_sem_loss,
             "train_accuracy": train_acc,
+            "train_fer_accuracy": train_acc,
+            "train_semantic_accuracy": train_sem_acc,
             "val_loss": float(val_metrics["loss"]),
+            "val_ce_loss": float(val_metrics["ce_loss"]),
+            "val_semantic_loss": float(val_metrics["semantic_loss"]),
             "val_accuracy": float(val_metrics["accuracy"]),
+            "val_fer_accuracy": float(val_metrics["fer_accuracy"]),
+            "val_semantic_accuracy": float(val_metrics["semantic_accuracy"]),
             "val_macro_f1": float(val_metrics["macro_f1"]),
             "val_weighted_f1": float(val_metrics["weighted_f1"]),
             "lr_head": lr,

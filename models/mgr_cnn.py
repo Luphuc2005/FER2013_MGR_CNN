@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Dict, Optional, Sequence
 
 import tensorflow as tf
+from .convnext_base_face_baseline import ECALayer
+from .clip_text_encoder import get_or_compute_clip_text_prototypes
 
 
 def _norm(epsilon: float = 1e-6):
@@ -620,11 +622,12 @@ class DynamicRegionGate(tf.keras.layers.Layer):
 
 class MGRConvNeXtFER(tf.keras.Model):
     def __init__(self, cfg: Dict):
-        super().__init__(name=cfg["model"]["name"])
-        model_cfg = cfg["model"]
+        model_cfg = cfg.get("model", cfg) if isinstance(cfg, dict) else cfg
+        data_cfg = cfg.get("data", cfg) if isinstance(cfg, dict) else cfg
+        super().__init__(name=model_cfg.get("name", "mgr_convnext_fer"))
         self.cfg = cfg
         self.ablation = model_cfg.get("ablation", "full")
-        self.num_classes = int(cfg["data"]["num_classes"])
+        self.num_classes = int(data_cfg.get("num_classes", 7))
         self.embed_dim = int(model_cfg["embed_dim"])
         self.visual_dim = int(model_cfg.get("visual_dim", 768))
         self.multi_scale_mgr = bool(model_cfg.get("multi_scale_mgr", False))
@@ -696,6 +699,44 @@ class MGRConvNeXtFER(tf.keras.Model):
                 int(model_cfg.get("cnn_se_channels", self.visual_dim)),
                 int(model_cfg.get("cnn_se_reduction", 16)),
             )
+        self.use_eca = bool(
+            model_cfg.get("use_eca", False)
+            or model_cfg.get("ablation") in ("eca", "eca_stage4")
+        )
+        if self.use_eca:
+            self.stage4_eca = ECALayer(channels=self.stage4_visual_dim, name="stage4_eca")
+        else:
+            self.stage4_eca = None
+
+        self.use_semantic_branch = bool(
+            model_cfg.get("use_semantic_branch", False)
+            or model_cfg.get("use_clip_semantic", False)
+            or model_cfg.get("ablation") in ("semantic_clip", "clip_semantic", "semantic")
+        )
+        self.lambda_sem = float(model_cfg.get("lambda_sem", 0.2))
+        self.semantic_logit_scale = float(model_cfg.get("semantic_logit_scale", 20.0))
+
+        if self.use_semantic_branch:
+            embed_dim = int(model_cfg.get("clip_embedding_dim", 512))
+            self.visual_projector = tf.keras.Sequential([
+                tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
+                tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
+                tf.keras.layers.Activation("gelu", name="gelu"),
+                tf.keras.layers.Dropout(float(model_cfg.get("transformer_dropout", 0.25)), name="drop"),
+                tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
+            ], name="visual_semantic_projector")
+
+            clip_model_name = model_cfg.get("clip_model_name", "openai/clip-vit-base-patch32")
+            cache_path = model_cfg.get("clip_prototypes_path", "pretrained/clip_text_prototypes_7emotions.npy")
+            text_proto_array = get_or_compute_clip_text_prototypes(
+                model_name=clip_model_name,
+                cache_path=cache_path,
+                embedding_dim=embed_dim,
+            )
+            self.text_prototypes = tf.constant(text_proto_array, dtype=tf.float32, name="frozen_clip_text_prototypes")
+        else:
+            self.visual_projector = None
+            self.text_prototypes = None
         self.use_visual_pos_embed = bool(model_cfg.get("use_visual_pos_embed", True))
         if self.use_visual_pos_embed:
             _token_grid = int(model_cfg.get("token_grid_size", 7))
@@ -909,6 +950,8 @@ class MGRConvNeXtFER(tf.keras.Model):
             feat_map = endpoints["stage4"]
         else:
             feat_map = self.backbone(image, training=training)
+        if self.use_eca and self.stage4_eca is not None:
+            feat_map = self.stage4_eca(feat_map, training=training)
         if self.cnn_se is not None:
             feat_map = self.cnn_se(feat_map, training=training)
         visual_tokens = self._visual_tokens(
@@ -1006,10 +1049,20 @@ class MGRConvNeXtFER(tf.keras.Model):
         logits_f32 = tf.cast(logits, tf.float32) if logits is not None else None
         effective_cnn_aux_f32 = tf.cast(effective_cnn_aux, tf.float32) if effective_cnn_aux is not None else None
 
+        semantic_logits = None
+        if self.use_semantic_branch and self.visual_projector is not None:
+            v_proj = self.visual_projector(global_avg, training=training)
+            v_norm = tf.math.l2_normalize(v_proj, axis=-1)
+            t_norm = tf.math.l2_normalize(self.text_prototypes, axis=-1)
+            cos_sim = tf.matmul(v_norm, t_norm, transpose_b=True)
+            semantic_logits = cos_sim * self.semantic_logit_scale
+
         outputs = {
             "logits": fused_logits_f32,
             "attention_logits": logits_f32,
             "cnn_aux_logits": effective_cnn_aux_f32,
+            "semantic_logits": semantic_logits,
+            "lambda_sem": self.lambda_sem,
             "ortho_loss": tf.cast(ortho_loss, tf.float32),
             "attn_scores": attn_scores,
         }

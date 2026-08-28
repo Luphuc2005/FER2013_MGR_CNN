@@ -45,4 +45,21 @@ def supervised_mgr_loss(
         total = total + tf.cast(cnn_aux_weight, tf.float32) * aux
     else:
         aux = tf.constant(0.0, dtype=tf.float32)
-    return total, {"ce": ce, "ortho": ortho, "cnn_aux": aux}
+
+    semantic_logits = outputs.get("semantic_logits")
+    if semantic_logits is not None:
+        semantic_logits = tf.cast(semantic_logits, tf.float32)
+        if label_smoothing > 0.0:
+            targets = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
+            targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
+            sem = tf.keras.losses.categorical_crossentropy(targets, semantic_logits, from_logits=True)
+        else:
+            sem = tf.keras.losses.sparse_categorical_crossentropy(labels, semantic_logits, from_logits=True)
+        sem_loss = tf.reduce_mean(sem)
+        sem_loss = tf.cast(sem_loss, tf.float32)
+        lambda_sem = float(outputs.get("lambda_sem", 0.2))
+        total = total + tf.cast(lambda_sem, tf.float32) * sem_loss
+    else:
+        sem_loss = tf.constant(0.0, dtype=tf.float32)
+
+    return total, {"ce": ce, "ortho": ortho, "cnn_aux": aux, "semantic": sem_loss}
