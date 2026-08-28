@@ -15,6 +15,7 @@ variables are assignment targets.
 """
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -731,5 +732,6 @@ class ConvNeXtBaseImageNetFERBaseline(tf.keras.Model):
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),
             "attention_logits": None,
         }
+
 
 
