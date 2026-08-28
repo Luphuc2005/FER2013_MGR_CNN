@@ -1,4 +1,4 @@
-"""
+﻿"""
 ConvNeXt-Base MS1M/ArcFace baseline for FER2013.
 
 FRBench-style shape contract used here:
@@ -664,16 +664,47 @@ class ConvNeXtBaseImageNetFERBaseline(tf.keras.Model):
             "weights": "imagenet",
             "input_shape": (self.input_size, self.input_size, self.channels),
         }
-        include_preprocessing = bool(model_cfg.get("builtin_include_preprocessing", False))
         try:
-            return convnext_base(include_preprocessing=include_preprocessing, **kwargs)
-        except TypeError:
+            if "include_preprocessing" in inspect.signature(convnext_base).parameters:
+                kwargs["include_preprocessing"] = bool(model_cfg.get("builtin_include_preprocessing", False))
+        except (TypeError, ValueError):
+            pass
+
+        class MixedPrecisionSafeLayerScale(tf.keras.layers.Layer):
+            def __init__(self, init_values, projection_dim, **layer_kwargs):
+                super().__init__(**layer_kwargs)
+                self.init_values = init_values
+                self.projection_dim = int(projection_dim)
+
+            def build(self, input_shape):
+                self.gamma = self.add_weight(
+                    name="gamma",
+                    shape=(self.projection_dim,),
+                    initializer=tf.keras.initializers.Constant(self.init_values),
+                    trainable=True,
+                )
+                super().build(input_shape)
+
+            def call(self, x):
+                return x * tf.cast(self.gamma, x.dtype)
+
+        convnext_module = __import__(convnext_base.__module__, fromlist=["LayerScale"])
+        original_layerscale = getattr(convnext_module, "LayerScale", None)
+        patch_layerscale = bool(model_cfg.get("convnext_patch_layerscale_dtype", True))
+        if patch_layerscale and original_layerscale is not None:
+            setattr(convnext_module, "LayerScale", MixedPrecisionSafeLayerScale)
+            print("[ConvNeXtBaseImageNet] Mixed precision LayerScale dtype patch enabled", flush=True)
+
+        try:
             return convnext_base(**kwargs)
         except Exception as exc:
             raise RuntimeError(
                 "Failed to load ConvNeXt-Base ImageNet-1K pretrained weights; "
                 "random initialization fallback is disabled."
             ) from exc
+        finally:
+            if patch_layerscale and original_layerscale is not None:
+                setattr(convnext_module, "LayerScale", original_layerscale)
 
     def _log_shapes_once(self, image, feat, pooled, dropped, logits) -> None:
         if self._shape_logged:
@@ -700,3 +731,5 @@ class ConvNeXtBaseImageNetFERBaseline(tf.keras.Model):
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),
             "attention_logits": None,
         }
+
+
