@@ -1,4 +1,4 @@
-﻿seed:
+seed:
   random_seed: 42
 
 source:
@@ -11,7 +11,7 @@ runtime:
   require_two_gpus: false
   min_gpus: 1
   memory_growth: true
-  use_mixed_precision: true
+  use_mixed_precision: false
   xla: false
   intra_op_threads: 16
   inter_op_threads: 4
