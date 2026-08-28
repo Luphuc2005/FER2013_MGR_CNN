@@ -54,7 +54,7 @@ augmentation:
   random_erasing_value: "random"
 
 model:
-  name: "convnext_base_ms1m_arcface_nomask"
+  name: "convnext_base_ms1m_arcface_mgr_nomask"
   arch: "convnext_base_ms1m_arcface"
   pretrained: true
   convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
