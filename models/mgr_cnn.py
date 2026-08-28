@@ -651,21 +651,45 @@ class MGRConvNeXtFER(tf.keras.Model):
         use_local_expert_flag = bool(model_cfg.get("use_local_expert", False)) or (model_cfg.get("ablation") in ("local_expert_stage3", "local_expert_multistage"))
         use_local_expert_stage4_flag = bool(model_cfg.get("use_local_expert_stage4", False)) or (model_cfg.get("ablation") == "local_expert_multistage")
 
-        self.backbone = ConvNeXtTinyBackbone(
-            pretrained=bool(model_cfg.get("pretrained", False)),
-            weights=model_cfg.get("weights"),
-            use_builtin_convnext=bool(model_cfg.get("use_builtin_convnext", False)),
-            builtin_include_preprocessing=bool(model_cfg.get("builtin_include_preprocessing", False)),
-            use_ela=bool(model_cfg.get("use_ela", False)),
-            ela_kernel_size=int(model_cfg.get("ela_kernel_size", 7)),
-            use_pixel_unshuffle=bool(model_cfg.get("use_pixel_unshuffle", False)),
-            use_lgeb=use_lgeb_flag,
-            lgeb_use_residual=bool(model_cfg.get("lgeb_use_residual", False)),
-            use_local_expert=use_local_expert_flag,
-            use_local_expert_stage4=use_local_expert_stage4_flag,
-            local_expert_stage3_k=int(model_cfg.get("local_expert_stage3_k", 7)),
-            local_expert_stage4_k=int(model_cfg.get("local_expert_stage4_k", 3)),
-        )
+        arch_name = str(model_cfg.get("arch", "convnext_tiny")).lower()
+        model_name = str(model_cfg.get("name", "")).lower()
+        use_convnext_base = ("convnext_base" in arch_name) or ("convnext_base" in model_name)
+
+        if use_convnext_base:
+            from .convnext_base_face_baseline import ConvNeXtBaseFRBackbone, ConvNeXtBaseFaceFERBaseline
+            self.backbone = ConvNeXtBaseFRBackbone(
+                drop_path_rate=float(model_cfg.get("drop_path_rate", 0.1)),
+                layer_scale_init_value=float(model_cfg.get("layer_scale_init_value", 1e-6)),
+                name="convnext_base_fr_backbone",
+            )
+            img_size = int(cfg["data"].get("image_size", 112))
+            img_ch = int(cfg["data"].get("channels", 3))
+            dummy = tf.zeros([1, img_size, img_size, img_ch], dtype=tf.float32)
+            _ = self.backbone(dummy, training=False)
+            pretrained_path = model_cfg.get("convnext_base_pretrained_path") or model_cfg.get("pretrained_path")
+            if pretrained_path:
+                helper = ConvNeXtBaseFaceFERBaseline(cfg)
+                helper.backbone = self.backbone
+                helper._load_pytorch_pretrained(
+                    pretrained_path,
+                    require=bool(model_cfg.get("convnext_base_require_pretrained", False)),
+                )
+        else:
+            self.backbone = ConvNeXtTinyBackbone(
+                pretrained=bool(model_cfg.get("pretrained", False)),
+                weights=model_cfg.get("weights"),
+                use_builtin_convnext=bool(model_cfg.get("use_builtin_convnext", False)),
+                builtin_include_preprocessing=bool(model_cfg.get("builtin_include_preprocessing", False)),
+                use_ela=bool(model_cfg.get("use_ela", False)),
+                ela_kernel_size=int(model_cfg.get("ela_kernel_size", 7)),
+                use_pixel_unshuffle=bool(model_cfg.get("use_pixel_unshuffle", False)),
+                use_lgeb=use_lgeb_flag,
+                lgeb_use_residual=bool(model_cfg.get("lgeb_use_residual", False)),
+                use_local_expert=use_local_expert_flag,
+                use_local_expert_stage4=use_local_expert_stage4_flag,
+                local_expert_stage3_k=int(model_cfg.get("local_expert_stage3_k", 7)),
+                local_expert_stage4_k=int(model_cfg.get("local_expert_stage4_k", 3)),
+            )
         self.cnn_se = None
         if bool(model_cfg.get("use_cnn_se", False)):
             self.cnn_se = ChannelSE(

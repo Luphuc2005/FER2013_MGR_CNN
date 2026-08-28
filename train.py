@@ -6,7 +6,8 @@ import json
 import os
 import time
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=0"
+os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=0 --tf_xla_enable_xla_devices=false"
+os.environ["TF_DISABLE_XLA"] = "1"
 os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 import sys
@@ -85,6 +86,8 @@ def configure_tensorflow_runtime(cfg: Dict) -> None:
     if inter_threads:
         tf.config.threading.set_inter_op_parallelism_threads(int(inter_threads))
     tf.config.optimizer.set_jit(bool(runtime.get("xla", False)))
+    if not bool(runtime.get("xla", False)):
+        print("[INFO] XLA auto-JIT disabled (jit_compile=False; TF_XLA_FLAGS disables XLA devices)", flush=True)
     if bool(runtime.get("use_mixed_precision", True)):
         try:
             tf.keras.mixed_precision.set_global_policy("mixed_float16")
@@ -176,6 +179,8 @@ def build_model(cfg: Dict) -> tf.keras.Model:
         return IR50FERBaseline(cfg)
     if arch in ("convnext_base_imagenet1k", "convnext_base_imagenet", "convnext_base_imagenet_1k"):
         return ConvNeXtBaseImageNetFERBaseline(cfg)
+    if "mgr" in name or "mgr" in arch or "dynamic_gate" in name:
+        return MGRConvNeXtFER(cfg)
     if arch in ("convnext_base", "convnext_base_face", "convnext_base_ms1m_arcface") or name.startswith("convnext_base_ms1m"):
         return ConvNeXtBaseFaceFERBaseline(cfg)
     if name.startswith("convnext_base_imagenet"):
@@ -634,7 +639,7 @@ def evaluate_dataset(
 
     if strategy is not None and strategy.num_replicas_in_sync > 1:
         dist_dataset = strategy.experimental_distribute_dataset(dataset)
-        @tf.function(reduce_retracing=True)
+        @tf.function(reduce_retracing=True, jit_compile=False)
         def _distributed_eval_step(batch):
             return strategy.run(_eval_step, args=batch)
 
@@ -1036,6 +1041,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
 
