@@ -10,6 +10,8 @@ mkdir -p "${LOG_DIR}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-1}"
+export TF_DISABLE_XLA_COMPILATION=1
+export TF_XLA_FLAGS="--tf_xla_auto_jit=0 --tf_xla_enable_xla_devices=false"
 export TF_FORCE_GPU_ALLOW_GROWTH=true
 export MGR_GPU_IDS="${MGR_GPU_IDS:-0,1}"
 export MGR_REQUIRE_TWO_GPUS=1

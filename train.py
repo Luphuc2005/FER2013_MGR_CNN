@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import gc
@@ -8,6 +8,7 @@ import time
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=0 --tf_xla_enable_xla_devices=false"
 os.environ["TF_DISABLE_XLA"] = "1"
+os.environ["TF_DISABLE_XLA_COMPILATION"] = "1"
 os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 import sys
