@@ -136,6 +136,20 @@ def main():
         metadata_path = Path(__file__).resolve().parents[1] / metadata_path
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Smart check: If metadata already exists and has valid samples, reuse them!
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                existing_meta = json.load(f)
+            if isinstance(existing_meta, list) and len(existing_meta) >= 700:
+                print("=" * 70)
+                print(f"[REUSE] Found existing valid synthetic dataset: {metadata_path} ({len(existing_meta)} accepted samples).")
+                print("Skipping re-generation step and reusing existing dataset!")
+                print("=" * 70)
+                return
+        except Exception as e:
+            print(f"[INFO] Could not parse existing metadata: {e}. Re-generating...")
+
     print("=" * 70)
     print("      PILOT TARGETED DIFFUSION GENERATOR & QUALITY GATE FILTER")
     print("=" * 70)
