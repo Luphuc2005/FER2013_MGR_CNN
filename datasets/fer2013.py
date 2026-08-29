@@ -5,8 +5,11 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
-import pandas as pd
-import tensorflow as tf
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 
 
 EMOTION_NAMES = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
@@ -140,12 +143,27 @@ def collect_split_records(
     csv_path = data_dir / f"{split}.csv"
     if not csv_path.exists():
         raise FileNotFoundError(f"Missing split CSV: {csv_path}")
-    df = pd.read_csv(csv_path)
-    label_col = "emotion" if "emotion" in df.columns else df.columns[0]
-    pixel_col = "pixels" if "pixels" in df.columns else df.columns[1]
-    labels = df[label_col].astype("int64").to_numpy()
-    pixels = df[pixel_col].astype(str).to_numpy()
-    sample_ids = np.arange(len(df), dtype=np.int64)
+    if pd is not None:
+        df = pd.read_csv(csv_path)
+        label_col = "emotion" if "emotion" in df.columns else df.columns[0]
+        pixel_col = "pixels" if "pixels" in df.columns else df.columns[1]
+        labels = df[label_col].astype("int64").to_numpy()
+        pixels = df[pixel_col].astype(str).to_numpy()
+        sample_ids = np.arange(len(df), dtype=np.int64)
+    else:
+        import csv
+        labels_list = []
+        pixels_list = []
+        with csv_path.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                label_val = row.get("emotion") if "emotion" in row else list(row.values())[0]
+                pixel_val = row.get("pixels") if "pixels" in row else list(row.values())[1]
+                labels_list.append(int(label_val))
+                pixels_list.append(str(pixel_val))
+        labels = np.array(labels_list, dtype=np.int64)
+        pixels = np.array(pixels_list, dtype=object)
+        sample_ids = np.arange(len(labels), dtype=np.int64)
     if split == "train" and use_clean_filter:
         bad = _load_bad_indices(_resolve_path(bad_row_indices_path))
         if bad:
