@@ -19,7 +19,7 @@ mkdir -p logs
 export PYTHONUNBUFFERED=1
 
 # ============================================================
-# PATHS & ENVIRONMENTS
+# PATHS & APPTAINER CONTAINER SETUP
 # ============================================================
 
 SMIRK_PY="$ROOT/smirk_env/bin/python"
@@ -40,19 +40,32 @@ fi
 SMIRK_CHECKPOINT="${SMIRK_CHECKPOINT:-$SMIRK_ROOT/pretrained_models/SMIRK_em1.pt}"
 BASELINE_CKPT="${BASELINE_CKPT:-$ROOT/outputs/tf_runs/convnext_base_ms1m_arcface_baseline/checkpoints/best/ckpt-43}"
 
+# APPTAINER IMAGE RESOLUTION (Strict check, no fallback)
+APPTAINER_IMAGE="${APPTAINER_IMAGE:-}"
+if [ -z "$APPTAINER_IMAGE" ]; then
+    if [ -f "$ROOT/smirk_env.sif" ]; then
+        APPTAINER_IMAGE="$ROOT/smirk_env.sif"
+    elif [ -f "/home/ptbao/projects/smirk_env.sif" ]; then
+        APPTAINER_IMAGE="/home/ptbao/projects/smirk_env.sif"
+    elif [ -f "/home/ptbao/projects/FER2013_MGR_CNN/smirk_env.sif" ]; then
+        APPTAINER_IMAGE="/home/ptbao/projects/FER2013_MGR_CNN/smirk_env.sif"
+    fi
+fi
+
+if [ -z "$APPTAINER_IMAGE" ] || [ ! -f "$APPTAINER_IMAGE" ]; then
+    echo "[FAIL-FAST ERROR] APPTAINER_IMAGE is not configured or file missing: '$APPTAINER_IMAGE'"
+    echo "Please set APPTAINER_IMAGE=/path/to/smirk_env.sif before running sbatch."
+    exit 1
+fi
+
 export SMIRK_ROOT
 export SMIRK_CHECKPOINT
+export APPTAINER_IMAGE
 export PYTHONPATH="$SMIRK_ROOT:$ROOT:${PYTHONPATH:-}"
 
-# Wrapper helper to run SMIRK PyTorch commands with clean environment or inside Apptainer if set
+# Strict Apptainer command runner (No fallback to host execution)
 run_smirk_cmd() {
-    if [ -n "${APPTAINER_IMAGE:-}" ] && command -v apptainer >/dev/null 2>&1; then
-        apptainer exec --nv "$APPTAINER_IMAGE" "$SMIRK_PY" "$@"
-    elif [ -n "${SINGULARITY_IMAGE:-}" ] && command -v singularity >/dev/null 2>&1; then
-        singularity exec --nv "$SINGULARITY_IMAGE" "$SMIRK_PY" "$@"
-    else
-        env -u LD_LIBRARY_PATH -u LD_PRELOAD "$SMIRK_PY" "$@"
-    fi
+    apptainer exec --nv "$APPTAINER_IMAGE" env -u LD_LIBRARY_PATH -u LD_PRELOAD "$SMIRK_PY" "$@"
 }
 
 echo "============================================================"
@@ -65,6 +78,7 @@ echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-}"
 echo "Start: $(date)"
 echo
 echo "ROOT=$ROOT"
+echo "APPTAINER_IMAGE=$APPTAINER_IMAGE"
 echo "SMIRK_PY=$SMIRK_PY"
 echo "FER_PY=$FER_PY"
 echo "SMIRK_ROOT=$SMIRK_ROOT"
@@ -76,7 +90,7 @@ echo "============================================================"
 nvidia-smi
 
 # ============================================================
-# FILE CHECK
+# FILE & CONTAINER CHECK
 # ============================================================
 
 [ -x "$SMIRK_PY" ] || {
@@ -110,35 +124,37 @@ nvidia-smi
 }
 
 # ============================================================
-# STEP 0: FAIL-FAST ENVIRONMENT CHECK FOR SMIRK / PYTORCH / GPU
+# STEP 0: STRICT ENVIRONMENT CHECK INSIDE APPTAINER
 # ============================================================
 
 echo
 echo "============================================================"
-echo " STEP 0: CHECK SMIRK / PYTORCH / PYTORCH3D / GPU"
+echo " STEP 0: CHECK APPTAINER / SMIRK / PYTORCH / PYTORCH3D / GPU"
 echo "============================================================"
 
 run_smirk_cmd - <<'PY'
 import sys
+import socket
 import torch
 
-print("Python:", sys.executable)
+print("Hostname:", socket.gethostname())
+print("Python executable:", sys.executable)
 print("Torch version:", torch.__version__)
 print("Torch CUDA build:", torch.version.cuda)
 print("CUDA available:", torch.cuda.is_available())
 
 if not torch.cuda.is_available():
-    raise RuntimeError("[FAIL-FAST] PyTorch cannot access GPU.")
+    raise RuntimeError("[FAIL-FAST ERROR] PyTorch inside Apptainer cannot see V100 GPU.")
 
 print("GPU Device Name:", torch.cuda.get_device_name(0))
 
 try:
     import pytorch3d
-    print("PyTorch3D: OK")
+    print("PyTorch3D import: OK")
 except ImportError as e:
-    raise ImportError(f"[FAIL-FAST] PyTorch3D import failed: {e}")
+    raise ImportError(f"[FAIL-FAST ERROR] PyTorch3D import failed: {e}")
 
-print("SMIRK_GPU_ENV_OK")
+print("SMIRK_APPTAINER_GPU_ENV_OK")
 PY
 
 # ============================================================
