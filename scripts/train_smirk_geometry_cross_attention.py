@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import csv
@@ -141,17 +141,19 @@ def load_pixels_for_cache(cfg: Dict, split: str, sample_ids: np.ndarray, labels:
     return arr
 
 
-def preprocess_image(image: tf.Tensor, cfg: Dict, training: bool) -> tf.Tensor:
-    image = tf.reshape(tf.cast(image, tf.float32), [48, 48, 1])
-    image = tf.image.resize(image, [int(cfg["data"]["image_size"]), int(cfg["data"]["image_size"])], method="bilinear")
-    image = tf.image.grayscale_to_rgb(image)
+def preprocess_batch_images(images: tf.Tensor, cfg: Dict, training: bool) -> tf.Tensor:
+    images = tf.expand_dims(tf.cast(images, tf.float32), axis=-1)
+    target_size = int(cfg["data"]["image_size"])
+    images = tf.image.resize(images, [target_size, target_size], method="bilinear")
+    images = tf.image.grayscale_to_rgb(images)
     aug = cfg.get("augmentation", {})
     if training and bool(aug.get("horizontal_flip", False)):
-        image = tf.cond(tf.random.uniform([]) < 0.5, lambda: tf.image.flip_left_right(image), lambda: image)
-    image = tf.cast(image, tf.float32) / 255.0
+        flips = tf.random.uniform([tf.shape(images)[0], 1, 1, 1]) < 0.5
+        images = tf.where(flips, tf.image.flip_left_right(images), images)
+    images = tf.cast(images, tf.float32) / 255.0
     mean = tf.constant([0.485, 0.456, 0.406], dtype=tf.float32)
     std = tf.constant([0.229, 0.224, 0.225], dtype=tf.float32)
-    return (image - mean) / std
+    return (images - mean) / std
 
 
 def make_dataset(
@@ -174,17 +176,19 @@ def make_dataset(
     if training:
         ds = ds.shuffle(min(len(labels), int(cfg["data"].get("shuffle_buffer", 10000))), seed=seed, reshuffle_each_iteration=True)
 
-    def mapper(item):
+    ds = ds.batch(batch_size, drop_remainder=False)
+
+    def batch_mapper(item):
         features = {
-            "image": preprocess_image(item["pixels"], cfg, training),
+            "image": preprocess_batch_images(item["pixels"], cfg, training),
             "geometry_tokens": tf.cast(item["geometry_tokens"], tf.float32),
         }
         return features, item["labels"]
 
     runtime = cfg.get("runtime", {})
     parallel_calls = runtime.get("tf_data_num_parallel_calls") or tf.data.AUTOTUNE
-    ds = ds.map(mapper, num_parallel_calls=parallel_calls)
-    return ds.batch(batch_size, drop_remainder=False).prefetch(runtime.get("prefetch_buffer") or tf.data.AUTOTUNE)
+    ds = ds.map(batch_mapper, num_parallel_calls=parallel_calls)
+    return ds.prefetch(runtime.get("prefetch_buffer") or tf.data.AUTOTUNE)
 
 
 def maybe_take(ds: tf.data.Dataset, max_batches: Optional[int]) -> tf.data.Dataset:
