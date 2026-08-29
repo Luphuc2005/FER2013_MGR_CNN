@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from typing import Dict, List, Optional
 import numpy as np
@@ -104,6 +106,62 @@ EMOTION_CLASS_MAP: Dict[int, str] = {
 }
 
 
+def compute_prompt_hash(prompts_per_class: Dict[int, List[str]]) -> tuple[str, int]:
+    """
+    Computes a deterministic SHA256 hash and total count for a prompt dictionary.
+    Keys are sorted numerically and prompt lists are serialized predictably.
+    """
+    sorted_data = {str(k): prompts_per_class[k] for k in sorted(prompts_per_class.keys())}
+    json_str = json.dumps(sorted_data, sort_keys=True, ensure_ascii=True)
+    prompt_hash = hashlib.sha256(json_str.encode("utf-8")).hexdigest()
+    prompt_count = sum(len(v) for v in prompts_per_class.values())
+    return prompt_hash, prompt_count
+
+
+def validate_cache_provenance(
+    cache_path: str,
+    meta_path: str,
+    model_name: str,
+    expected_shape: tuple,
+    expected_prompt_hash: Optional[str] = None,
+    expected_prompt_count: Optional[int] = None,
+) -> bool:
+    """Checks if cache file and metadata sidecar exist and are valid REAL_CLIP prototypes."""
+    if not os.path.exists(cache_path) or not os.path.exists(meta_path):
+        return False
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        if meta.get("source") != "REAL_CLIP":
+            return False
+        if meta.get("model") != model_name:
+            return False
+        if tuple(meta.get("shape", [])) != expected_shape:
+            return False
+
+        # Validate prompt hash & count for content integrity
+        if expected_prompt_hash is not None:
+            if meta.get("prompt_hash") != expected_prompt_hash:
+                return False
+        if expected_prompt_count is not None:
+            if meta.get("prompt_count") != expected_prompt_count:
+                return False
+
+        prototypes = np.load(cache_path)
+        if prototypes.shape != expected_shape:
+            return False
+        if not np.all(np.isfinite(prototypes)):
+            return False
+
+        norms = np.linalg.norm(prototypes, axis=-1)
+        if not np.allclose(norms, 1.0, atol=1e-3):
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
 def get_or_compute_clip_text_prototypes(
     model_name: str = "openai/clip-vit-base-patch32",
     cache_path: Optional[str] = None,
@@ -112,45 +170,113 @@ def get_or_compute_clip_text_prototypes(
     multi_prototype: bool = False,
 ) -> np.ndarray:
     """
-    Computes or loads text prototypes for 7 FER emotion classes using a frozen CLIP text encoder.
-    If multi_prototype is False: returns shape (7, embedding_dim) (averaged across prompts per class).
-    If multi_prototype is True: returns shape (7, 5, embedding_dim) (5 individual L2-normalized prompt vectors per class).
+    Computes or loads text prototypes for 7 FER emotion classes using a frozen REAL CLIP text encoder.
+    Synthetic/random prototype fallbacks are COMPLETELY DISABLED.
+    If loading CLIP fails, raises RuntimeError immediately.
     """
-    if cache_path is None or (multi_prototype and "clip_text_prototypes_7emotions.npy" in cache_path):
-        cache_path = "pretrained/clip_text_prototypes_7emotions_multigranularity_multi5.npy" if multi_prototype else "pretrained/clip_text_prototypes_7emotions.npy"
-
-    print("[CLIP_Text_Encoder] Emotion prototype index alignment trace:", flush=True)
-    for class_idx, class_name in EMOTION_CLASS_MAP.items():
-        print(f"[CLIP_Text_Encoder]   class_index {class_idx} -> class_name '{class_name}' -> prototype_index [{class_idx}]", flush=True)
-
-    expected_shape = (7, 5, embedding_dim) if multi_prototype else (7, embedding_dim)
-    if cache_path and os.path.exists(cache_path):
-        try:
-            prototypes = np.load(cache_path)
-            if prototypes.shape == expected_shape:
-                print(f"[CLIP_Text_Encoder] Loaded cached text prototypes from {cache_path} (shape: {prototypes.shape})", flush=True)
-                return prototypes.astype(np.float32)
-        except Exception as err:
-            print(f"[CLIP_Text_Encoder] Warning: Failed to load {cache_path}: {err}. Recomputing...", flush=True)
-
     if prompts_per_class is None:
         prompts_per_class = DEFAULT_AU_EMOTION_PROMPTS
 
-    # Attempt HuggingFace Transformers (PyTorch or TensorFlow)
-    prototypes = _encode_with_transformers(model_name, prompts_per_class, embedding_dim, multi_prototype=multi_prototype)
-    
-    if prototypes is None:
-        print("[CLIP_Text_Encoder] Warning: Could not initialize HuggingFace CLIP model. Falling back to synthetic normalized reference prototypes.", flush=True)
-        prototypes = _generate_fallback_prototypes(embedding_dim, multi_prototype=multi_prototype)
+    prompt_hash, prompt_count = compute_prompt_hash(prompts_per_class)
 
-    # Save to disk for fast caching
+    if cache_path is None or (multi_prototype and "clip_text_prototypes_7emotions.npy" in cache_path):
+        cache_path = (
+            "pretrained/clip_text_prototypes_7emotions_multigranularity_multi5.npy"
+            if multi_prototype
+            else "pretrained/clip_text_prototypes_7emotions.npy"
+        )
+
+    meta_path = cache_path + ".meta.json"
+    expected_shape = (7, 5, embedding_dim) if multi_prototype else (7, embedding_dim)
+
+    # Validate existing cache & provenance (including prompt content hash)
+    if validate_cache_provenance(
+        cache_path,
+        meta_path,
+        model_name,
+        expected_shape,
+        expected_prompt_hash=prompt_hash,
+        expected_prompt_count=prompt_count,
+    ):
+        prototypes = np.load(cache_path).astype(np.float32)
+        print(f"[CLIP] Model: {model_name}", flush=True)
+        print(f"[CLIP] Text encoder loaded successfully", flush=True)
+        print(f"[CLIP] Prototype source: REAL_CLIP", flush=True)
+        print(f"[CLIP] Prompt SHA256 Hash: {prompt_hash[:16]}... (count: {prompt_count})", flush=True)
+        print(f"[CLIP] Synthetic fallback: DISABLED", flush=True)
+        print(f"[CLIP] Prototype shape: {prototypes.shape}", flush=True)
+        print(f"[CLIP] L2 norm check: PASSED (loaded from verified cache: {cache_path})", flush=True)
+        return prototypes
+
+    if os.path.exists(cache_path):
+        print(f"[CLIP] Stale, modified prompt, or unverified cache detected at '{cache_path}'. Regenerating using REAL_CLIP...", flush=True)
+        try:
+            os.remove(cache_path)
+        except Exception:
+            pass
+    if os.path.exists(meta_path):
+        try:
+            os.remove(meta_path)
+        except Exception:
+            pass
+
+    # Encode using REAL CLIP Text Encoder via HuggingFace Transformers
+    prototypes = _encode_with_transformers(
+        model_name=model_name,
+        prompts_per_class=prompts_per_class,
+        embedding_dim=embedding_dim,
+        multi_prototype=multi_prototype,
+    )
+
+    if prototypes is None:
+        raise RuntimeError(
+            f"[CLIP ERROR] Could not initialize or run HuggingFace CLIP model '{model_name}'. "
+            f"Synthetic fallback is DISABLED. Training cannot proceed without real CLIP text embeddings!"
+        )
+
+    # Post-checks
+    if prototypes.shape != expected_shape:
+        raise RuntimeError(
+            f"[CLIP ERROR] Expected prototype shape {expected_shape}, but got {prototypes.shape}."
+        )
+
+    if not np.all(np.isfinite(prototypes)):
+        raise RuntimeError("[CLIP ERROR] Generated text prototypes contain non-finite values (NaN or Inf).")
+
+    norms = np.linalg.norm(prototypes, axis=-1)
+    if not np.allclose(norms, 1.0, atol=1e-3):
+        raise RuntimeError(
+            f"[CLIP ERROR] Generated text prototypes failed L2 normalization check (min norm={norms.min():.4f}, max norm={norms.max():.4f})."
+        )
+
+    # Save cache & provenance metadata including prompt_hash & prompt_count
     if cache_path:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         try:
             np.save(cache_path, prototypes)
-            print(f"[CLIP_Text_Encoder] Cached text prototypes saved to {cache_path}", flush=True)
+            meta_data = {
+                "model": model_name,
+                "source": "REAL_CLIP",
+                "embedding_dim": embedding_dim,
+                "multi_prototype": multi_prototype,
+                "shape": list(prototypes.shape),
+                "prompt_hash": prompt_hash,
+                "prompt_count": prompt_count,
+                "l2_normalized": True,
+            }
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta_data, f, indent=2)
+            print(f"[CLIP] Cached REAL_CLIP prototypes saved to {cache_path}", flush=True)
         except Exception as e:
-            print(f"[CLIP_Text_Encoder] Warning: Could not save text prototypes to {cache_path}: {e}", flush=True)
+            print(f"[CLIP] Warning: Could not save text prototypes cache: {e}", flush=True)
+
+    print(f"[CLIP] Model: {model_name}", flush=True)
+    print(f"[CLIP] Text encoder loaded successfully", flush=True)
+    print(f"[CLIP] Prototype source: REAL_CLIP", flush=True)
+    print(f"[CLIP] Prompt SHA256 Hash: {prompt_hash[:16]}... (count: {prompt_count})", flush=True)
+    print(f"[CLIP] Synthetic fallback: DISABLED", flush=True)
+    print(f"[CLIP] Prototype shape: {prototypes.shape}", flush=True)
+    print(f"[CLIP] L2 norm check: PASSED (all vectors L2 norm ≈ 1.0)", flush=True)
 
     return prototypes.astype(np.float32)
 
@@ -165,11 +291,17 @@ def _encode_with_transformers(
     # 1. Try PyTorch Transformers
     try:
         import torch
-        from transformers import AutoTokenizer, CLIPTextModelWithProjection
+        from transformers import AutoTokenizer, CLIPTextModelWithProjection, CLIPModel
 
-        print(f"[CLIP_Text_Encoder] Encoding AU-aware prompts using PyTorch '{model_name}' (multi_prototype={multi_prototype})...", flush=True)
+        print(f"[CLIP] Loading PyTorch HuggingFace model '{model_name}' (multi_prototype={multi_prototype})...", flush=True)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
-        text_encoder = CLIPTextModelWithProjection.from_pretrained(model_name)
+        try:
+            text_encoder = CLIPTextModelWithProjection.from_pretrained(model_name)
+            use_projection = True
+        except Exception:
+            text_encoder = CLIPModel.from_pretrained(model_name)
+            use_projection = False
+
         text_encoder.eval()
 
         class_prototypes = []
@@ -177,9 +309,15 @@ def _encode_with_transformers(
             for c in range(7):
                 prompts = prompts_per_class[c]
                 inputs = tokenizer(prompts, padding=True, return_tensors="pt")
-                outputs = text_encoder(**inputs)
-                # text_embeds shape: [num_prompts, 512]
-                embeds = outputs.text_embeds if hasattr(outputs, "text_embeds") else outputs[0][:, 0, :]
+                if use_projection and hasattr(text_encoder, "get_text_features"):
+                    embeds = text_encoder.get_text_features(**inputs)
+                elif hasattr(text_encoder, "text_model"):
+                    outputs = text_encoder(**inputs)
+                    embeds = outputs.text_embeds if hasattr(outputs, "text_embeds") else outputs[0][:, 0, :]
+                else:
+                    outputs = text_encoder(**inputs)
+                    embeds = outputs.text_embeds if hasattr(outputs, "text_embeds") else outputs[0][:, 0, :]
+
                 embeds = embeds / embeds.norm(p=2, dim=-1, keepdim=True)
                 if multi_prototype:
                     class_prototypes.append(embeds.cpu().numpy())
@@ -189,26 +327,34 @@ def _encode_with_transformers(
                     class_prototypes.append(mean_embed.cpu().numpy())
 
         res = np.stack(class_prototypes, axis=0)
-        print(f"[CLIP_Text_Encoder] Successfully generated PyTorch CLIP prototypes shape: {res.shape}", flush=True)
         return res
     except Exception as e_pt:
-        print(f"[CLIP_Text_Encoder] PyTorch encoding unavailable or failed: {e_pt}", flush=True)
+        print(f"[CLIP] PyTorch encoding attempt: {e_pt}", flush=True)
 
     # 2. Try TensorFlow Transformers
     try:
         import tensorflow as tf
-        from transformers import AutoTokenizer, TFCLIPTextModelWithProjection
+        from transformers import AutoTokenizer, TFCLIPModel, TFCLIPTextModel
 
-        print(f"[CLIP_Text_Encoder] Encoding AU-aware prompts using TensorFlow '{model_name}' (multi_prototype={multi_prototype})...", flush=True)
+        print(f"[CLIP] Loading TensorFlow HuggingFace model '{model_name}' (multi_prototype={multi_prototype})...", flush=True)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
-        text_encoder = TFCLIPTextModelWithProjection.from_pretrained(model_name)
+        try:
+            text_encoder = TFCLIPModel.from_pretrained(model_name)
+            is_full_clip = True
+        except Exception:
+            text_encoder = TFCLIPTextModel.from_pretrained(model_name)
+            is_full_clip = False
 
         class_prototypes = []
         for c in range(7):
             prompts = prompts_per_class[c]
             inputs = tokenizer(prompts, padding=True, return_tensors="tf")
-            outputs = text_encoder(**inputs)
-            embeds = outputs.text_embeds if hasattr(outputs, "text_embeds") else outputs[0][:, 0, :]
+            if is_full_clip and hasattr(text_encoder, "get_text_features"):
+                embeds = text_encoder.get_text_features(**inputs)
+            else:
+                outputs = text_encoder(**inputs)
+                embeds = outputs.last_hidden_state[:, 0, :] if hasattr(outputs, "last_hidden_state") else outputs[0][:, 0, :]
+
             embeds = embeds / tf.norm(embeds, ord=2, axis=-1, keepdims=True)
             if multi_prototype:
                 class_prototypes.append(embeds.numpy())
@@ -218,22 +364,9 @@ def _encode_with_transformers(
                 class_prototypes.append(mean_embed.numpy())
 
         res = np.stack(class_prototypes, axis=0)
-        print(f"[CLIP_Text_Encoder] Successfully generated TensorFlow CLIP prototypes shape: {res.shape}", flush=True)
         return res
     except Exception as e_tf:
-        print(f"[CLIP_Text_Encoder] TensorFlow encoding unavailable or failed: {e_tf}", flush=True)
+        print(f"[CLIP] TensorFlow encoding attempt: {e_tf}", flush=True)
 
     return None
 
-
-def _generate_fallback_prototypes(embedding_dim: int = 512, multi_prototype: bool = False) -> np.ndarray:
-    """Generates reproducible L2-normalized reference vectors for 7 classes."""
-    rng = np.random.RandomState(42)
-    if multi_prototype:
-        raw = rng.randn(7, 5, embedding_dim).astype(np.float32)
-        norms = np.linalg.norm(raw, axis=-1, keepdims=True)
-        return raw / norms
-    else:
-        raw = rng.randn(7, embedding_dim).astype(np.float32)
-        norms = np.linalg.norm(raw, axis=-1, keepdims=True)
-        return raw / norms
