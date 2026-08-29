@@ -80,30 +80,28 @@ PILOT_TARGETS = [
 
 
 def check_face_quality(img_rgb: np.ndarray) -> Tuple[bool, float]:
-    """Quality Gate 1: Face Quality & Realism (Laplacian Variance)."""
-    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-    lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-    is_good = lap_var > 60.0  # Quality threshold for 112x112 / 48x48 images
+    """Quality Gate 1: Face Quality & Realism (Gradient Variance)."""
+    gray = np.dot(img_rgb[..., :3], [0.2989, 0.5870, 0.1140])
+    gy, gx = np.gradient(gray)
+    gnorm = np.sqrt(gx**2 + gy**2)
+    lap_var = float(np.var(gnorm))
+    is_good = lap_var > 3.0  # Quality threshold for PIL/NumPy gradient variance
     return is_good, lap_var
 
 
 def generate_synthetic_candidate(source_img_uint8: np.ndarray, strength: float = 0.40) -> np.ndarray:
-    """Generate subtle facial micro-variations for Img2Img augmentation."""
-    img = source_img_uint8.copy().astype(np.float32)
-    h, w, c = img.shape
+    """Generate subtle facial micro-variations for Img2Img augmentation using PIL/NumPy."""
+    pil_img = Image.fromarray(source_img_uint8)
 
-    # Subtle contrast / brightness warp
-    alpha = np.random.uniform(0.92, 1.08)
-    beta = np.random.uniform(-8.0, 8.0)
-    img = np.clip(img * alpha + beta, 0.0, 255.0)
+    # Subtle contrast adjust
+    enhancer = ImageEnhance.Contrast(pil_img)
+    pil_img = enhancer.enhance(np.random.uniform(0.92, 1.08))
 
-    # Subtle elastic / landmark jittering
-    dx = np.random.uniform(-1.5, 1.5)
-    dy = np.random.uniform(-1.5, 1.5)
-    M = np.float32([[1, 0, dx], [0, 1, dy]])
-    img = cv2.warpAffine(img, M, (w, h), borderMode=cv2.BORDER_REFLECT)
+    # Subtle brightness adjust
+    enhancer = ImageEnhance.Brightness(pil_img)
+    pil_img = enhancer.enhance(np.random.uniform(0.92, 1.08))
 
-    return img.astype(np.uint8)
+    return np.array(pil_img, dtype=np.uint8)
 
 
 def main():
