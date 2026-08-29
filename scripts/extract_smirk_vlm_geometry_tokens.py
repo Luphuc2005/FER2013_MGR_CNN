@@ -16,9 +16,12 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) in sys.path:
     sys.path.remove(str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT))
+import importlib.util
+_fer_spec = importlib.util.spec_from_file_location("fer2013_local_module", PROJECT_ROOT / "datasets" / "fer2013.py")
+_fer_module = importlib.util.module_from_spec(_fer_spec)
+_fer_spec.loader.exec_module(_fer_module)
+collect_split_records = _fer_module.collect_split_records
 
-from datasets.fer2013 import collect_split_records
 from scripts.extract_smirk_features import import_smirk, load_frozen_encoder, prepare_smirk_image, pushd
 
 
