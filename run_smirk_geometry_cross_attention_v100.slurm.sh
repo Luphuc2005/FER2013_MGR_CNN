@@ -19,7 +19,7 @@ mkdir -p logs
 export PYTHONUNBUFFERED=1
 
 # ============================================================
-# PATHS
+# PATHS & ENVIRONMENTS
 # ============================================================
 
 SMIRK_PY="$ROOT/smirk_env/bin/python"
@@ -38,19 +38,27 @@ else
 fi
 
 SMIRK_CHECKPOINT="${SMIRK_CHECKPOINT:-$SMIRK_ROOT/pretrained_models/SMIRK_em1.pt}"
-
-# Baseline tốt nhất hiện tại
 BASELINE_CKPT="${BASELINE_CKPT:-$ROOT/outputs/tf_runs/convnext_base_ms1m_arcface_baseline/checkpoints/best/ckpt-43}"
 
 export SMIRK_ROOT
 export SMIRK_CHECKPOINT
 export PYTHONPATH="$SMIRK_ROOT:$ROOT:${PYTHONPATH:-}"
 
+# Wrapper helper to run SMIRK PyTorch commands with clean environment or inside Apptainer if set
+run_smirk_cmd() {
+    if [ -n "${APPTAINER_IMAGE:-}" ] && command -v apptainer >/dev/null 2>&1; then
+        apptainer exec --nv "$APPTAINER_IMAGE" "$SMIRK_PY" "$@"
+    elif [ -n "${SINGULARITY_IMAGE:-}" ] && command -v singularity >/dev/null 2>&1; then
+        singularity exec --nv "$SINGULARITY_IMAGE" "$SMIRK_PY" "$@"
+    else
+        env -u LD_LIBRARY_PATH -u LD_PRELOAD "$SMIRK_PY" "$@"
+    fi
+}
 
 echo "============================================================"
 echo " FER2013 - SMIRK 3D GEOMETRY CROSS ATTENTION"
 echo "============================================================"
-echo "Job ID: ${SLURM_JOB_ID}"
+echo "Job ID: ${SLURM_JOB_ID:-standalone}"
 echo "Node: $(hostname)"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
 echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-}"
@@ -66,7 +74,6 @@ echo "CONFIG=$CONFIG"
 echo "============================================================"
 
 nvidia-smi
-
 
 # ============================================================
 # FILE CHECK
@@ -88,8 +95,7 @@ nvidia-smi
 }
 
 [ -f "$SMIRK_CHECKPOINT" ] || {
-    echo "[ERROR] SMIRK checkpoint not found:"
-    echo "$SMIRK_CHECKPOINT"
+    echo "[ERROR] SMIRK checkpoint not found: $SMIRK_CHECKPOINT"
     exit 1
 }
 
@@ -99,52 +105,44 @@ nvidia-smi
 }
 
 [ -f "$BASELINE_CKPT.index" ] || {
-    echo "[ERROR] Baseline ckpt-43 not found:"
-    echo "$BASELINE_CKPT"
+    echo "[ERROR] Baseline ckpt-43 not found: $BASELINE_CKPT"
     exit 1
 }
 
-
 # ============================================================
-# IMPORTANT
-#
-# Apptainer LD_LIBRARY_PATH làm Torch 2.0.1+cu117 SIGBUS.
-# Vì vậy CHỈ các command SMIRK/PyTorch sẽ chạy với:
-#
-# env -u LD_LIBRARY_PATH -u LD_PRELOAD
-#
-# Không thêm CUDA loop của job diffusion cũ.
+# STEP 0: FAIL-FAST ENVIRONMENT CHECK FOR SMIRK / PYTORCH / GPU
 # ============================================================
-
 
 echo
 echo "============================================================"
 echo " STEP 0: CHECK SMIRK / PYTORCH / PYTORCH3D / GPU"
 echo "============================================================"
 
-env -u LD_LIBRARY_PATH -u LD_PRELOAD \
-"$SMIRK_PY" - <<'PY'
+run_smirk_cmd - <<'PY'
 import sys
 import torch
-import pytorch3d
 
 print("Python:", sys.executable)
-print("Torch:", torch.__version__)
+print("Torch version:", torch.__version__)
 print("Torch CUDA build:", torch.version.cuda)
 print("CUDA available:", torch.cuda.is_available())
 
 if not torch.cuda.is_available():
-    raise RuntimeError("PyTorch cannot see V100 GPU.")
+    raise RuntimeError("[FAIL-FAST] PyTorch cannot access GPU.")
 
-print("GPU:", torch.cuda.get_device_name(0))
-print("PyTorch3D: OK")
+print("GPU Device Name:", torch.cuda.get_device_name(0))
+
+try:
+    import pytorch3d
+    print("PyTorch3D: OK")
+except ImportError as e:
+    raise ImportError(f"[FAIL-FAST] PyTorch3D import failed: {e}")
+
 print("SMIRK_GPU_ENV_OK")
 PY
 
-
 # ============================================================
-# STEP 1
-# SMOKE 3D EXTRACTION
+# STEP 1: SMOKE TEST SMIRK 3D EXTRACTION
 # ============================================================
 
 echo
@@ -152,8 +150,7 @@ echo "============================================================"
 echo " STEP 1: SMOKE TEST SMIRK 3D EXTRACTION - 16 TRAIN IMAGES"
 echo "============================================================"
 
-env -u LD_LIBRARY_PATH -u LD_PRELOAD \
-"$SMIRK_PY" -u scripts/extract_smirk_vlm_geometry_tokens.py \
+run_smirk_cmd -u scripts/extract_smirk_vlm_geometry_tokens.py \
     --config "$CONFIG" \
     --smirk-root "$SMIRK_ROOT" \
     --smirk-checkpoint "$SMIRK_CHECKPOINT" \
@@ -164,10 +161,8 @@ env -u LD_LIBRARY_PATH -u LD_PRELOAD \
     --force \
     --save-preview
 
-
 # ============================================================
-# STEP 2
-# FULL SMIRK -> FLAME -> DEPTH/NORMAL -> CLIP TOKENS
+# STEP 2: FULL SMIRK 3D GEOMETRY CACHE
 # ============================================================
 
 echo
@@ -175,8 +170,7 @@ echo "============================================================"
 echo " STEP 2: FULL 3D GEOMETRY CACHE - TRAIN / VAL / TEST"
 echo "============================================================"
 
-env -u LD_LIBRARY_PATH -u LD_PRELOAD \
-"$SMIRK_PY" -u scripts/extract_smirk_vlm_geometry_tokens.py \
+run_smirk_cmd -u scripts/extract_smirk_vlm_geometry_tokens.py \
     --config "$CONFIG" \
     --smirk-root "$SMIRK_ROOT" \
     --smirk-checkpoint "$SMIRK_CHECKPOINT" \
@@ -184,7 +178,6 @@ env -u LD_LIBRARY_PATH -u LD_PRELOAD \
     --splits train val test \
     --batch-size 64 \
     --force
-
 
 echo
 echo "============================================================"
@@ -197,10 +190,8 @@ echo " normal tokens:          [B,49,768]"
 echo " geometry cache:         [B,98,768]"
 echo "============================================================"
 
-
 # ============================================================
-# STEP 3
-# TENSORFLOW CROSS-ATTENTION SMOKE TRAIN
+# STEP 3: TENSORFLOW CROSS-ATTENTION SMOKE TRAIN
 # ============================================================
 
 echo
@@ -216,10 +207,8 @@ echo "============================================================"
     --max-eval-batches 1 \
     --smoke-only
 
-
 # ============================================================
-# STEP 4
-# FULL TRAINING + FINAL EVALUATION
+# STEP 4: FULL TRAINING + FINAL EVALUATION
 # ============================================================
 
 echo
@@ -231,7 +220,6 @@ echo "============================================================"
 "$FER_PY" -u scripts/train_smirk_geometry_cross_attention.py \
     --config "$CONFIG" \
     --baseline-checkpoint "$BASELINE_CKPT"
-
 
 echo
 echo "============================================================"
