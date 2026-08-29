@@ -137,14 +137,14 @@ def load_pixels_for_cache(cfg: Dict, split: str, sample_ids: np.ndarray, labels:
             raise ValueError(f"Label mismatch for {split} sample_id={int(sample_id)}: cache={int(label)} csv={int(records.labels[pos])}")
         pixels.append(records.images[pos])
     arr = np.stack(pixels, axis=0).astype(np.uint8)
+    if arr.ndim == 3:
+        arr = np.expand_dims(arr, axis=-1)
     print(f"FER_PIXELS_USED[{split}]={arr.shape}", flush=True)
     return arr
 
 
 def preprocess_batch_images(images: tf.Tensor, cfg: Dict, training: bool) -> tf.Tensor:
     images = tf.cast(images, tf.float32)
-    if tf.rank(images) == 3:
-        images = tf.expand_dims(images, axis=-1)
     target_size = int(cfg["data"]["image_size"])
     images = tf.image.resize(images, [target_size, target_size], method="bilinear")
     if images.shape[-1] == 1:
