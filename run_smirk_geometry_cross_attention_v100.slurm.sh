@@ -36,7 +36,7 @@ BASELINE_CKPT="$ROOT/outputs/tf_runs/convnext_base_ms1m_arcface_baseline/checkpo
 
 export SMIRK_ROOT
 export SMIRK_CHECKPOINT
-export PYTHONPATH="$SMIRK_ROOT:$ROOT:${PYTHONPATH:-}"
+export PYTHONPATH="$ROOT:$SMIRK_ROOT:${PYTHONPATH:-}"
 
 echo "============================================================"
 echo " FER2013 - SMIRK 3D GEOMETRY CROSS ATTENTION (HOST ENV)"
