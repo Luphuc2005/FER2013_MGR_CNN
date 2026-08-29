@@ -43,13 +43,22 @@ BASELINE_CKPT="${BASELINE_CKPT:-$ROOT/outputs/tf_runs/convnext_base_ms1m_arcface
 # APPTAINER IMAGE RESOLUTION (Strict check, no fallback)
 APPTAINER_IMAGE="${APPTAINER_IMAGE:-}"
 if [ -z "$APPTAINER_IMAGE" ]; then
-    if [ -f "$ROOT/smirk_env.sif" ]; then
-        APPTAINER_IMAGE="$ROOT/smirk_env.sif"
-    elif [ -f "/home/ptbao/projects/smirk_env.sif" ]; then
-        APPTAINER_IMAGE="/home/ptbao/projects/smirk_env.sif"
-    elif [ -f "/home/ptbao/projects/FER2013_MGR_CNN/smirk_env.sif" ]; then
-        APPTAINER_IMAGE="/home/ptbao/projects/FER2013_MGR_CNN/smirk_env.sif"
-    fi
+    for candidate in \
+        "$ROOT/smirk_env.sif" \
+        "$ROOT/smirk.sif" \
+        "$ROOT/containers/smirk_env.sif" \
+        "/home/ptbao/projects/smirk_env.sif" \
+        "/home/ptbao/projects/smirk.sif" \
+        "/home/ptbao/containers/smirk_env.sif" \
+        "/home/ptbao/containers/smirk.sif" \
+        "/home/ptbao/smirk_env.sif" \
+        "/home/ptbao/smirk.sif"
+    do
+        if [ -f "$candidate" ]; then
+            APPTAINER_IMAGE="$candidate"
+            break
+        fi
+    done
 fi
 
 if [ -z "$APPTAINER_IMAGE" ] || [ ! -f "$APPTAINER_IMAGE" ]; then
