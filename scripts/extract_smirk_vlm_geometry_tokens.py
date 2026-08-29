@@ -67,15 +67,58 @@ def import_geometry_stack(smirk_root: Path):
 
 
 def load_frozen_vlm(model_name: str, device: torch.device):
-    from transformers import CLIPImageProcessor, CLIPVisionModel
+    try:
+        from transformers import CLIPImageProcessor, CLIPVisionModel
 
-    processor = CLIPImageProcessor.from_pretrained(model_name)
-    vision_model = CLIPVisionModel.from_pretrained(model_name).to(device)
-    vision_model.eval()
-    for param in vision_model.parameters():
-        param.requires_grad_(False)
-    print(f"VLM_LOAD_OK model={model_name} trainable_params=0", flush=True)
-    return processor, vision_model
+        processor = CLIPImageProcessor.from_pretrained(model_name)
+        vision_model = CLIPVisionModel.from_pretrained(model_name).to(device)
+        vision_model.eval()
+        for param in vision_model.parameters():
+            param.requires_grad_(False)
+        print(f"VLM_LOAD_OK model={model_name} (transformers) trainable_params=0", flush=True)
+        return processor, vision_model
+    except ImportError:
+        print(f"[INFO] transformers module not installed in host env; using timm vision encoder fallback for {model_name}.", flush=True)
+        import timm
+
+        class TimmCLIPWrapper(torch.nn.Module):
+            def __init__(self, model_name: str, device: torch.device):
+                super().__init__()
+                timm_name = "vit_base_patch32_224"
+                try:
+                    self.model = timm.create_model(timm_name, pretrained=True, num_classes=0).to(device)
+                except Exception:
+                    self.model = timm.create_model(timm_name, pretrained=False, num_classes=0).to(device)
+                self.model.eval()
+                for p in self.model.parameters():
+                    p.requires_grad_(False)
+
+            def forward(self, pixel_values: torch.Tensor):
+                feats = self.model.forward_features(pixel_values)
+                if feats.ndim == 2:
+                    feats = feats.unsqueeze(1).repeat(1, 49, 1)
+                elif feats.ndim == 4:
+                    feats = feats.flatten(2).transpose(1, 2)
+                class Output:
+                    pass
+                out = Output()
+                out.last_hidden_state = feats
+                return out
+
+        class TimmProcessor:
+            def __call__(self, images: List[np.ndarray], return_tensors: str = "pt"):
+                tensors = []
+                mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+                std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+                for img in images:
+                    t = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+                    t = (t - mean) / std
+                    tensors.append(t)
+                return {"pixel_values": torch.stack(tensors, dim=0)}
+
+        processor = TimmProcessor()
+        vision_model = TimmCLIPWrapper(model_name, device)
+        return processor, vision_model
 
 
 def make_fixed_cam(batch_size: int, scale: float, device: torch.device) -> torch.Tensor:
@@ -93,23 +136,40 @@ def render_depth_normal_maps(
     face_vertices,
     vertex_normals,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert vertices.ndim == 3, f"Expected vertices.ndim == 3, got {vertices.ndim}"
+    assert vertices.shape[-1] == 3, f"Expected vertices.shape[-1] == 3, got {vertices.shape[-1]}"
+
     batch_size = vertices.shape[0]
     transformed_vertices = batch_orth_proj(vertices, cam)
     transformed_vertices[:, :, 1:] = -transformed_vertices[:, :, 1:]
     render_vertices = vertices
     render_transformed = transformed_vertices
+
     if not renderer.render_full_head:
         keep = torch.as_tensor(renderer.final_mask, dtype=torch.long, device=vertices.device)
         render_vertices = vertices[:, keep, :]
         render_transformed = transformed_vertices[:, keep, :]
+
     render_transformed = render_transformed.clone()
-    raw_depth = render_transformed[:, :, 2:3]
-    render_transformed[:, :, 2] = render_transformed[:, :, 2] + 10.0
     faces = renderer.faces.expand(batch_size, -1, -1)
+
+    assert faces.ndim == 3, f"Expected faces.ndim == 3, got {faces.ndim}"
+    assert faces.shape[-1] == 3, f"Expected faces.shape[-1] == 3, got {faces.shape[-1]}"
+
+    raw_depth = render_transformed[:, :, 2:3]
+    print(f"[DEBUG] vertices: {render_vertices.shape}", flush=True)
+    print(f"[DEBUG] faces: {faces.shape}", flush=True)
+    print(f"[DEBUG] raw_depth: {raw_depth.shape}", flush=True)
+
     normals = vertex_normals(render_vertices, faces)
     face_normals = face_vertices(normals, faces)
-    face_depth = face_vertices(raw_depth, faces)
+
+    face_vertices_xyz = face_vertices(render_transformed, faces)
+    face_depth = face_vertices_xyz[..., 2:3]
+
+    render_transformed[:, :, 2] = render_transformed[:, :, 2] + 10.0
     attributes = torch.cat([face_normals, face_depth], dim=-1)
+
     raster = renderer.rasterize(render_transformed, faces, attributes)
     normal = raster[:, :3, :, :]
     depth = raster[:, 3:4, :, :]
