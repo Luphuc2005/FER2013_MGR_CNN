@@ -87,7 +87,7 @@ def load_geometry_cache(cfg: Dict, split: str, feature_dir: Path) -> Tuple[np.nd
     if not path.exists():
         raise FileNotFoundError(f"Missing cached geometry tokens: {path}")
     cache = np.load(path, allow_pickle=False)
-    tokens = cache["geometry_tokens"].astype(np.float32)
+    tokens = cache["geometry_tokens"].astype(np.float16)
     labels = cache["labels"].astype(np.int64)
     sample_ids = cache["sample_ids"].astype(np.int64)
     if tokens.ndim != 3:
@@ -102,7 +102,7 @@ def load_geometry_cache(cfg: Dict, split: str, feature_dir: Path) -> Tuple[np.nd
     expected_tokens = int(cache_cfg.get("expected_num_tokens", tokens.shape[1]))
     if expected_tokens != int(tokens.shape[1]):
         raise ValueError(f"Config expected_num_tokens={expected_tokens}, cache num tokens={tokens.shape[1]}")
-    print(f"GEOMETRY_TOKENS_USED[{split}]={tokens.shape} labels={labels.shape} nan_count={int(np.isnan(tokens).sum())}", flush=True)
+    print(f"GEOMETRY_TOKENS_USED[{split}]={tokens.shape} (float16) labels={labels.shape} nan_count={int(np.isnan(tokens).sum())}", flush=True)
     return tokens, labels, sample_ids
 
 
@@ -162,7 +162,7 @@ def make_dataset(
     ds = tf.data.Dataset.from_tensor_slices(
         {
             "pixels": pixels,
-            "geometry_tokens": geometry_tokens.astype(np.float32),
+            "geometry_tokens": geometry_tokens.astype(np.float16),
             "labels": labels.astype(np.int32),
         }
     )
