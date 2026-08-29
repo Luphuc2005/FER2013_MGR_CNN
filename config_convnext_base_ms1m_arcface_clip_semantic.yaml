@@ -60,10 +60,10 @@ model:
   convnext_base_require_pretrained: true
   drop_path_rate: 0.1
   layer_scale_init_value: 0.000001
-  use_eca: true
+  use_eca: false
   use_semantic_branch: true
   use_clip_semantic: true
-  lambda_sem: 0.2
+  lambda_sem: 0.1
   clip_model_name: "openai/clip-vit-base-patch32"
   clip_embedding_dim: 512
   clip_prototypes_path: "pretrained/clip_text_prototypes_7emotions.npy"
