@@ -238,23 +238,43 @@ def ce_loss(labels: tf.Tensor, logits: tf.Tensor) -> tf.Tensor:
     return tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(labels, tf.cast(logits, tf.float32), from_logits=True))
 
 
+@tf.function
+def train_step(model, optimizer, features, labels):
+    with tf.GradientTape() as tape:
+        outputs = model(features, training=True)
+        logits = tf.cast(outputs["logits"], tf.float32)
+        loss = ce_loss(labels, logits)
+        if model.losses:
+            loss = loss + tf.add_n([tf.cast(item, tf.float32) for item in model.losses])
+
+    variables = model.trainable_variables
+    grads = tape.gradient(loss, variables)
+    optimizer.apply_gradients([(g, v) for g, v in zip(grads, variables) if g is not None])
+
+    preds = tf.argmax(logits, axis=-1, output_type=tf.int32)
+    correct = tf.reduce_sum(tf.cast(preds == labels, tf.int32))
+    batch_size = tf.shape(labels)[0]
+    return loss, correct, batch_size
+
+
+@tf.function
+def eval_step(model, features, labels):
+    outputs = model(features, training=False)
+    logits = tf.cast(outputs["logits"], tf.float32)
+    loss = ce_loss(labels, logits)
+    probs = tf.nn.softmax(logits, axis=-1)
+    return loss, probs
+
+
 def train_one_epoch(model, optimizer, ds: tf.data.Dataset) -> Dict[str, float]:
     losses = []
     correct = 0
     total = 0
     for features, labels in ds:
-        with tf.GradientTape() as tape:
-            outputs = model(features, training=True)
-            loss = ce_loss(labels, outputs["logits"])
-            if model.losses:
-                loss = loss + tf.add_n([tf.cast(item, tf.float32) for item in model.losses])
-        variables = model.trainable_variables
-        grads = tape.gradient(loss, variables)
-        optimizer.apply_gradients([(g, v) for g, v in zip(grads, variables) if g is not None])
-        preds = tf.argmax(outputs["logits"], axis=-1, output_type=tf.int32)
-        correct += int(tf.reduce_sum(tf.cast(preds == labels, tf.int32)).numpy())
-        total += int(labels.shape[0])
+        loss, step_correct, step_total = train_step(model, optimizer, features, labels)
         losses.append(float(loss.numpy()))
+        correct += int(step_correct.numpy())
+        total += int(step_total.numpy())
     return {"loss": float(np.mean(losses)) if losses else float("nan"), "accuracy": correct / max(total, 1)}
 
 
@@ -264,10 +284,9 @@ def evaluate(model, ds: tf.data.Dataset) -> Dict:
     y_pred = []
     confidences = []
     for features, labels in ds:
-        outputs = model(features, training=False)
-        logits = tf.cast(outputs["logits"], tf.float32)
-        losses.append(float(ce_loss(labels, logits).numpy()))
-        probs = tf.nn.softmax(logits, axis=-1).numpy()
+        loss, probs_tensor = eval_step(model, features, labels)
+        probs = probs_tensor.numpy()
+        losses.append(float(loss.numpy()))
         preds = probs.argmax(axis=1)
         y_true.extend(labels.numpy().astype(int).tolist())
         y_pred.extend(preds.astype(int).tolist())
