@@ -24,6 +24,9 @@ echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $(hostname)"
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 echo "SLURM_JOB_GPUS=$SLURM_JOB_GPUS"
+echo "Start: $(date)"
+
+nvidia-smi
 
 for CUDA_DIR in \
     /usr/local/cuda-11.8 \
@@ -88,8 +91,19 @@ echo "=========================================="
 echo " STEP 3: TRAIN MODEL WITH PILOT TARGETED DIFFUSION"
 echo "=========================================="
 
-python -u train.py \
-    --config config_convnext_base_ms1m_arcface_pilot_diffusion.yaml
+# Check if best checkpoint already exists from previous run
+CHECKPOINT_DIR="outputs/tf_runs/convnext_base_ms1m_arcface_pilot_diffusion/checkpoints/best"
+if [ -d "$CHECKPOINT_DIR" ] && [ "$(ls -A $CHECKPOINT_DIR)" ]; then
+    echo "[INFO] Found existing best checkpoint in $CHECKPOINT_DIR."
+    echo "[INFO] Resume training or use existing checkpoint..."
+    python -u train.py \
+        --config config_convnext_base_ms1m_arcface_pilot_diffusion.yaml \
+        --resume || true
+else
+    echo "[INFO] No existing checkpoint found. Starting fresh training..."
+    python -u train.py \
+        --config config_convnext_base_ms1m_arcface_pilot_diffusion.yaml
+fi
 
 echo
 echo "=========================================="
@@ -102,6 +116,15 @@ python -u scripts/analyze_baseline_hard_pairs.py \
 
 echo
 echo "=========================================="
-echo " PILOT PIPELINE COMPLETED SUCCESSFULLY"
+echo " STEP 5: OFFICIAL TEST SET EVALUATION"
+echo "=========================================="
+
+python -u evaluate.py \
+    --config config_convnext_base_ms1m_arcface_pilot_diffusion.yaml \
+    --run-dir outputs/tf_runs/convnext_base_ms1m_arcface_pilot_diffusion
+
+echo
+echo "=========================================="
+echo " PILOT DIFFUSION PIPELINE COMPLETED SUCCESSFULLY"
 echo "=========================================="
 echo "End: $(date)"

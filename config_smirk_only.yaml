@@ -1,0 +1,109 @@
+﻿seed:
+  random_seed: 42
+
+source:
+  note: "SMIRK-only FER2013 experiment. Official PyTorch SMIRK is frozen and used only for offline feature extraction; TensorFlow trains a small MLP classifier on cached 3D expression features."
+
+runtime:
+  gpu_ids: [0]
+  batch_size_per_gpu: 256
+  fallback_batch_size_per_gpu: 128
+  require_two_gpus: false
+  min_gpus: 1
+  memory_growth: true
+  use_mixed_precision: false
+  intra_op_threads: 8
+  inter_op_threads: 4
+  tf_data_num_parallel_calls: 4
+  tf_data_private_threadpool_size: 4
+  tf_data_deterministic: true
+  prefetch_buffer: 2
+  distributed_eval: false
+  eval_tta_hflip: false
+  train_val_tta_hflip: false
+
+data:
+  data_path: "data/fer13-split"
+  mask_dir: null
+  num_classes: 7
+  image_size: 224
+  channels: 3
+  normalize: false
+  predecode_pixels: true
+  preload_masks: false
+  allow_missing_masks: false
+  use_clean_filter: false
+  bad_row_indices_path: null
+  mask_ablation: "none"
+  mask_region_permutation: [4, 2, 0, 5, 1, 3]
+  shuffle_buffer: 28709
+  cache: true
+
+augmentation:
+  horizontal_flip: false
+  rotation_degrees: 0.0
+  brightness_delta: 0.0
+  contrast_lower: 1.0
+  contrast_upper: 1.0
+  gamma_prob: 0.0
+  gamma_min: 1.0
+  gamma_max: 1.0
+  random_erasing_prob: 0.0
+  random_erasing_area_min: 0.02
+  random_erasing_area_max: 0.15
+  random_erasing_value: "random"
+
+smirk:
+  # Clone the official repo on the server, then run its quick_install.sh so this
+  # checkpoint exists: https://github.com/georgeretsi/smirk
+  smirk_root: "external/smirk"
+  checkpoint: "external/smirk/pretrained_models/SMIRK_em1.pt"
+  device: "cuda"
+  extract_batch_size: 128
+  image_size: 224
+  crop: true
+  crop_scale: 1.4
+  mediapipe_input_size: 224
+  on_crop_failure: "resize"
+  feature_keys: ["expression_params", "eyelid_params", "jaw_params"]
+  strict_load: true
+  init_timm_pretrained: false
+
+model:
+  name: "smirk_only_mlp"
+  arch: "smirk_only"
+  num_classes: 7
+  feature_dim: 55
+  normalization: "layernorm"
+  hidden_dims: [128, 64]
+  activation: "relu"
+  dropout: 0.35
+  l2_weight_decay: 0.0001
+
+stage_transition:
+  enable_2stage_switching: false
+
+training:
+  epochs: 120
+  patience: 20
+  warmup_epochs: 0
+  loss: "cross_entropy"
+  label_smoothing: 0.0
+  optimizer: "adamw"
+  base_optimizer: "adamw"
+  lr: 0.001
+  weight_decay: 0.0001
+  scheduler: "reduce_on_plateau"
+  grad_clip_norm: 1.0
+  skip_nonfinite_batches: true
+  monitor: "val_accuracy"
+  resume: false
+  best_checkpoint_start_epoch: 1
+  periodic_checkpoint_interval: 0
+  progress_interval: 0
+
+paths:
+  output_dir: "outputs/smirk_only"
+  logs_dir: "outputs/smirk_only/logs"
+  feature_dir: "outputs/smirk_only/features"
+
