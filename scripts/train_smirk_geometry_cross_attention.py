@@ -3,40 +3,30 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import random
-import sys
 import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-os.environ.setdefault("TF_XLA_FLAGS", "--tf_xla_auto_jit=0 --tf_xla_enable_xla_devices=false")
-os.environ.setdefault("TF_DISABLE_XLA", "1")
-os.environ.setdefault("TF_DISABLE_XLA_COMPILATION", "1")
-os.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
 
 import numpy as np
 import tensorflow as tf
 import yaml
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 from datasets.fer2013 import EMOTION_NAMES, collect_split_records
 from models.smirk_geometry_cross_attention import SMIRKGeometryCrossAttentionFER, resolve_latest_checkpoint
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train ConvNeXt-MS1M RGB Q x SMIRK/VLM geometry KV cross-attention on FER2013.")
+    parser = argparse.ArgumentParser(description="Train SMIRK Geometry Baseline-Preserving Residual Cross-Attention FER")
     parser.add_argument("--config", type=str, default="config_smirk_geometry_cross_attention.yaml")
-    parser.add_argument("--feature-dir", type=str, default=None)
     parser.add_argument("--baseline-checkpoint", type=str, default=None)
-    parser.add_argument("--skip-baseline-checkpoint", action="store_true")
-    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--feature-dir", type=str, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--skip-baseline-checkpoint", action="store_true")
     parser.add_argument("--max-train-batches", type=int, default=None)
     parser.add_argument("--max-eval-batches", type=int, default=None)
     parser.add_argument("--smoke-only", action="store_true")
@@ -231,7 +221,11 @@ def restore_rgb_baseline_checkpoint(model: SMIRKGeometryCrossAttentionFER, cfg: 
         return
     status = tf.train.Checkpoint(model=model.rgb_baseline).restore(latest)
     status.expect_partial()
-    print(f"RGB_BASELINE_BEST_CHECKPOINT_LOADED path={latest}", flush=True)
+    # Freeze entire baseline backbone & classifier head
+    model.rgb_baseline.trainable = False
+    for layer in model.rgb_baseline.layers:
+        layer.trainable = False
+    print(f"RGB_BASELINE_BEST_CHECKPOINT_LOADED path={latest} (FROZEN=True)", flush=True)
 
 
 def ce_loss(labels: tf.Tensor, logits: tf.Tensor) -> tf.Tensor:
@@ -260,10 +254,12 @@ def train_step(model, optimizer, features, labels):
 @tf.function
 def eval_step(model, features, labels):
     outputs = model(features, training=False)
-    logits = tf.cast(outputs["logits"], tf.float32)
-    loss = ce_loss(labels, logits)
-    probs = tf.nn.softmax(logits, axis=-1)
-    return loss, probs
+    final_logits = tf.cast(outputs["logits"], tf.float32)
+    baseline_logits = tf.cast(outputs["baseline_logits"], tf.float32)
+    loss = ce_loss(labels, final_logits)
+    final_probs = tf.nn.softmax(final_logits, axis=-1)
+    baseline_probs = tf.nn.softmax(baseline_logits, axis=-1)
+    return loss, final_probs, baseline_probs
 
 
 def train_one_epoch(model, optimizer, ds: tf.data.Dataset) -> Dict[str, float]:
@@ -281,31 +277,54 @@ def train_one_epoch(model, optimizer, ds: tf.data.Dataset) -> Dict[str, float]:
 def evaluate(model, ds: tf.data.Dataset) -> Dict:
     losses = []
     y_true = []
-    y_pred = []
+    y_baseline = []
+    y_fused = []
     confidences = []
     for features, labels in ds:
-        loss, probs_tensor = eval_step(model, features, labels)
-        probs = probs_tensor.numpy()
+        loss, fused_probs_tensor, baseline_probs_tensor = eval_step(model, features, labels)
+        fused_probs = fused_probs_tensor.numpy()
+        baseline_probs = baseline_probs_tensor.numpy()
         losses.append(float(loss.numpy()))
-        preds = probs.argmax(axis=1)
         y_true.extend(labels.numpy().astype(int).tolist())
-        y_pred.extend(preds.astype(int).tolist())
-        confidences.extend(probs.max(axis=1).astype(float).tolist())
+        y_baseline.extend(baseline_probs.argmax(axis=1).astype(int).tolist())
+        y_fused.extend(fused_probs.argmax(axis=1).astype(int).tolist())
+        confidences.extend(fused_probs.max(axis=1).astype(float).tolist())
+
+    y_true_arr = np.asarray(y_true, dtype=int)
+    y_base_arr = np.asarray(y_baseline, dtype=int)
+    y_fused_arr = np.asarray(y_fused, dtype=int)
+
+    base_correct = (y_base_arr == y_true_arr)
+    fused_correct = (y_fused_arr == y_true_arr)
+
+    rescue_count = int((~base_correct & fused_correct).sum())
+    harmed_count = int((base_correct & ~fused_correct).sum())
+    net_gain = rescue_count - harmed_count
+
+    baseline_acc = float(base_correct.mean()) if len(base_correct) > 0 else 0.0
+    fused_acc = float(fused_correct.mean()) if len(fused_correct) > 0 else 0.0
+
     ids = list(range(len(EMOTION_NAMES)))
-    cm = confusion_matrix(y_true, y_pred, labels=ids)
-    y_arr = np.asarray(y_true)
+    cm = confusion_matrix(y_true, y_fused, labels=ids)
     per_class = {}
     for class_id, class_name in enumerate(EMOTION_NAMES):
-        denom = int((y_arr == class_id).sum())
+        denom = int((y_true_arr == class_id).sum())
         per_class[class_name] = float(cm[class_id, class_id] / denom) if denom else 0.0
+
     return {
         "loss": float(np.mean(losses)) if losses else float("nan"),
-        "accuracy": float(accuracy_score(y_true, y_pred)),
-        "macro_f1": float(f1_score(y_true, y_pred, labels=ids, average="macro", zero_division=0)),
+        "accuracy": fused_acc,
+        "baseline_accuracy": baseline_acc,
+        "rescue_count": rescue_count,
+        "harmed_count": harmed_count,
+        "net_gain": net_gain,
+        "beta": float(model.beta.numpy()),
+        "macro_f1": float(f1_score(y_true, y_fused, labels=ids, average="macro", zero_division=0)),
         "per_class_accuracy": per_class,
         "confusion_matrix": cm.tolist(),
         "y_true": y_true,
-        "y_pred": y_pred,
+        "y_baseline": y_baseline,
+        "y_pred": y_fused,
         "confidence": confidences,
     }
 
@@ -320,26 +339,43 @@ def save_predictions(path: Path, sample_ids: np.ndarray, metrics: Dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["index", "y_true", "pred_smirk_geometry", "confidence"])
-        for sample_id, y_true, pred, conf in zip(sample_ids, metrics["y_true"], metrics["y_pred"], metrics["confidence"]):
-            writer.writerow([int(sample_id), int(y_true), int(pred), float(conf)])
+        writer.writerow(["index", "y_true", "pred_baseline", "pred_smirk_geometry_fused", "confidence"])
+        for sample_id, y_t, p_b, p_f, conf in zip(sample_ids, metrics["y_true"], metrics["y_baseline"], metrics["y_pred"], metrics["confidence"]):
+            writer.writerow([int(sample_id), int(y_t), int(p_b), int(p_f), float(conf)])
 
 
-def smoke_test(model, ds: tf.data.Dataset) -> None:
+def run_baseline_preservation_smoke_test(model: SMIRKGeometryCrossAttentionFER, ds: tf.data.Dataset) -> None:
     features, labels = next(iter(ds.take(1)))
+    orig_beta = float(model.beta.numpy())
+
+    # 1. Forward pass with initial beta (e.g. 0.05)
     outputs = model(features, training=False, return_attention=True)
     loss = ce_loss(labels, outputs["logits"])
     if not np.isfinite(float(loss.numpy())):
         raise FloatingPointError("Smoke-test loss is not finite.")
-    for key in ("image", "geometry_tokens"):
-        if not np.isfinite(features[key].numpy()).all():
-            raise FloatingPointError(f"Smoke-test input has NaN/Inf: {key}")
-    print("SMOKE_1_BATCH_OK", flush=True)
-    print(f"  image_batch={features['image'].shape}", flush=True)
-    print(f"  geometry_tokens_batch={features['geometry_tokens'].shape}", flush=True)
-    print(f"  logits={outputs['logits'].shape}", flush=True)
-    print(f"  attention_scores={outputs['attention_scores'].shape}", flush=True)
-    print(f"  loss={float(loss.numpy()):.6f}", flush=True)
+
+    # 2. Strict baseline preservation test: set beta = 0.0
+    model.beta.assign(0.0)
+    zero_outputs = model(features, training=False)
+    final_logits = zero_outputs["logits"].numpy()
+    baseline_logits = zero_outputs["baseline_logits"].numpy()
+    max_diff = float(np.max(np.abs(final_logits - baseline_logits)))
+    if max_diff > 1e-4:
+        raise ValueError(f"Baseline preservation smoke test failed: beta=0 max logit difference = {max_diff:.6f} > 1e-4")
+
+    # Restore original beta
+    model.beta.assign(orig_beta)
+
+    print("============================================================", flush=True)
+    print("[SMOKE TEST PASSED] Baseline-Preserving Residual Fusion Verified", flush=True)
+    print(f"  beta=0 max logit diff: {max_diff:.8f} (< 0.0001)", flush=True)
+    print(f"  initial_beta: {orig_beta:.5f}", flush=True)
+    print(f"  image_batch: {features['image'].shape}", flush=True)
+    print(f"  geometry_tokens_batch: {features['geometry_tokens'].shape}", flush=True)
+    print(f"  baseline_logits: {outputs['baseline_logits'].shape}", flush=True)
+    print(f"  geometry_delta: {outputs['geometry_delta'].shape}", flush=True)
+    print(f"  final_logits: {outputs['logits'].shape}", flush=True)
+    print("============================================================", flush=True)
 
 
 def main() -> int:
@@ -354,7 +390,7 @@ def main() -> int:
     output_dir = resolve_path(cfg["paths"]["output_dir"]) or PROJECT_ROOT / "outputs" / "smirk_geometry_cross_attention"
     output_dir.mkdir(parents=True, exist_ok=True)
     feature_dir = resolve_path(args.feature_dir) or resolve_path(cfg.get("geometry_cache", {}).get("feature_dir")) or (output_dir / "geometry_tokens")
-    batch_size = int(args.batch_size or cfg["runtime"].get("batch_size_per_gpu", 16))
+    batch_size = int(args.batch_size or cfg["runtime"].get("batch_size_per_gpu", 32))
 
     split_data = {}
     for split in ("train", "val", "test"):
@@ -373,7 +409,9 @@ def main() -> int:
     _ = model(first_batch[0], training=False)
     restore_rgb_baseline_checkpoint(model, cfg, args)
     optimizer = build_optimizer(cfg)
-    smoke_test(model, train_loop_ds)
+
+    # Mandatory Smoke Test
+    run_baseline_preservation_smoke_test(model, train_loop_ds)
     if args.smoke_only:
         return 0
 
@@ -396,23 +434,29 @@ def main() -> int:
             best_manager.save(checkpoint_number=epoch + 1)
             print(f"[INFO] Save best_val_accuracy at epoch {epoch+1}: {best_score:.6f}", flush=True)
         last_manager.save(checkpoint_number=epoch + 1)
+
         row = {
             "epoch": epoch + 1,
             "train_loss": train_metrics["loss"],
             "train_accuracy": train_metrics["accuracy"],
             "val_loss": val_metrics["loss"],
-            "val_accuracy": val_metrics["accuracy"],
+            "baseline_acc": val_metrics["baseline_accuracy"],
+            "fused_acc": val_metrics["accuracy"],
+            "rescue_count": val_metrics["rescue_count"],
+            "harmed_count": val_metrics["harmed_count"],
+            "net_gain": val_metrics["net_gain"],
+            "beta": val_metrics["beta"],
             "val_macro_f1": val_metrics["macro_f1"],
             "best_epoch": best_epoch,
             "best_val_accuracy": best_score,
-            "alpha": float(model.alpha.numpy()),
             "time_sec": round(time.time() - start, 2),
         }
         history.append(row)
         print(
-            f"Epoch {epoch+1}: loss={row['train_loss']:.4f} acc={row['train_accuracy']:.4f} "
-            f"val_loss={row['val_loss']:.4f} val_acc={row['val_accuracy']:.4f} "
-            f"val_macro_f1={row['val_macro_f1']:.4f} alpha={row['alpha']:.6f}",
+            f"Epoch {epoch+1:02d}: loss={row['train_loss']:.4f} acc={row['train_accuracy']:.4f} "
+            f"val_loss={row['val_loss']:.4f} baseline_acc={row['baseline_acc']:.4f} fused_acc={row['fused_acc']:.4f} "
+            f"rescue={row['rescue_count']} harmed={row['harmed_count']} net_gain={row['net_gain']} "
+            f"beta={row['beta']:.5f} val_f1={row['val_macro_f1']:.4f}",
             flush=True,
         )
         if best_epoch > 0 and (epoch + 1 - best_epoch) >= patience:
@@ -432,11 +476,14 @@ def main() -> int:
 
     full_val_metrics = evaluate(model, val_ds)
     full_test_metrics = evaluate(model, test_ds)
-    save_json(output_dir / "val_metrics_best_val_accuracy.json", {k: v for k, v in full_val_metrics.items() if k not in ("y_true", "y_pred", "confidence")})
-    save_json(output_dir / "test_metrics.json", {k: v for k, v in full_test_metrics.items() if k not in ("y_true", "y_pred", "confidence")})
+    save_json(output_dir / "val_metrics_best_val_accuracy.json", {k: v for k, v in full_val_metrics.items() if k not in ("y_true", "y_baseline", "y_pred", "confidence")})
+    save_json(output_dir / "test_metrics.json", {k: v for k, v in full_test_metrics.items() if k not in ("y_true", "y_baseline", "y_pred", "confidence")})
     save_predictions(output_dir / "predictions_smirk_geometry_test.csv", split_data["test"][3], full_test_metrics)
     print("SMIRK_GEOMETRY_CROSS_ATTENTION_FINAL_TEST", flush=True)
-    print(f"  accuracy={full_test_metrics['accuracy']:.6f}", flush=True)
+    print(f"  baseline_accuracy={full_test_metrics['baseline_accuracy']:.6f}", flush=True)
+    print(f"  fused_accuracy={full_test_metrics['accuracy']:.6f}", flush=True)
+    print(f"  rescue_count={full_test_metrics['rescue_count']} harmed_count={full_test_metrics['harmed_count']} net_gain={full_test_metrics['net_gain']}", flush=True)
+    print(f"  beta={full_test_metrics['beta']:.5f}", flush=True)
     print(f"  macro_f1={full_test_metrics['macro_f1']:.6f}", flush=True)
     print(f"  predictions={output_dir / 'predictions_smirk_geometry_test.csv'}", flush=True)
     return 0
@@ -444,4 +491,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

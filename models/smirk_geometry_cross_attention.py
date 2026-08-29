@@ -10,7 +10,14 @@ from .convnext_base_face_baseline import ConvNeXtBaseFaceFERBaseline
 
 
 class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
-    """ConvNeXt-Base RGB tokens cross-attend to cached SMIRK/VLM geometry tokens."""
+    """ConvNeXt-Base Baseline-Preserving Residual Cross-Attention FER.
+
+    The ConvNeXt-Base MS1M-ArcFace baseline backbone & classifier head remain
+    completely frozen. Cross-attention on SMIRK geometry tokens produces a 7-dim
+    residual correction (geometry_delta) scaled by a learnable beta gate:
+
+        final_logits = baseline_logits + beta * geometry_delta
+    """
 
     def __init__(self, cfg: Dict):
         super().__init__(name=cfg.get("model", {}).get("name", "smirk_geometry_cross_attention"))
@@ -26,8 +33,12 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
         self.dropout_rate = float(model_cfg.get("dropout", 0.20))
         self._shape_logged = False
 
+        # Build baseline ConvNeXt and freeze completely (backbone + classifier)
         baseline_cfg = self._make_rgb_baseline_cfg(cfg)
         self.rgb_baseline = ConvNeXtBaseFaceFERBaseline(baseline_cfg)
+        self.rgb_baseline.trainable = False
+
+        # Trainable Geometry Cross-Attention components
         self.rgb_project = tf.keras.Sequential(
             [
                 tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
@@ -50,25 +61,26 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
             name="rgb_query_geometry_kv_cross_attention",
         )
         self.attn_dropout = tf.keras.layers.Dropout(self.dropout_rate, name="cross_attention_dropout")
-        self.alpha = self.add_weight(
-            name="geometry_residual_alpha",
+
+        # Geometry Residual Correction Head (MLP: GAP(cross_tokens) -> 7 logits)
+        self.correction_mlp = tf.keras.Sequential(
+            [
+                tf.keras.layers.LayerNormalization(epsilon=1e-6, name="correction_ln"),
+                tf.keras.layers.Dense(self.ffn_dim, activation=tf.nn.gelu, name="correction_dense_1"),
+                tf.keras.layers.Dropout(self.dropout_rate, name="correction_drop"),
+                tf.keras.layers.Dense(self.num_classes, name="correction_dense_2"),
+            ],
+            name="geometry_correction_mlp",
+        )
+
+        # Learnable Residual Gate Beta (initialized at 0.05 by default)
+        beta_init = float(model_cfg.get("beta_init", 0.05))
+        self.beta = self.add_weight(
+            name="geometry_residual_beta",
             shape=(),
-            initializer=tf.keras.initializers.Constant(float(model_cfg.get("alpha_init", 0.0))),
+            initializer=tf.keras.initializers.Constant(beta_init),
             trainable=True,
         )
-        self.fusion_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="fusion_norm")
-        self.ffn = tf.keras.Sequential(
-            [
-                tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
-                tf.keras.layers.Dense(self.ffn_dim, activation=tf.nn.gelu, name="dense_1"),
-                tf.keras.layers.Dropout(self.dropout_rate, name="drop"),
-                tf.keras.layers.Dense(self.fusion_dim, name="dense_2"),
-            ],
-            name="post_cross_attention_ffn",
-        )
-        self.head_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="head_norm")
-        self.head_dropout = tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout", 0.30)), name="head_dropout")
-        self.classifier = tf.keras.layers.Dense(self.num_classes, name="fer_classifier")
 
     @staticmethod
     def _make_rgb_baseline_cfg(cfg: Dict) -> Dict:
@@ -92,19 +104,26 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
     def call(self, inputs, training=False, return_attention: bool = False):
         image = inputs["image"]
         geometry_tokens = inputs["geometry_tokens"]
+
+        # 1. Baseline forwarding (always training=False for frozen baseline)
+        baseline_outputs = self.rgb_baseline(image, training=False)
+        baseline_logits = baseline_outputs["logits"]
+
+        # 2. Extract stage4 RGB tokens for Cross-Attention Query
         endpoints = self.rgb_baseline.backbone(
             image,
-            training=training,
+            training=False,
             return_endpoints=True,
             stage3_adapter=getattr(self.rgb_baseline, "stage3_adapter", None),
         )
         stage4 = endpoints["stage4"]
         if getattr(self.rgb_baseline, "use_eca", False) and self.rgb_baseline.stage4_eca is not None:
-            stage4 = self.rgb_baseline.stage4_eca(stage4, training=training)
-            endpoints["stage4_eca"] = stage4
+            stage4 = self.rgb_baseline.stage4_eca(stage4, training=False)
 
         batch_size = tf.shape(stage4)[0]
         rgb_tokens = tf.reshape(stage4, [batch_size, -1, self.rgb_dim])
+
+        # 3. Geometry Cross-Attention
         rgb_proj = self.rgb_project(rgb_tokens, training=training)
         geometry_proj = self.geometry_project(geometry_tokens, training=training)
         cross_tokens, attention_scores = self.cross_attention(
@@ -115,18 +134,18 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
             return_attention_scores=True,
         )
         cross_tokens = self.attn_dropout(cross_tokens, training=training)
-        fused = rgb_proj + tf.cast(self.alpha, rgb_proj.dtype) * cross_tokens
-        fused = self.fusion_norm(fused, training=training)
-        ffn_out = self.ffn(fused, training=training)
-        fused = fused + ffn_out
-        pooled = tf.reduce_mean(fused, axis=1)
-        pooled = self.head_norm(pooled, training=training)
-        pooled = self.head_dropout(pooled, training=training)
-        logits = self.classifier(pooled)
+
+        # 4. Geometry Delta Correction via MLP(GAP(cross_tokens))
+        gap = tf.reduce_mean(cross_tokens, axis=1)
+        geometry_delta = self.correction_mlp(gap, training=training)
+
+        # 5. Baseline-Preserving Residual Fusion: final_logits = baseline_logits + beta * geometry_delta
+        beta_cast = tf.cast(self.beta, baseline_logits.dtype)
+        final_logits = baseline_logits + beta_cast * geometry_delta
 
         if not self._shape_logged:
             self._shape_logged = True
-            print("[SMIRKGeometryCrossAttention] Shape trace:", flush=True)
+            print("[SMIRKGeometryCrossAttention (Baseline-Preserving)] Shape trace:", flush=True)
             print(f"  image: {image.shape}", flush=True)
             print(f"  convnext_stage4: {stage4.shape}", flush=True)
             print(f"  rgb_tokens_Q_raw: {rgb_tokens.shape}", flush=True)
@@ -134,18 +153,20 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
             print(f"  rgb_tokens_Q_projected: {rgb_proj.shape}", flush=True)
             print(f"  geometry_tokens_KV_projected: {geometry_proj.shape}", flush=True)
             print(f"  cross_attention: {cross_tokens.shape}", flush=True)
-            print(f"  alpha: {float(self.alpha.numpy()) if tf.executing_eagerly() else self.alpha}", flush=True)
-            print(f"  fused_tokens: {fused.shape}", flush=True)
-            print(f"  gap: {pooled.shape}", flush=True)
-            print(f"  logits: {logits.shape}", flush=True)
+            print(f"  gap: {gap.shape}", flush=True)
+            print(f"  geometry_delta: {geometry_delta.shape}", flush=True)
+            print(f"  baseline_logits: {baseline_logits.shape}", flush=True)
+            print(f"  beta: {float(self.beta.numpy()) if tf.executing_eagerly() else self.beta}", flush=True)
+            print(f"  final_logits: {final_logits.shape}", flush=True)
 
         result = {
-            "logits": tf.cast(logits, tf.float32),
+            "logits": tf.cast(final_logits, tf.float32),
+            "baseline_logits": tf.cast(baseline_logits, tf.float32),
+            "geometry_delta": tf.cast(geometry_delta, tf.float32),
+            "beta": self.beta,
             "rgb_tokens": rgb_tokens,
             "geometry_tokens": geometry_tokens,
             "cross_tokens": cross_tokens,
-            "fused_tokens": fused,
-            "alpha": self.alpha,
         }
         if return_attention:
             result["attention_scores"] = attention_scores

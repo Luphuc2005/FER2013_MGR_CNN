@@ -123,13 +123,13 @@ echo
 echo "============================================================"
 echo " STEP 2: FULL GEOMETRY CROSS-ATTENTION TRAINING"
 echo " Baseline: ConvNeXt-MS1M ckpt-43"
-echo " Batch Size: 64"
+echo " Batch Size: 32"
 echo "============================================================"
 
 "$FER_PY" -u scripts/train_smirk_geometry_cross_attention.py \
     --config "$CONFIG" \
     --baseline-checkpoint "$BASELINE_CKPT" \
-    --batch-size 64
+    --batch-size 32
 
 echo
 echo "============================================================"
