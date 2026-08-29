@@ -27,7 +27,16 @@ FER_PY="$ROOT/fer2013_env/bin/python"
 
 CONFIG="$ROOT/config_smirk_geometry_cross_attention.yaml"
 
-SMIRK_ROOT="${SMIRK_ROOT:-/home/ptbao/projects/smirk}"
+if [ -d "$ROOT/external/smirk" ]; then
+    SMIRK_ROOT="$ROOT/external/smirk"
+elif [ -d "$ROOT/smirk" ]; then
+    SMIRK_ROOT="$ROOT/smirk"
+elif [ -d "/home/ptbao/projects/smirk" ]; then
+    SMIRK_ROOT="/home/ptbao/projects/smirk"
+else
+    SMIRK_ROOT="${SMIRK_ROOT:-$ROOT/external/smirk}"
+fi
+
 SMIRK_CHECKPOINT="${SMIRK_CHECKPOINT:-$SMIRK_ROOT/pretrained_models/SMIRK_em1.pt}"
 
 # Baseline tốt nhất hiện tại
