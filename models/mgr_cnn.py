@@ -708,16 +708,34 @@ class MGRConvNeXtFER(tf.keras.Model):
         else:
             self.stage4_eca = None
 
+        clip_sem_cfg = model_cfg.get("clip_semantic", {})
+        if not isinstance(clip_sem_cfg, dict):
+            clip_sem_cfg = {}
+
         self.use_semantic_branch = bool(
-            model_cfg.get("use_semantic_branch", False)
+            clip_sem_cfg.get("enabled", False)
+            or model_cfg.get("use_semantic_branch", False)
             or model_cfg.get("use_clip_semantic", False)
             or model_cfg.get("ablation") in ("semantic_clip", "clip_semantic", "semantic")
         )
-        self.lambda_sem = float(model_cfg.get("lambda_sem", 0.2))
-        self.semantic_logit_scale = float(model_cfg.get("semantic_logit_scale", 20.0))
+        self.multi_prototype = bool(
+            clip_sem_cfg.get("multi_prototype", model_cfg.get("multi_prototype", False))
+        )
+        self.prototype_aggregation = str(
+            clip_sem_cfg.get("prototype_aggregation", model_cfg.get("prototype_aggregation", "logsumexp"))
+        )
+        self.prototype_temperature = float(
+            clip_sem_cfg.get("prototype_temperature", model_cfg.get("prototype_temperature", 0.1))
+        )
+        self.lambda_sem = float(
+            clip_sem_cfg.get("lambda_sem", model_cfg.get("lambda_sem", 0.1))
+        )
+        self.semantic_logit_scale = float(
+            clip_sem_cfg.get("semantic_logit_scale", model_cfg.get("semantic_logit_scale", 20.0))
+        )
 
         if self.use_semantic_branch:
-            embed_dim = int(model_cfg.get("clip_embedding_dim", 512))
+            embed_dim = int(clip_sem_cfg.get("clip_embedding_dim", model_cfg.get("clip_embedding_dim", 512)))
             self.visual_projector = tf.keras.Sequential([
                 tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
                 tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
@@ -726,12 +744,13 @@ class MGRConvNeXtFER(tf.keras.Model):
                 tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
             ], name="visual_semantic_projector")
 
-            clip_model_name = model_cfg.get("clip_model_name", "openai/clip-vit-base-patch32")
-            cache_path = model_cfg.get("clip_prototypes_path", "pretrained/clip_text_prototypes_7emotions.npy")
+            clip_model_name = clip_sem_cfg.get("clip_model_name", model_cfg.get("clip_model_name", "openai/clip-vit-base-patch32"))
+            cache_path = clip_sem_cfg.get("clip_prototypes_path", model_cfg.get("clip_prototypes_path", None))
             text_proto_array = get_or_compute_clip_text_prototypes(
                 model_name=clip_model_name,
                 cache_path=cache_path,
                 embedding_dim=embed_dim,
+                multi_prototype=self.multi_prototype,
             )
             self.text_prototypes = tf.constant(text_proto_array, dtype=tf.float32, name="frozen_clip_text_prototypes")
         else:
@@ -1055,8 +1074,24 @@ class MGRConvNeXtFER(tf.keras.Model):
             v_norm = tf.math.l2_normalize(v_proj, axis=-1)
             text_protos = tf.cast(self.text_prototypes, dtype=v_norm.dtype)
             t_norm = tf.math.l2_normalize(text_protos, axis=-1)
-            cos_sim = tf.matmul(v_norm, t_norm, transpose_b=True)
-            semantic_logits = tf.cast(cos_sim * self.semantic_logit_scale, tf.float32)
+
+            if self.multi_prototype:
+                raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
+                if self.prototype_aggregation == "logsumexp":
+                    tau = self.prototype_temperature
+                    K = float(raw_sim.shape[-1])
+                    lse = tf.reduce_logsumexp(raw_sim / tau, axis=-1)
+                    agg_sim = tau * (lse - tf.math.log(K))
+                elif self.prototype_aggregation == "mean":
+                    agg_sim = tf.reduce_mean(raw_sim, axis=-1)
+                elif self.prototype_aggregation == "max":
+                    agg_sim = tf.reduce_max(raw_sim, axis=-1)
+                else:
+                    raise ValueError(f"Unsupported prototype_aggregation: {self.prototype_aggregation}")
+                semantic_logits = tf.cast(agg_sim * self.semantic_logit_scale, tf.float32)
+            else:
+                cos_sim = tf.matmul(v_norm, t_norm, transpose_b=True)
+                semantic_logits = tf.cast(cos_sim * self.semantic_logit_scale, tf.float32)
 
         outputs = {
             "logits": fused_logits_f32,

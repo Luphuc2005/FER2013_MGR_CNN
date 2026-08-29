@@ -71,25 +71,28 @@ EMOTION_CLASS_MAP: Dict[int, str] = {
 
 def get_or_compute_clip_text_prototypes(
     model_name: str = "openai/clip-vit-base-patch32",
-    cache_path: Optional[str] = "pretrained/clip_text_prototypes_7emotions.npy",
+    cache_path: Optional[str] = None,
     prompts_per_class: Optional[Dict[int, List[str]]] = None,
     embedding_dim: int = 512,
+    multi_prototype: bool = False,
 ) -> np.ndarray:
     """
     Computes or loads text prototypes for 7 FER emotion classes using a frozen CLIP text encoder.
-    Each class prototype is the average normalized embedding of its AU-aware text descriptions.
-    
-    Returns:
-        prototypes: np.ndarray of shape (7, embedding_dim), L2-normalized across channels.
+    If multi_prototype is False: returns shape (7, embedding_dim) (averaged across prompts per class).
+    If multi_prototype is True: returns shape (7, 5, embedding_dim) (5 individual L2-normalized prompt vectors per class).
     """
+    if cache_path is None or (multi_prototype and cache_path == "pretrained/clip_text_prototypes_7emotions.npy"):
+        cache_path = "pretrained/clip_text_prototypes_7emotions_multi5.npy" if multi_prototype else "pretrained/clip_text_prototypes_7emotions.npy"
+
     print("[CLIP_Text_Encoder] Emotion prototype index alignment trace:", flush=True)
     for class_idx, class_name in EMOTION_CLASS_MAP.items():
         print(f"[CLIP_Text_Encoder]   class_index {class_idx} -> class_name '{class_name}' -> prototype_index [{class_idx}]", flush=True)
 
+    expected_shape = (7, 5, embedding_dim) if multi_prototype else (7, embedding_dim)
     if cache_path and os.path.exists(cache_path):
         try:
             prototypes = np.load(cache_path)
-            if prototypes.shape == (7, embedding_dim):
+            if prototypes.shape == expected_shape:
                 print(f"[CLIP_Text_Encoder] Loaded cached text prototypes from {cache_path} (shape: {prototypes.shape})", flush=True)
                 return prototypes.astype(np.float32)
         except Exception as err:
@@ -99,11 +102,11 @@ def get_or_compute_clip_text_prototypes(
         prompts_per_class = DEFAULT_AU_EMOTION_PROMPTS
 
     # Attempt HuggingFace Transformers (PyTorch or TensorFlow)
-    prototypes = _encode_with_transformers(model_name, prompts_per_class, embedding_dim)
+    prototypes = _encode_with_transformers(model_name, prompts_per_class, embedding_dim, multi_prototype=multi_prototype)
     
     if prototypes is None:
         print("[CLIP_Text_Encoder] Warning: Could not initialize HuggingFace CLIP model. Falling back to synthetic normalized reference prototypes.", flush=True)
-        prototypes = _generate_fallback_prototypes(embedding_dim)
+        prototypes = _generate_fallback_prototypes(embedding_dim, multi_prototype=multi_prototype)
 
     # Save to disk for fast caching
     if cache_path:
@@ -121,6 +124,7 @@ def _encode_with_transformers(
     model_name: str,
     prompts_per_class: Dict[int, List[str]],
     embedding_dim: int,
+    multi_prototype: bool = False,
 ) -> Optional[np.ndarray]:
     """Encodes text prompts using HuggingFace transformers CLIP text model (PyTorch or TF)."""
     # 1. Try PyTorch Transformers
@@ -128,7 +132,7 @@ def _encode_with_transformers(
         import torch
         from transformers import AutoTokenizer, CLIPTextModelWithProjection
 
-        print(f"[CLIP_Text_Encoder] Encoding AU-aware prompts using PyTorch '{model_name}'...", flush=True)
+        print(f"[CLIP_Text_Encoder] Encoding AU-aware prompts using PyTorch '{model_name}' (multi_prototype={multi_prototype})...", flush=True)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         text_encoder = CLIPTextModelWithProjection.from_pretrained(model_name)
         text_encoder.eval()
@@ -142,11 +146,14 @@ def _encode_with_transformers(
                 # text_embeds shape: [num_prompts, 512]
                 embeds = outputs.text_embeds if hasattr(outputs, "text_embeds") else outputs[0][:, 0, :]
                 embeds = embeds / embeds.norm(p=2, dim=-1, keepdim=True)
-                mean_embed = embeds.mean(dim=0)
-                mean_embed = mean_embed / mean_embed.norm(p=2, dim=-1, keepdim=True)
-                class_prototypes.append(mean_embed.cpu().numpy())
+                if multi_prototype:
+                    class_prototypes.append(embeds.cpu().numpy())
+                else:
+                    mean_embed = embeds.mean(dim=0)
+                    mean_embed = mean_embed / mean_embed.norm(p=2, dim=-1, keepdim=True)
+                    class_prototypes.append(mean_embed.cpu().numpy())
 
-        res = np.stack(class_prototypes, axis=0) # [7, 512]
+        res = np.stack(class_prototypes, axis=0)
         print(f"[CLIP_Text_Encoder] Successfully generated PyTorch CLIP prototypes shape: {res.shape}", flush=True)
         return res
     except Exception as e_pt:
@@ -157,7 +164,7 @@ def _encode_with_transformers(
         import tensorflow as tf
         from transformers import AutoTokenizer, TFCLIPTextModelWithProjection
 
-        print(f"[CLIP_Text_Encoder] Encoding AU-aware prompts using TensorFlow '{model_name}'...", flush=True)
+        print(f"[CLIP_Text_Encoder] Encoding AU-aware prompts using TensorFlow '{model_name}' (multi_prototype={multi_prototype})...", flush=True)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         text_encoder = TFCLIPTextModelWithProjection.from_pretrained(model_name)
 
@@ -168,9 +175,12 @@ def _encode_with_transformers(
             outputs = text_encoder(**inputs)
             embeds = outputs.text_embeds if hasattr(outputs, "text_embeds") else outputs[0][:, 0, :]
             embeds = embeds / tf.norm(embeds, ord=2, axis=-1, keepdims=True)
-            mean_embed = tf.reduce_mean(embeds, axis=0)
-            mean_embed = mean_embed / tf.norm(mean_embed, ord=2, axis=-1, keepdims=True)
-            class_prototypes.append(mean_embed.numpy())
+            if multi_prototype:
+                class_prototypes.append(embeds.numpy())
+            else:
+                mean_embed = tf.reduce_mean(embeds, axis=0)
+                mean_embed = mean_embed / tf.norm(mean_embed, ord=2, axis=-1, keepdims=True)
+                class_prototypes.append(mean_embed.numpy())
 
         res = np.stack(class_prototypes, axis=0)
         print(f"[CLIP_Text_Encoder] Successfully generated TensorFlow CLIP prototypes shape: {res.shape}", flush=True)
@@ -181,9 +191,14 @@ def _encode_with_transformers(
     return None
 
 
-def _generate_fallback_prototypes(embedding_dim: int = 512) -> np.ndarray:
+def _generate_fallback_prototypes(embedding_dim: int = 512, multi_prototype: bool = False) -> np.ndarray:
     """Generates reproducible L2-normalized reference vectors for 7 classes."""
     rng = np.random.RandomState(42)
-    raw = rng.randn(7, embedding_dim).astype(np.float32)
-    norms = np.linalg.norm(raw, axis=-1, keepdims=True)
-    return raw / norms
+    if multi_prototype:
+        raw = rng.randn(7, 5, embedding_dim).astype(np.float32)
+        norms = np.linalg.norm(raw, axis=-1, keepdims=True)
+        return raw / norms
+    else:
+        raw = rng.randn(7, embedding_dim).astype(np.float32)
+        norms = np.linalg.norm(raw, axis=-1, keepdims=True)
+        return raw / norms

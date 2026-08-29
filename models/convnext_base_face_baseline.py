@@ -271,16 +271,34 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             name="fer_classifier",
         )
 
+        clip_sem_cfg = model_cfg.get("clip_semantic", {})
+        if not isinstance(clip_sem_cfg, dict):
+            clip_sem_cfg = {}
+
         self.use_semantic_branch = bool(
-            model_cfg.get("use_semantic_branch", False)
+            clip_sem_cfg.get("enabled", False)
+            or model_cfg.get("use_semantic_branch", False)
             or model_cfg.get("use_clip_semantic", False)
             or model_cfg.get("ablation") in ("semantic_clip", "clip_semantic", "semantic")
         )
-        self.lambda_sem = float(model_cfg.get("lambda_sem", 0.2))
-        self.semantic_logit_scale = float(model_cfg.get("semantic_logit_scale", 20.0))
+        self.multi_prototype = bool(
+            clip_sem_cfg.get("multi_prototype", model_cfg.get("multi_prototype", False))
+        )
+        self.prototype_aggregation = str(
+            clip_sem_cfg.get("prototype_aggregation", model_cfg.get("prototype_aggregation", "logsumexp"))
+        )
+        self.prototype_temperature = float(
+            clip_sem_cfg.get("prototype_temperature", model_cfg.get("prototype_temperature", 0.1))
+        )
+        self.lambda_sem = float(
+            clip_sem_cfg.get("lambda_sem", model_cfg.get("lambda_sem", 0.1))
+        )
+        self.semantic_logit_scale = float(
+            clip_sem_cfg.get("semantic_logit_scale", model_cfg.get("semantic_logit_scale", 20.0))
+        )
 
         if self.use_semantic_branch:
-            embed_dim = int(model_cfg.get("clip_embedding_dim", 512))
+            embed_dim = int(clip_sem_cfg.get("clip_embedding_dim", model_cfg.get("clip_embedding_dim", 512)))
             self.visual_projector = tf.keras.Sequential([
                 tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
                 tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
@@ -289,12 +307,13 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
             ], name="visual_semantic_projector")
 
-            clip_model_name = model_cfg.get("clip_model_name", "openai/clip-vit-base-patch32")
-            cache_path = model_cfg.get("clip_prototypes_path", "pretrained/clip_text_prototypes_7emotions.npy")
+            clip_model_name = clip_sem_cfg.get("clip_model_name", model_cfg.get("clip_model_name", "openai/clip-vit-base-patch32"))
+            cache_path = clip_sem_cfg.get("clip_prototypes_path", model_cfg.get("clip_prototypes_path", None))
             text_proto_array = get_or_compute_clip_text_prototypes(
                 model_name=clip_model_name,
                 cache_path=cache_path,
                 embedding_dim=embed_dim,
+                multi_prototype=self.multi_prototype,
             )
             self.text_prototypes = tf.constant(text_proto_array, dtype=tf.float32, name="frozen_clip_text_prototypes")
         else:
@@ -759,11 +778,25 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         if self.use_semantic_branch and self.visual_projector is not None:
             proj_params = int(np.sum([np.prod(v.shape) for v in self.visual_projector.trainable_variables]))
             total_params = int(np.sum([np.prod(v.shape) for v in self.trainable_variables]))
-            print(f"[ConvNeXtBaseFace] CLIP Text Semantic Alignment Branch Enabled:", flush=True)
-            print(f"[ConvNeXtBaseFace]   Visual Projector trainable params: {proj_params:,}", flush=True)
-            print(f"[ConvNeXtBaseFace]   Frozen CLIP Text Prototypes params: 0 (Non-trainable {self.text_prototypes.shape})", flush=True)
-            print(f"[ConvNeXtBaseFace]   lambda_sem: {self.lambda_sem}", flush=True)
-            print(f"[ConvNeXtBaseFace]   semantic_logit_scale: {self.semantic_logit_scale}", flush=True)
+            if self.multi_prototype:
+                v_shape = endpoints.get("visual_projector", pooled).shape
+                r_shape = endpoints.get("raw_semantic_similarity", tf.zeros([1, 7, 5])).shape
+                s_shape = endpoints.get("semantic_logits", tf.zeros([1, 7])).shape
+                print("MULTI_PROTOTYPE_CLIP_ENABLED", flush=True)
+                print(f"Text prototypes shape: {tuple(self.text_prototypes.shape)}", flush=True)
+                print(f"Visual embedding shape: ({v_shape[0]}, {v_shape[1]})", flush=True)
+                print(f"Raw semantic similarity: ({r_shape[0]}, {r_shape[1]}, {r_shape[2]})", flush=True)
+                print(f"Aggregated semantic logits: ({s_shape[0]}, {s_shape[1]})", flush=True)
+                print(f"Aggregation: {self.prototype_aggregation}", flush=True)
+                print(f"Prototype temperature: {self.prototype_temperature}", flush=True)
+                print(f"Semantic logit scale: {self.semantic_logit_scale}", flush=True)
+                print(f"lambda_sem: {self.lambda_sem}", flush=True)
+            else:
+                print(f"[ConvNeXtBaseFace] CLIP Text Semantic Alignment Branch Enabled:", flush=True)
+                print(f"[ConvNeXtBaseFace]   Visual Projector trainable params: {proj_params:,}", flush=True)
+                print(f"[ConvNeXtBaseFace]   Frozen CLIP Text Prototypes params: 0 (Non-trainable {self.text_prototypes.shape})", flush=True)
+                print(f"[ConvNeXtBaseFace]   lambda_sem: {self.lambda_sem}", flush=True)
+                print(f"[ConvNeXtBaseFace]   semantic_logit_scale: {self.semantic_logit_scale}", flush=True)
             print(f"[ConvNeXtBaseFace]   Total trainable params: {total_params:,}", flush=True)
 
     def call(self, inputs, training=False, **kwargs):
@@ -785,9 +818,27 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             v_norm = tf.math.l2_normalize(v_proj, axis=-1)
             text_protos = tf.cast(self.text_prototypes, dtype=v_norm.dtype)
             t_norm = tf.math.l2_normalize(text_protos, axis=-1)
-            cos_sim = tf.matmul(v_norm, t_norm, transpose_b=True)
-            semantic_logits = tf.cast(cos_sim * self.semantic_logit_scale, tf.float32)
             endpoints["visual_projector"] = v_proj
+
+            if self.multi_prototype:
+                # v_norm: (B, 512), t_norm: (7, 5, 512) -> raw_sim: (B, 7, 5)
+                raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
+                endpoints["raw_semantic_similarity"] = raw_sim
+                if self.prototype_aggregation == "logsumexp":
+                    tau = self.prototype_temperature
+                    K = float(raw_sim.shape[-1])
+                    lse = tf.reduce_logsumexp(raw_sim / tau, axis=-1)
+                    agg_sim = tau * (lse - tf.math.log(K))
+                elif self.prototype_aggregation == "mean":
+                    agg_sim = tf.reduce_mean(raw_sim, axis=-1)
+                elif self.prototype_aggregation == "max":
+                    agg_sim = tf.reduce_max(raw_sim, axis=-1)
+                else:
+                    raise ValueError(f"Unsupported prototype_aggregation: {self.prototype_aggregation}")
+                semantic_logits = tf.cast(agg_sim * self.semantic_logit_scale, tf.float32)
+            else:
+                cos_sim = tf.matmul(v_norm, t_norm, transpose_b=True)
+                semantic_logits = tf.cast(cos_sim * self.semantic_logit_scale, tf.float32)
             endpoints["semantic_logits"] = semantic_logits
 
         self._log_shapes_once(image, endpoints, pooled, dropped, logits)
