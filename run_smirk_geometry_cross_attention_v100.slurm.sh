@@ -148,54 +148,76 @@ except ImportError as e:
 print("SMIRK_HOST_ENV_VERIFICATION_SUCCESS")
 PY
 
+SKIP_EXTRACTION="${SKIP_EXTRACTION:-0}"
+
 # ============================================================
 # STEP 1: SMOKE TEST SMIRK 3D EXTRACTION (16 TRAIN IMAGES)
 # ============================================================
 
-echo
-echo "============================================================"
-echo " STEP 1: SMOKE TEST SMIRK 3D EXTRACTION - 16 TRAIN IMAGES"
-echo "============================================================"
+if [ "$SKIP_EXTRACTION" -ne 1 ]; then
+    echo
+    echo "============================================================"
+    echo " STEP 1: SMOKE TEST SMIRK 3D EXTRACTION - 16 TRAIN IMAGES"
+    echo "============================================================"
 
-"$SMIRK_PY" -u scripts/extract_smirk_vlm_geometry_tokens.py \
-    --config "$CONFIG" \
-    --smirk-root "$SMIRK_ROOT" \
-    --smirk-checkpoint "$SMIRK_CHECKPOINT" \
-    --device cuda \
-    --splits train \
-    --batch-size 8 \
-    --max-samples-per-split 16 \
-    --force \
-    --save-preview
+    "$SMIRK_PY" -u scripts/extract_smirk_vlm_geometry_tokens.py \
+        --config "$CONFIG" \
+        --smirk-root "$SMIRK_ROOT" \
+        --smirk-checkpoint "$SMIRK_CHECKPOINT" \
+        --device cuda \
+        --splits train \
+        --batch-size 8 \
+        --max-samples-per-split 16 \
+        --force \
+        --save-preview
+
+    # ============================================================
+    # STEP 2: FULL SMIRK 3D GEOMETRY CACHE (TRAIN / VAL / TEST)
+    # ============================================================
+
+    echo
+    echo "============================================================"
+    echo " STEP 2: FULL 3D GEOMETRY CACHE - TRAIN / VAL / TEST"
+    echo "============================================================"
+
+    "$SMIRK_PY" -u scripts/extract_smirk_vlm_geometry_tokens.py \
+        --config "$CONFIG" \
+        --smirk-root "$SMIRK_ROOT" \
+        --smirk-checkpoint "$SMIRK_CHECKPOINT" \
+        --device cuda \
+        --splits train val test \
+        --batch-size 64 \
+        --force
+
+    echo
+    echo "============================================================"
+    echo " 3D CACHE COMPLETED"
+    echo "============================================================"
+else
+    echo "[INFO] SKIP_EXTRACTION=1: Skipping Step 1 & Step 2 extraction. Using existing cache."
+fi
 
 # ============================================================
-# STEP 2: FULL SMIRK 3D GEOMETRY CACHE (TRAIN / VAL / TEST)
+# CONFIGURE NVIDIA CUDA/CUDNN LIBRARIES FOR TENSORFLOW GPU
 # ============================================================
 
-echo
-echo "============================================================"
-echo " STEP 2: FULL 3D GEOMETRY CACHE - TRAIN / VAL / TEST"
-echo "============================================================"
-
-"$SMIRK_PY" -u scripts/extract_smirk_vlm_geometry_tokens.py \
-    --config "$CONFIG" \
-    --smirk-root "$SMIRK_ROOT" \
-    --smirk-checkpoint "$SMIRK_CHECKPOINT" \
-    --device cuda \
-    --splits train val test \
-    --batch-size 64 \
-    --force
+export NVIDIA_LIB=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/lib/python3.9/site-packages/nvidia
+export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVIDIA_LIB/cudnn/lib:$NVIDIA_LIB/cufft/lib:$NVIDIA_LIB/curand/lib:$NVIDIA_LIB/cusolver/lib:$NVIDIA_LIB/cusparse/lib:${LD_LIBRARY_PATH:-}"
 
 echo
 echo "============================================================"
-echo " 3D CACHE COMPLETED"
-echo " Expected shapes:"
-echo " SMIRK input:            [B,3,224,224]"
-echo " FLAME vertices:         [B,V,3]"
-echo " depth tokens:           [B,49,768]"
-echo " normal tokens:          [B,49,768]"
-echo " geometry cache:         [B,98,768]"
+echo " TENSORFLOW V100 GPU FAIL-FAST CHECK"
 echo "============================================================"
+
+"$FER_PY" - <<'PY'
+import tensorflow as tf
+gpus = tf.config.list_physical_devices("GPU")
+print("TensorFlow Version:", tf.__version__)
+print("Detected GPUs:", gpus)
+if not gpus:
+    raise RuntimeError("[FAIL-FAST ERROR] TensorFlow GPU NOT FOUND on V100.")
+print("TENSORFLOW_GPU_VERIFICATION_SUCCESS")
+PY
 
 # ============================================================
 # STEP 3: TENSORFLOW CROSS-ATTENTION SMOKE TRAIN
