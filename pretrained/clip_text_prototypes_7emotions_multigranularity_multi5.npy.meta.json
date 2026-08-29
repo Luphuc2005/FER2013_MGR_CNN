@@ -1,0 +1,14 @@
+{
+  "model": "openai/clip-vit-base-patch32",
+  "source": "REAL_CLIP",
+  "embedding_dim": 512,
+  "multi_prototype": true,
+  "shape": [
+    7,
+    5,
+    512
+  ],
+  "prompt_hash": "3a46217b2eec99a488859e7feef8d90abff0730f0c602f12cf3554178cb3efd1",
+  "prompt_count": 35,
+  "l2_normalized": true
+}

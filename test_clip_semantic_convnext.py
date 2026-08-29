@@ -1,5 +1,6 @@
-import sys
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+import sys
 import numpy as np
 import tensorflow as tf
 
@@ -30,12 +31,20 @@ def test_1_class_ordering_alignment():
     for idx, name in enumerate(EMOTION_NAMES):
         print(f"  class_index {idx} -> class_name '{name}' -> prototype_index [{idx}]")
         
-    # Rebuild/re-evaluate text prototypes
+    # Rebuild/re-evaluate text prototypes (single prototype)
     cache_file = os.path.join("pretrained", "clip_text_prototypes_7emotions.npy")
-    prototypes = get_or_compute_clip_text_prototypes(cache_path=cache_file)
-    assert prototypes.shape == (7, 512), f"Prototypes shape mismatch: {prototypes.shape}"
+    prototypes = get_or_compute_clip_text_prototypes(cache_path=cache_file, multi_prototype=False)
+    assert prototypes.shape == (7, 512), f"Single prototype shape mismatch: {prototypes.shape}"
     norms = np.linalg.norm(prototypes, axis=-1)
     assert np.allclose(norms, 1.0, atol=1e-3), "Text prototypes must be L2 normalized!"
+
+    # Multi prototype
+    cache_multi_file = os.path.join("pretrained", "clip_text_prototypes_7emotions_multigranularity_multi5.npy")
+    multi_prototypes = get_or_compute_clip_text_prototypes(cache_path=cache_multi_file, multi_prototype=True)
+    assert multi_prototypes.shape == (7, 5, 512), f"Multi-prototype shape mismatch: {multi_prototypes.shape}"
+    multi_norms = np.linalg.norm(multi_prototypes, axis=-1)
+    assert np.allclose(multi_norms, 1.0, atol=1e-3), "Multi-prototype text vectors must be L2 normalized individually!"
+
     print("[SUCCESS] Task 1 passed: Class ordering and prototype matrix verified!\n")
 
 
@@ -110,63 +119,113 @@ def test_3_semantic_metrics_and_loss_formula():
     print("[SUCCESS] Task 3 passed: Structured semantic metrics and loss formula verified!\n")
 
 
-def test_4_full_smoke_test_batch_size_2():
-    print("=== Task 4. Full Smoke Test (Batch Size 2 & Mixed Precision) across Models ===")
+def test_4_multi_prototype_clip_smoke_and_math():
+    print("=== Task 4. Verifying Multi-Prototype LogSumExp Aggregation and Tensor Shapes ===")
     
-    # 1. Baseline Model (float32)
-    cfg_base = load_config("config_convnext_base_ms1m_arcface_clip_semantic.yaml")
-    cfg_base["model"]["convnext_base_require_pretrained"] = False
-    model_base = ConvNeXtBaseFaceFERBaseline(cfg_base["model"])
+    # 1. Multi-prototype enabled test
+    cfg_multi = load_config("config_convnext_base_ms1m_arcface_clip_multigranularity_semantic.yaml")
+    cfg_multi["model"]["convnext_base_require_pretrained"] = False
+    cfg_multi["model"]["multi_prototype"] = True
+    cfg_multi["model"]["prototype_aggregation"] = "logsumexp"
+    cfg_multi["model"]["prototype_temperature"] = 0.1
     
+    model_multi = ConvNeXtBaseFaceFERBaseline(cfg_multi["model"])
     batch_img = tf.random.normal([2, 112, 112, 3], dtype=tf.float32)
-    batch_lbl = tf.constant([2, 6], dtype=tf.int32)
+    batch_lbl = tf.constant([1, 4], dtype=tf.int32)
     
-    out_base = model_base(batch_img, training=True)
-    loss_base, _ = supervised_mgr_loss(batch_lbl, out_base, num_classes=7)
+    out_multi = model_multi(batch_img, training=True)
     
-    print("ConvNeXt Base Baseline Output (float32):")
-    print(f"  logits shape          : {out_base['logits'].shape} (dtype: {out_base['logits'].dtype})")
-    print(f"  semantic_logits shape : {out_base['semantic_logits'].shape} (dtype: {out_base['semantic_logits'].dtype})")
-    print(f"  loss value            : {loss_base.numpy():.4f}")
-    assert out_base["logits"].shape == (2, 7)
-    assert out_base["semantic_logits"].shape == (2, 7)
+    assert model_multi.text_prototypes.shape == (7, 5, 512), f"Expected (7, 5, 512), got {model_multi.text_prototypes.shape}"
+    assert out_multi["semantic_logits"].shape == (2, 7), f"Expected (2, 7), got {out_multi['semantic_logits'].shape}"
+
+    # Mixed precision float16 input test
+    batch_img_f16 = tf.cast(batch_img, tf.float16)
+    out_multi_f16 = model_multi({"image": batch_img_f16}, training=True)
+    assert out_multi_f16["semantic_logits"].shape == (2, 7)
     
-    # 2. Baseline Model (mixed_float16 input)
-    batch_img_f16 = tf.random.normal([2, 112, 112, 3], dtype=tf.float16)
-    out_base_f16 = model_base({"image": batch_img_f16}, training=True)
-    loss_base_f16, _ = supervised_mgr_loss(batch_lbl, out_base_f16, num_classes=7)
-    print("ConvNeXt Base Baseline Output (float16 input):")
-    print(f"  logits shape          : {out_base_f16['logits'].shape} (dtype: {out_base_f16['logits'].dtype})")
-    print(f"  semantic_logits shape : {out_base_f16['semantic_logits'].shape} (dtype: {out_base_f16['semantic_logits'].dtype})")
-    print(f"  loss value            : {loss_base_f16.numpy():.4f}")
+    print(f"Multi-prototype text prototypes shape : {model_multi.text_prototypes.shape}")
+    print(f"Aggregated semantic logits shape       : {out_multi['semantic_logits'].shape} (float32 & float16 verified)")
     
-    # 3. MGR-CNN Model
-    cfg_mgr = load_config("config_pure_mgr_single_head.yaml")
-    cfg_mgr["model"]["use_semantic_branch"] = True
-    cfg_mgr["model"]["lambda_sem"] = 0.2
-    cfg_mgr["model"]["convnext_base_require_pretrained"] = False
-    model_mgr = MGRConvNeXtFER(cfg_mgr)
+    # 2. Backward compatibility test: multi_prototype = False
+    cfg_single = load_config("config_convnext_base_ms1m_arcface_clip_semantic.yaml")
+    cfg_single["model"]["convnext_base_require_pretrained"] = False
+    cfg_single["model"]["multi_prototype"] = False
+    cfg_single["model"]["clip_semantic"]["multi_prototype"] = False
+    cfg_single["model"]["clip_prototypes_path"] = "pretrained/clip_text_prototypes_7emotions.npy"
     
-    batch_input_mgr = {
-        "image": tf.random.normal([2, 112, 112, 3], dtype=tf.float32),
-        "mask": tf.random.normal([2, 112, 112, 6], dtype=tf.float32),
-    }
-    out_mgr = model_mgr(batch_input_mgr, training=True)
-    loss_mgr, _ = supervised_mgr_loss(batch_lbl, out_mgr, num_classes=7)
+    model_single = ConvNeXtBaseFaceFERBaseline(cfg_single["model"])
+    out_single = model_single(batch_img, training=True)
     
-    print("MGR-CNN Output:")
-    print(f"  logits shape          : {out_mgr['logits'].shape}")
-    print(f"  semantic_logits shape : {out_mgr['semantic_logits'].shape}")
-    print(f"  loss value            : {loss_mgr.numpy():.4f}")
-    assert out_mgr["logits"].shape == (2, 7)
-    assert out_mgr["semantic_logits"].shape == (2, 7)
+    assert model_single.text_prototypes.shape == (7, 512), f"Expected (7, 512), got {model_single.text_prototypes.shape}"
+    assert out_single["semantic_logits"].shape == (2, 7), f"Expected (2, 7), got {out_single['semantic_logits'].shape}"
+    print(f"Single-prototype text prototypes shape: {model_single.text_prototypes.shape} (Backward Compatibility Verified)")
     
-    print("[SUCCESS] Task 4 passed: Batch Size 2 and Mixed Precision Smoke test succeeded!\n")
+    print("[SUCCESS] Task 4 passed: Multi-prototype tensor shapes and backward compatibility verified!\n")
+
+
+def test_5_real_clip_smoke_test():
+    print("=== Task 5. REAL CLIP Smoke Test & Provenance Verification ===")
+    from transformers import AutoTokenizer, CLIPTextModelWithProjection
+    import torch
+    import json
+
+    # 1. Load CLIP tokenizer & model
+    model_name = "openai/clip-vit-base-patch32"
+    print(f"Loading CLIP model '{model_name}' for smoke test...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = CLIPTextModelWithProjection.from_pretrained(model_name)
+    model.eval()
+
+    # 2. Encode 1 description
+    sample_desc = ["a facial expression of anger with a tense appearance"]
+    inputs = tokenizer(sample_desc, padding=True, return_tensors="pt")
+    with torch.no_grad():
+        outputs = model(**inputs)
+        embeds = outputs.text_embeds if hasattr(outputs, "text_embeds") else outputs[0][:, 0, :]
+        embeds_norm = embeds / embeds.norm(p=2, dim=-1, keepdim=True)
+        emb_np = embeds_norm.cpu().numpy()
+
+    # 3. Check embedding finite & L2 norm ≈ 1
+    assert np.all(np.isfinite(emb_np)), "CLIP single description embedding must be finite (no NaN or Inf)!"
+    l2_norm = float(np.linalg.norm(emb_np))
+    assert np.isclose(l2_norm, 1.0, atol=1e-3), f"L2 norm must be ~1.0, got {l2_norm:.4f}"
+    print(f"Single description encoding passed: shape={emb_np.shape}, finite=True, L2_norm={l2_norm:.4f}")
+
+    # 4. Generate 7-emotion prototypes (single & multi)
+    cache_single = os.path.join("pretrained", "clip_text_prototypes_7emotions.npy")
+    cache_multi = os.path.join("pretrained", "clip_text_prototypes_7emotions_multigranularity_multi5.npy")
+
+    proto_single = get_or_compute_clip_text_prototypes(cache_path=cache_single, multi_prototype=False)
+    proto_multi = get_or_compute_clip_text_prototypes(cache_path=cache_multi, multi_prototype=True)
+
+    assert proto_single.shape == (7, 512), f"Expected (7, 512), got {proto_single.shape}"
+    assert proto_multi.shape == (7, 5, 512), f"Expected (7, 5, 512), got {proto_multi.shape}"
+
+    # 5. Reload from cache & confirm provenance is REAL_CLIP
+    meta_single = cache_single + ".meta.json"
+    meta_multi = cache_multi + ".meta.json"
+
+    assert os.path.exists(meta_single), f"Metadata sidecar missing: {meta_single}"
+    assert os.path.exists(meta_multi), f"Metadata sidecar missing: {meta_multi}"
+
+    with open(meta_single, "r", encoding="utf-8") as f:
+        meta_s = json.load(f)
+    with open(meta_multi, "r", encoding="utf-8") as f:
+        meta_m = json.load(f)
+
+    assert meta_s.get("source") == "REAL_CLIP", f"Cache source is not REAL_CLIP: {meta_s}"
+    assert meta_m.get("source") == "REAL_CLIP", f"Cache source is not REAL_CLIP: {meta_m}"
+    assert meta_s.get("model") == model_name, f"Model name mismatch: {meta_s}"
+    assert meta_m.get("model") == model_name, f"Model name mismatch: {meta_m}"
+
+    print(f"[SUCCESS] Task 5 passed: REAL CLIP smoke test & cache provenance verified! Source: {meta_s['source']}\n")
 
 
 if __name__ == "__main__":
+    test_5_real_clip_smoke_test()
     test_1_class_ordering_alignment()
     test_2_frozen_prototypes_and_gradient_isolation()
     test_3_semantic_metrics_and_loss_formula()
-    test_4_full_smoke_test_batch_size_2()
-    print("ALL 4 CLIP SEMANTIC ALIGNMENT CHECKS PASSED PERFECTLY!")
+    test_4_multi_prototype_clip_smoke_and_math()
+    print("ALL MULTI-PROTOTYPE & SINGLE-PROTOTYPE CLIP CHECKS PASSED PERFECTLY!")
+

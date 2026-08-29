@@ -230,8 +230,13 @@ def get_or_compute_clip_text_prototypes(
 
     if prototypes is None:
         raise RuntimeError(
-            f"[CLIP ERROR] Could not initialize or run HuggingFace CLIP model '{model_name}'. "
-            f"Synthetic fallback is DISABLED. Training cannot proceed without real CLIP text embeddings!"
+            f"[CLIP ERROR] Could not initialize or run HuggingFace CLIP model '{model_name}'.\n"
+            f"Synthetic fallback is DISABLED. Training cannot proceed without real CLIP text embeddings!\n"
+            f"Possible causes:\n"
+            f"  1) Compute node has no internet access to download HuggingFace model.\n"
+            f"     --> FIX: Upload/copy the pre-generated 'pretrained/*.npy' and 'pretrained/*.meta.json' cache files from local to server.\n"
+            f"  2) Thư viện 'transformers' hoặc 'torch' chưa được cài trong environment.\n"
+            f"     --> FIX: Run 'pip install transformers torch' on the server login node."
         )
 
     # Post-checks
