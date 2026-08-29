@@ -434,6 +434,38 @@ def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.D
     records["train"] = _limit_records(records["train"], cfg["data"].get("max_train_samples"))
     records["val"] = _limit_records(records["val"], cfg["data"].get("max_val_samples"))
     records["test"] = _limit_records(records["test"], cfg["data"].get("max_test_samples"))
+
+    if bool(cfg["data"].get("use_synthetic_diffusion", False)):
+        syn_meta_path = _resolve_path(cfg["data"].get("synthetic_metadata_json"))
+        if syn_meta_path and syn_meta_path.exists():
+            import json
+            with open(syn_meta_path, "r", encoding="utf-8") as f:
+                syn_meta = json.load(f)
+            syn_imgs, syn_lbls, syn_sids = [], [], []
+            base_id = len(records["train"].sample_ids) + 900000
+            for idx, entry in enumerate(syn_meta):
+                img_p = _resolve_path(entry["image_path"])
+                if img_p and img_p.exists():
+                    img_pil = tf.keras.utils.load_img(img_p, color_mode="grayscale", target_size=(48, 48))
+                    img_arr = np.array(img_pil, dtype=np.uint8).reshape(48, 48, 1)
+                    syn_imgs.append(img_arr)
+                    syn_lbls.append(EMOTION_NAMES.index(entry["target_class"]))
+                    syn_sids.append(base_id + idx)
+
+            if syn_imgs:
+                syn_imgs_arr = np.stack(syn_imgs, axis=0)
+                syn_lbls_arr = np.array(syn_lbls, dtype=np.int64)
+                syn_sids_arr = np.array(syn_sids, dtype=np.int64)
+
+                records["train"] = SplitRecords(
+                    images=np.concatenate([records["train"].images, syn_imgs_arr], axis=0),
+                    labels=np.concatenate([records["train"].labels, syn_lbls_arr], axis=0),
+                    sample_ids=np.concatenate([records["train"].sample_ids, syn_sids_arr], axis=0),
+                    mask_paths=None if records["train"].mask_paths is None else np.concatenate([records["train"].mask_paths, np.array([""] * len(syn_imgs_arr))], axis=0),
+                    masks=records["train"].masks,
+                )
+                print(f"[Synthetic Diffusion] Successfully injected {len(syn_imgs)} accepted synthetic samples into TRAIN dataset.")
+
     return (
         make_dataset(records["train"], cfg, split="train", training=True, replicas=replicas),
         make_dataset(records["val"], cfg, split="val", training=False, replicas=replicas),
