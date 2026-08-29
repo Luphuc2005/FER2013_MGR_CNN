@@ -1,82 +1,231 @@
-#!/usr/bin/env bash
-#SBATCH --job-name=fer_smirk_geom_xattn
-#SBATCH --output=logs/smirk_geom_xattn_%j.out
-#SBATCH --error=logs/smirk_geom_xattn_%j.err
-#SBATCH --partition=gpu
+#!/bin/bash
+#SBATCH --job-name=FER_SMIRK_XATTN
+#SBATCH --partition=gpu-queue
+#SBATCH --account=sokhcn
+#SBATCH --qos=gpu-q
 #SBATCH --gres=gpu:v100:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
-#SBATCH --time=24:00:00
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_SMIRK_XATTN_%j.out
+#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_SMIRK_XATTN_%j.err
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${ROOT_DIR}"
+ROOT=/home/ptbao/projects/FER2013_MGR_CNN
+cd "$ROOT"
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
-CONFIG="${CONFIG:-config_smirk_geometry_cross_attention.yaml}"
-SMIRK_ROOT="${SMIRK_ROOT:-external/smirk}"
-SMIRK_CHECKPOINT="${SMIRK_CHECKPOINT:-${SMIRK_ROOT}/pretrained_models/SMIRK_em1.pt}"
-BASELINE_CKPT="${BASELINE_CKPT:-outputs/tf_runs/convnext_base_ms1m_arcface_baseline/checkpoints/best}"
+mkdir -p logs
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export PYTHONUNBUFFERED=1
+
+# ============================================================
+# PATHS
+# ============================================================
+
+SMIRK_PY="$ROOT/smirk_env/bin/python"
+FER_PY="$ROOT/fer2013_env/bin/python"
+
+CONFIG="$ROOT/config_smirk_geometry_cross_attention.yaml"
+
+SMIRK_ROOT="${SMIRK_ROOT:-/home/ptbao/projects/smirk}"
+SMIRK_CHECKPOINT="${SMIRK_CHECKPOINT:-$SMIRK_ROOT/pretrained_models/SMIRK_em1.pt}"
+
+# Baseline tốt nhất hiện tại
+BASELINE_CKPT="${BASELINE_CKPT:-$ROOT/outputs/tf_runs/convnext_base_ms1m_arcface_baseline/checkpoints/best/ckpt-43}"
+
 export SMIRK_ROOT
 export SMIRK_CHECKPOINT
-export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
-export TF_FORCE_GPU_ALLOW_GROWTH=true
-export TF_XLA_FLAGS="--tf_xla_auto_jit=0 --tf_xla_enable_xla_devices=false"
-export TF_DISABLE_XLA=1
-export TF_DISABLE_XLA_COMPILATION=1
+export PYTHONPATH="$SMIRK_ROOT:$ROOT:${PYTHONPATH:-}"
 
-mkdir -p logs outputs/smirk_geometry_cross_attention
 
-echo "[INFO] FER2013 SMIRK geometry cross-attention on V100"
-echo "[INFO] CONFIG=${CONFIG}"
-echo "[INFO] SMIRK_ROOT=${SMIRK_ROOT}"
-echo "[INFO] SMIRK_CHECKPOINT=${SMIRK_CHECKPOINT}"
-echo "[INFO] BASELINE_CKPT=${BASELINE_CKPT}"
+echo "============================================================"
+echo " FER2013 - SMIRK 3D GEOMETRY CROSS ATTENTION"
+echo "============================================================"
+echo "Job ID: ${SLURM_JOB_ID}"
+echo "Node: $(hostname)"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
+echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-}"
+echo "Start: $(date)"
+echo
+echo "ROOT=$ROOT"
+echo "SMIRK_PY=$SMIRK_PY"
+echo "FER_PY=$FER_PY"
+echo "SMIRK_ROOT=$SMIRK_ROOT"
+echo "SMIRK_CHECKPOINT=$SMIRK_CHECKPOINT"
+echo "BASELINE_CKPT=$BASELINE_CKPT"
+echo "CONFIG=$CONFIG"
+echo "============================================================"
 
-if [[ ! -d "${SMIRK_ROOT}" ]]; then
-  echo "[ERROR] Missing SMIRK_ROOT=${SMIRK_ROOT}. Clone https://github.com/georgeretsi/smirk and run quick_install.sh first." >&2
-  exit 1
-fi
-if [[ ! -f "${SMIRK_CHECKPOINT}" ]]; then
-  echo "[ERROR] Missing official SMIRK checkpoint=${SMIRK_CHECKPOINT}." >&2
-  exit 1
-fi
+nvidia-smi
 
-echo "[INFO] Smoke geometry cache: 16 samples per split"
-"${PYTHON_BIN}" scripts/extract_smirk_vlm_geometry_tokens.py \
-  --config "${CONFIG}" \
-  --smirk-root "${SMIRK_ROOT}" \
-  --smirk-checkpoint "${SMIRK_CHECKPOINT}" \
-  --device cuda \
-  --splits train val test \
-  --batch-size 8 \
-  --max-samples-per-split 16 \
-  --force \
-  --save-preview
 
-echo "[INFO] Full geometry cache"
-"${PYTHON_BIN}" scripts/extract_smirk_vlm_geometry_tokens.py \
-  --config "${CONFIG}" \
-  --smirk-root "${SMIRK_ROOT}" \
-  --smirk-checkpoint "${SMIRK_CHECKPOINT}" \
-  --device cuda \
-  --splits train val test \
-  --batch-size 64 \
-  --force
+# ============================================================
+# FILE CHECK
+# ============================================================
 
-echo "[INFO] Smoke train: one batch, no test checkpoint selection"
-"${PYTHON_BIN}" scripts/train_smirk_geometry_cross_attention.py \
-  --config "${CONFIG}" \
-  --baseline-checkpoint "${BASELINE_CKPT}" \
-  --batch-size 4 \
-  --max-train-batches 1 \
-  --max-eval-batches 1 \
-  --smoke-only
+[ -x "$SMIRK_PY" ] || {
+    echo "[ERROR] SMIRK python not found: $SMIRK_PY"
+    exit 1
+}
 
-echo "[INFO] Full train"
-"${PYTHON_BIN}" scripts/train_smirk_geometry_cross_attention.py \
-  --config "${CONFIG}" \
-  --baseline-checkpoint "${BASELINE_CKPT}"
+[ -x "$FER_PY" ] || {
+    echo "[ERROR] FER python not found: $FER_PY"
+    exit 1
+}
+
+[ -d "$SMIRK_ROOT" ] || {
+    echo "[ERROR] SMIRK repo not found: $SMIRK_ROOT"
+    exit 1
+}
+
+[ -f "$SMIRK_CHECKPOINT" ] || {
+    echo "[ERROR] SMIRK checkpoint not found:"
+    echo "$SMIRK_CHECKPOINT"
+    exit 1
+}
+
+[ -f "$CONFIG" ] || {
+    echo "[ERROR] Config not found: $CONFIG"
+    exit 1
+}
+
+[ -f "$BASELINE_CKPT.index" ] || {
+    echo "[ERROR] Baseline ckpt-43 not found:"
+    echo "$BASELINE_CKPT"
+    exit 1
+}
+
+
+# ============================================================
+# IMPORTANT
+#
+# Apptainer LD_LIBRARY_PATH làm Torch 2.0.1+cu117 SIGBUS.
+# Vì vậy CHỈ các command SMIRK/PyTorch sẽ chạy với:
+#
+# env -u LD_LIBRARY_PATH -u LD_PRELOAD
+#
+# Không thêm CUDA loop của job diffusion cũ.
+# ============================================================
+
+
+echo
+echo "============================================================"
+echo " STEP 0: CHECK SMIRK / PYTORCH / PYTORCH3D / GPU"
+echo "============================================================"
+
+env -u LD_LIBRARY_PATH -u LD_PRELOAD \
+"$SMIRK_PY" - <<'PY'
+import sys
+import torch
+import pytorch3d
+
+print("Python:", sys.executable)
+print("Torch:", torch.__version__)
+print("Torch CUDA build:", torch.version.cuda)
+print("CUDA available:", torch.cuda.is_available())
+
+if not torch.cuda.is_available():
+    raise RuntimeError("PyTorch cannot see V100 GPU.")
+
+print("GPU:", torch.cuda.get_device_name(0))
+print("PyTorch3D: OK")
+print("SMIRK_GPU_ENV_OK")
+PY
+
+
+# ============================================================
+# STEP 1
+# SMOKE 3D EXTRACTION
+# ============================================================
+
+echo
+echo "============================================================"
+echo " STEP 1: SMOKE TEST SMIRK 3D EXTRACTION - 16 TRAIN IMAGES"
+echo "============================================================"
+
+env -u LD_LIBRARY_PATH -u LD_PRELOAD \
+"$SMIRK_PY" -u scripts/extract_smirk_vlm_geometry_tokens.py \
+    --config "$CONFIG" \
+    --smirk-root "$SMIRK_ROOT" \
+    --smirk-checkpoint "$SMIRK_CHECKPOINT" \
+    --device cuda \
+    --splits train \
+    --batch-size 8 \
+    --max-samples-per-split 16 \
+    --force \
+    --save-preview
+
+
+# ============================================================
+# STEP 2
+# FULL SMIRK -> FLAME -> DEPTH/NORMAL -> CLIP TOKENS
+# ============================================================
+
+echo
+echo "============================================================"
+echo " STEP 2: FULL 3D GEOMETRY CACHE - TRAIN / VAL / TEST"
+echo "============================================================"
+
+env -u LD_LIBRARY_PATH -u LD_PRELOAD \
+"$SMIRK_PY" -u scripts/extract_smirk_vlm_geometry_tokens.py \
+    --config "$CONFIG" \
+    --smirk-root "$SMIRK_ROOT" \
+    --smirk-checkpoint "$SMIRK_CHECKPOINT" \
+    --device cuda \
+    --splits train val test \
+    --batch-size 64 \
+    --force
+
+
+echo
+echo "============================================================"
+echo " 3D CACHE COMPLETED"
+echo " Expected shapes:"
+echo " SMIRK input:            [B,3,224,224]"
+echo " FLAME vertices:         [B,V,3]"
+echo " depth tokens:           [B,49,768]"
+echo " normal tokens:          [B,49,768]"
+echo " geometry cache:         [B,98,768]"
+echo "============================================================"
+
+
+# ============================================================
+# STEP 3
+# TENSORFLOW CROSS-ATTENTION SMOKE TRAIN
+# ============================================================
+
+echo
+echo "============================================================"
+echo " STEP 3: CROSS-ATTENTION SMOKE TRAIN - 1 BATCH"
+echo "============================================================"
+
+"$FER_PY" -u scripts/train_smirk_geometry_cross_attention.py \
+    --config "$CONFIG" \
+    --baseline-checkpoint "$BASELINE_CKPT" \
+    --batch-size 4 \
+    --max-train-batches 1 \
+    --max-eval-batches 1 \
+    --smoke-only
+
+
+# ============================================================
+# STEP 4
+# FULL TRAINING + FINAL EVALUATION
+# ============================================================
+
+echo
+echo "============================================================"
+echo " STEP 4: FULL GEOMETRY CROSS-ATTENTION TRAINING"
+echo " Baseline: ConvNeXt-MS1M ckpt-43"
+echo "============================================================"
+
+"$FER_PY" -u scripts/train_smirk_geometry_cross_attention.py \
+    --config "$CONFIG" \
+    --baseline-checkpoint "$BASELINE_CKPT"
+
+
+echo
+echo "============================================================"
+echo " FER2013 SMIRK GEOMETRY CROSS-ATTENTION COMPLETED"
+echo "============================================================"
+echo "End: $(date)"
