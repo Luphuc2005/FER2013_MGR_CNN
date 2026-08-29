@@ -15,12 +15,11 @@ import yaml
 from skimage.transform import estimate_transform, warp
 from tqdm import tqdm
 
-import importlib.util
-_fer_spec = importlib.util.spec_from_file_location("fer2013_local_module", PROJECT_ROOT / "datasets" / "fer2013.py")
-_fer_module = importlib.util.module_from_spec(_fer_spec)
-_fer_spec.loader.exec_module(_fer_module)
-collect_split_records = _fer_module.collect_split_records
-EMOTION_NAMES = _fer_module.EMOTION_NAMES
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from datasets.fer2013 import EMOTION_NAMES, collect_split_records
 
 
 def parse_args() -> argparse.Namespace:
