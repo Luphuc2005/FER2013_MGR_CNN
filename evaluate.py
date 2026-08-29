@@ -19,6 +19,8 @@ def parse_args():
     parser.add_argument("--split", default="test", choices=["val", "test"])
     parser.add_argument("--tta-hflip", action="store_true", help="Average logits from original and horizontal-flip inputs.")
     parser.add_argument("--no-tta-hflip", action="store_true", help="Disable hflip TTA even when enabled in config.")
+    parser.add_argument("--orig-weight", type=float, default=None, help="Weight for original image prediction in TTA.")
+    parser.add_argument("--flip-weight", type=float, default=None, help="Weight for flipped image prediction in TTA.")
     return parser.parse_args()
 
 
@@ -49,12 +51,20 @@ def main() -> int:
         ckpt.restore(checkpoint_path).expect_partial()
         print(f"Restored: {checkpoint_path}")
     eval_strategy = strategy if bool(cfg["runtime"].get("distributed_eval", False)) else None
-    use_tta_hflip = bool(cfg["runtime"].get("eval_tta_hflip", False))
+    use_tta_hflip = bool(cfg["tta"].get("enabled", False))
     if args.tta_hflip:
         use_tta_hflip = True
     if args.no_tta_hflip:
         use_tta_hflip = False
-    metrics = evaluate_dataset(model, dataset, cfg, strategy=eval_strategy, use_tta_hflip=use_tta_hflip)
+    metrics = evaluate_dataset(
+        model,
+        dataset,
+        cfg,
+        strategy=eval_strategy,
+        use_tta_hflip=use_tta_hflip,
+        original_weight=args.orig_weight,
+        flip_weight=args.flip_weight,
+    )
     suffix = "_tta_hflip" if use_tta_hflip else "_no_tta"
     out = Path(cfg["paths"]["output_dir"]) / f"{args.split}_metrics{suffix}.json"
     save_metrics(metrics, out)

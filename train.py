@@ -625,118 +625,180 @@ def evaluate_dataset(
     dataset: tf.data.Dataset,
     cfg: Dict,
     strategy: Optional[tf.distribute.Strategy] = None,
-    use_tta_hflip: bool = False,
+    use_tta_hflip: Optional[bool] = None,
+    original_weight: Optional[float] = None,
+    flip_weight: Optional[float] = None,
 ) -> Dict[str, object]:
+    tta_cfg = cfg.get("tta", {})
+    if use_tta_hflip is None:
+        use_tta = bool(tta_cfg.get("enabled", False))
+    else:
+        use_tta = bool(use_tta_hflip)
+
+    w_orig = float(original_weight if original_weight is not None else tta_cfg.get("original_weight", 0.5))
+    w_flip = float(flip_weight if flip_weight is not None else tta_cfg.get("flip_weight", 0.5))
+
+    if use_tta:
+        if abs((w_orig + w_flip) - 1.0) > 1e-5:
+            raise ValueError(
+                f"[TTA ERROR] TTA weights must sum to 1.0, got original_weight={w_orig}, flip_weight={w_flip} (sum={w_orig+w_flip:.4f})"
+            )
+        print(f"[TTA] Horizontal Flip: ENABLED", flush=True)
+        print(f"[TTA] Original weight: {w_orig:.2f}", flush=True)
+        print(f"[TTA] Flip weight:     {w_flip:.2f}", flush=True)
+    else:
+        print(f"[TTA] Horizontal Flip: DISABLED", flush=True)
+
     def _forward_outputs(inputs):
-        outputs = model(inputs, training=False)
-        if not use_tta_hflip:
-            return outputs
+        outputs_orig = model(inputs, training=False)
+        if not use_tta:
+            return outputs_orig, outputs_orig
+
         flipped_inputs = dict(inputs)
         flipped_inputs["image"] = tf.image.flip_left_right(inputs["image"])
         if "mask" in inputs:
             flipped_inputs["mask"] = tf.image.flip_left_right(inputs["mask"])
-        flipped_outputs = model(flipped_inputs, training=False)
-        avg_outputs = dict(outputs)
-        avg_outputs["logits"] = (outputs["logits"] + flipped_outputs["logits"]) * 0.5
-        if outputs.get("semantic_logits") is not None and flipped_outputs.get("semantic_logits") is not None:
-            avg_outputs["semantic_logits"] = (outputs["semantic_logits"] + flipped_outputs["semantic_logits"]) * 0.5
-        return avg_outputs
+        outputs_flip = model(flipped_inputs, training=False)
+
+        outputs_tta = dict(outputs_orig)
+        outputs_tta["logits"] = w_orig * outputs_orig["logits"] + w_flip * outputs_flip["logits"]
+        if outputs_orig.get("semantic_logits") is not None and outputs_flip.get("semantic_logits") is not None:
+            outputs_tta["semantic_logits"] = w_orig * outputs_orig["semantic_logits"] + w_flip * outputs_flip["semantic_logits"]
+
+        return outputs_orig, outputs_tta
 
     @tf.function(reduce_retracing=True, jit_compile=False)
     def _eval_step(inputs, labels):
-        outputs = _forward_outputs(inputs)
-        total_l, parts = supervised_mgr_loss(
+        outputs_orig, outputs_tta = _forward_outputs(inputs)
+        total_l_orig, parts_orig = supervised_mgr_loss(
             labels,
-            outputs,
+            outputs_orig,
             num_classes=cfg["data"]["num_classes"],
             label_smoothing=float(cfg["training"].get("label_smoothing", 0.0)),
             ortho_weight=float(cfg["model"].get("ortho_loss_weight", 0.003)),
             cnn_aux_weight=float(cfg["model"].get("cnn_aux_loss_weight", 0.4)),
         )
-        fer_preds = tf.argmax(outputs["logits"], axis=-1, output_type=tf.int32)
-        fer_correct = tf.reduce_sum(tf.cast(tf.equal(fer_preds, labels), tf.int32))
-        
-        sem_correct = tf.constant(0, dtype=tf.int32)
-        if outputs.get("semantic_logits") is not None:
-            sem_preds = tf.argmax(outputs["semantic_logits"], axis=-1, output_type=tf.int32)
-            sem_correct = tf.reduce_sum(tf.cast(tf.equal(sem_preds, labels), tf.int32))
-            
-        return total_l, parts["ce"], parts["semantic"], fer_correct, sem_correct, tf.shape(labels)[0], fer_preds, labels
+        total_l_tta, parts_tta = supervised_mgr_loss(
+            labels,
+            outputs_tta,
+            num_classes=cfg["data"]["num_classes"],
+            label_smoothing=float(cfg["training"].get("label_smoothing", 0.0)),
+            ortho_weight=float(cfg["model"].get("ortho_loss_weight", 0.003)),
+            cnn_aux_weight=float(cfg["model"].get("cnn_aux_loss_weight", 0.4)),
+        )
+        fer_preds_orig = tf.argmax(outputs_orig["logits"], axis=-1, output_type=tf.int32)
+        fer_preds_tta = tf.argmax(outputs_tta["logits"], axis=-1, output_type=tf.int32)
+
+        return (
+            total_l_orig, parts_orig["ce"], parts_orig["semantic"], fer_preds_orig,
+            total_l_tta, parts_tta["ce"], parts_tta["semantic"], fer_preds_tta,
+            tf.shape(labels)[0], labels
+        )
 
     y_true: List[int] = []
-    y_pred: List[int] = []
-    total_loss_sum = 0.0
-    total_ce_sum = 0.0
-    total_sem_sum = 0.0
-    total_fer_correct = 0
-    total_sem_correct = 0
+    y_pred_orig: List[int] = []
+    y_pred_tta: List[int] = []
+
+    total_loss_orig = 0.0
+    total_ce_orig = 0.0
+    total_sem_orig = 0.0
+
+    total_loss_tta = 0.0
+    total_ce_tta = 0.0
+    total_sem_tta = 0.0
     total_count = 0
 
     if strategy is not None and strategy.num_replicas_in_sync > 1:
         dist_dataset = strategy.experimental_distribute_dataset(dataset)
-        @tf.function(reduce_retracing=True, jit_compile=False)
-        def _distributed_eval_step(batch):
-            return strategy.run(_eval_step, args=batch)
 
         for batch in dist_dataset:
-            local_total_l, local_ce_l, local_sem_l, local_fer_c, local_sem_c, local_counts, local_preds, local_labels = strategy.run(_eval_step, args=batch)
-            local_losses = strategy.experimental_local_results(local_total_l)
-            local_ces = strategy.experimental_local_results(local_ce_l)
-            local_sems = strategy.experimental_local_results(local_sem_l)
-            local_fer_cs = strategy.experimental_local_results(local_fer_c)
-            local_sem_cs = strategy.experimental_local_results(local_sem_c)
-            local_cnts = strategy.experimental_local_results(local_counts)
-            local_pds = strategy.experimental_local_results(local_preds)
-            local_lbs = strategy.experimental_local_results(local_labels)
-            for l_tot, l_ce, l_sem, l_fer_c, l_sem_c, l_cnt, l_pd, l_lb in zip(
-                local_losses, local_ces, local_sems, local_fer_cs, local_sem_cs, local_cnts, local_pds, local_lbs
+            (
+                loc_tot_o, loc_ce_o, loc_sem_o, loc_p_o,
+                loc_tot_t, loc_ce_t, loc_sem_t, loc_p_t,
+                loc_cnts, loc_lbs
+            ) = strategy.run(_eval_step, args=batch)
+
+            for l_tot_o, l_ce_o, l_sem_o, l_p_o, l_tot_t, l_ce_t, l_sem_t, l_p_t, l_cnt, l_lb in zip(
+                strategy.experimental_local_results(loc_tot_o),
+                strategy.experimental_local_results(loc_ce_o),
+                strategy.experimental_local_results(loc_sem_o),
+                strategy.experimental_local_results(loc_p_o),
+                strategy.experimental_local_results(loc_tot_t),
+                strategy.experimental_local_results(loc_ce_t),
+                strategy.experimental_local_results(loc_sem_t),
+                strategy.experimental_local_results(loc_p_t),
+                strategy.experimental_local_results(loc_cnts),
+                strategy.experimental_local_results(loc_lbs),
             ):
                 count = int(l_cnt.numpy())
                 if count == 0:
                     continue
-                total_loss_sum += float(l_tot.numpy()) * count
-                total_ce_sum += float(l_ce.numpy()) * count
-                total_sem_sum += float(l_sem.numpy()) * count
-                total_fer_correct += int(l_fer_c.numpy())
-                total_sem_correct += int(l_sem_c.numpy())
+                total_loss_orig += float(l_tot_o.numpy()) * count
+                total_ce_orig += float(l_ce_o.numpy()) * count
+                total_sem_orig += float(l_sem_o.numpy()) * count
+
+                total_loss_tta += float(l_tot_t.numpy()) * count
+                total_ce_tta += float(l_ce_t.numpy()) * count
+                total_sem_tta += float(l_sem_t.numpy()) * count
+
                 total_count += count
                 y_true.extend(l_lb.numpy().tolist())
-                y_pred.extend(l_pd.numpy().tolist())
-        metrics = classification_metrics(y_true, y_pred, EMOTION_NAMES)
-        c_norm = max(total_count, 1)
-        metrics["loss"] = total_loss_sum / c_norm
-        metrics["total_loss"] = total_loss_sum / c_norm
-        metrics["ce_loss"] = total_ce_sum / c_norm
-        metrics["semantic_loss"] = total_sem_sum / c_norm
-        metrics["fer_accuracy"] = total_fer_correct / c_norm
-        metrics["semantic_accuracy"] = total_sem_correct / c_norm
-        metrics["tta_hflip"] = bool(use_tta_hflip)
-        return metrics
+                y_pred_orig.extend(l_p_o.numpy().tolist())
+                y_pred_tta.extend(l_p_t.numpy().tolist())
 
-    for batch in dataset:
-        inputs, labels = batch
-        total_l, ce_l, sem_l, fer_c, sem_c, count, preds, _ = _eval_step(inputs, labels)
-        c = int(count.numpy())
-        y_true.extend(labels.numpy().tolist())
-        y_pred.extend(preds.numpy().tolist())
-        total_loss_sum += float(total_l.numpy()) * c
-        total_ce_sum += float(ce_l.numpy()) * c
-        total_sem_sum += float(sem_l.numpy()) * c
-        total_fer_correct += int(fer_c.numpy())
-        total_sem_correct += int(sem_c.numpy())
-        total_count += c
-        del total_l, ce_l, sem_l, fer_c, sem_c, count, preds, inputs, labels
-    metrics = classification_metrics(y_true, y_pred, EMOTION_NAMES)
+    else:
+        for batch in dataset:
+            inputs, labels = batch
+            tot_o, ce_o, sem_o, p_o, tot_t, ce_t, sem_t, p_t, count, _ = _eval_step(inputs, labels)
+            c = int(count.numpy())
+            y_true.extend(labels.numpy().tolist())
+            y_pred_orig.extend(p_o.numpy().tolist())
+            y_pred_tta.extend(p_t.numpy().tolist())
+
+            total_loss_orig += float(tot_o.numpy()) * c
+            total_ce_orig += float(ce_o.numpy()) * c
+            total_sem_orig += float(sem_o.numpy()) * c
+
+            total_loss_tta += float(tot_t.numpy()) * c
+            total_ce_tta += float(ce_t.numpy()) * c
+            total_sem_tta += float(sem_t.numpy()) * c
+
+            total_count += c
+
     c_norm = max(total_count, 1)
-    metrics["loss"] = total_loss_sum / c_norm
-    metrics["total_loss"] = total_loss_sum / c_norm
-    metrics["ce_loss"] = total_ce_sum / c_norm
-    metrics["semantic_loss"] = total_sem_sum / c_norm
-    metrics["fer_accuracy"] = total_fer_correct / c_norm
-    metrics["semantic_accuracy"] = total_sem_correct / c_norm
-    metrics["tta_hflip"] = bool(use_tta_hflip)
+
+    metrics_tta = classification_metrics(y_true, y_pred_tta, EMOTION_NAMES)
+    metrics_tta["loss"] = total_loss_tta / c_norm
+    metrics_tta["total_loss"] = total_loss_tta / c_norm
+    metrics_tta["ce_loss"] = total_ce_tta / c_norm
+    metrics_tta["semantic_loss"] = total_sem_tta / c_norm
+    metrics_tta["tta_hflip"] = bool(use_tta)
+    metrics_tta["original_weight"] = w_orig
+    metrics_tta["flip_weight"] = w_flip
+
+    metrics_no_tta = classification_metrics(y_true, y_pred_orig, EMOTION_NAMES)
+    metrics_tta["no_tta_accuracy"] = float(metrics_no_tta["accuracy"])
+    metrics_tta["no_tta_macro_f1"] = float(metrics_no_tta["macro_f1"])
+    metrics_tta["no_tta_weighted_f1"] = float(metrics_no_tta["weighted_f1"])
+    metrics_tta["no_tta_loss"] = total_loss_orig / c_norm
+
+    print(f"[EVALUATION SUMMARY]", flush=True)
+    print(
+        f"  NO_TTA    - Accuracy: {metrics_tta['no_tta_accuracy']*100:.2f}% | "
+        f"Macro F1: {metrics_tta['no_tta_macro_f1']:.4f} | "
+        f"Weighted F1: {metrics_tta['no_tta_weighted_f1']:.4f}",
+        flush=True,
+    )
+    if use_tta:
+        print(
+            f"  HFLIP_TTA - Accuracy: {metrics_tta['accuracy']*100:.2f}% | "
+            f"Macro F1: {metrics_tta['macro_f1']:.4f} | "
+            f"Weighted F1: {metrics_tta['weighted_f1']:.4f}",
+            flush=True,
+        )
+
     gc.collect()
-    return metrics
+    return metrics_tta
 
 
 def main() -> int:

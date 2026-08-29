@@ -21,7 +21,37 @@ def load_config(path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     validate_config(cfg, config_path)
     resolve_paths(cfg)
     apply_env_overrides(cfg)
+    resolve_tta_config(cfg)
     return cfg
+
+
+def resolve_tta_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    runtime = cfg.get("runtime", {})
+    tta_cfg = cfg.get("tta", {})
+
+    # Backward compatibility with old flags
+    eval_hflip_old = bool(runtime.get("eval_tta_hflip", False))
+    train_val_hflip_old = bool(runtime.get("train_val_tta_hflip", False))
+
+    enabled = bool(tta_cfg.get("enabled", eval_hflip_old or train_val_hflip_old))
+    hflip = bool(tta_cfg.get("hflip", True if enabled else False))
+    orig_w = float(tta_cfg.get("original_weight", 0.5))
+    flip_w = float(tta_cfg.get("flip_weight", 0.5))
+
+    if enabled and hflip:
+        if abs((orig_w + flip_w) - 1.0) > 1e-5:
+            raise ValueError(
+                f"[TTA ERROR] TTA weights must sum to 1.0, got original_weight={orig_w}, flip_weight={flip_w} (sum={orig_w+flip_w:.4f})"
+            )
+
+    resolved = {
+        "enabled": enabled,
+        "hflip": hflip,
+        "original_weight": orig_w,
+        "flip_weight": flip_w,
+    }
+    cfg["tta"] = resolved
+    return resolved
 
 
 def _resolve_config_path(path: Optional[Union[str, Path]]) -> Path:
