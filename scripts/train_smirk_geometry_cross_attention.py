@@ -142,10 +142,13 @@ def load_pixels_for_cache(cfg: Dict, split: str, sample_ids: np.ndarray, labels:
 
 
 def preprocess_batch_images(images: tf.Tensor, cfg: Dict, training: bool) -> tf.Tensor:
-    images = tf.expand_dims(tf.cast(images, tf.float32), axis=-1)
+    images = tf.cast(images, tf.float32)
+    if tf.rank(images) == 3:
+        images = tf.expand_dims(images, axis=-1)
     target_size = int(cfg["data"]["image_size"])
     images = tf.image.resize(images, [target_size, target_size], method="bilinear")
-    images = tf.image.grayscale_to_rgb(images)
+    if images.shape[-1] == 1:
+        images = tf.image.grayscale_to_rgb(images)
     aug = cfg.get("augmentation", {})
     if training and bool(aug.get("horizontal_flip", False)):
         flips = tf.random.uniform([tf.shape(images)[0], 1, 1, 1]) < 0.5
