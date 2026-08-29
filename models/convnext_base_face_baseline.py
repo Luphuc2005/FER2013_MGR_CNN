@@ -824,18 +824,19 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 # v_norm: (B, 512), t_norm: (7, 5, 512) -> raw_sim: (B, 7, 5)
                 raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
                 endpoints["raw_semantic_similarity"] = raw_sim
+                raw_sim_f32 = tf.cast(raw_sim, tf.float32)
                 if self.prototype_aggregation == "logsumexp":
-                    tau = self.prototype_temperature
-                    K = float(raw_sim.shape[-1])
-                    lse = tf.reduce_logsumexp(raw_sim / tau, axis=-1)
+                    tau = tf.constant(self.prototype_temperature, dtype=tf.float32)
+                    K = tf.constant(float(raw_sim.shape[-1]), dtype=tf.float32)
+                    lse = tf.reduce_logsumexp(raw_sim_f32 / tau, axis=-1)
                     agg_sim = tau * (lse - tf.math.log(K))
                 elif self.prototype_aggregation == "mean":
-                    agg_sim = tf.reduce_mean(raw_sim, axis=-1)
+                    agg_sim = tf.reduce_mean(raw_sim_f32, axis=-1)
                 elif self.prototype_aggregation == "max":
-                    agg_sim = tf.reduce_max(raw_sim, axis=-1)
+                    agg_sim = tf.reduce_max(raw_sim_f32, axis=-1)
                 else:
                     raise ValueError(f"Unsupported prototype_aggregation: {self.prototype_aggregation}")
-                semantic_logits = tf.cast(agg_sim * self.semantic_logit_scale, tf.float32)
+                semantic_logits = agg_sim * tf.cast(self.semantic_logit_scale, tf.float32)
             else:
                 cos_sim = tf.matmul(v_norm, t_norm, transpose_b=True)
                 semantic_logits = tf.cast(cos_sim * self.semantic_logit_scale, tf.float32)
