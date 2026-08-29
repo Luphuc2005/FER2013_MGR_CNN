@@ -137,10 +137,11 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
 
         # 4. Geometry Delta Correction via MLP(GAP(cross_tokens))
         gap = tf.reduce_mean(cross_tokens, axis=1)
-        geometry_delta = self.correction_mlp(gap, training=training)
+        geometry_delta = tf.cast(self.correction_mlp(gap, training=training), tf.float32)
+        baseline_logits = tf.cast(baseline_logits, tf.float32)
 
         # 5. Baseline-Preserving Residual Fusion: final_logits = baseline_logits + beta * geometry_delta
-        beta_cast = tf.cast(self.beta, baseline_logits.dtype)
+        beta_cast = tf.cast(self.beta, tf.float32)
         final_logits = baseline_logits + beta_cast * geometry_delta
 
         if not self._shape_logged:
