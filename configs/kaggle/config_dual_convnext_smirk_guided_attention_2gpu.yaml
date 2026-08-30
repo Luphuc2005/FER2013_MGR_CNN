@@ -1,6 +1,13 @@
-# Dual ConvNeXt-Base MS1M + SMIRK Geometry 3D-Guided Attention for FER2013 on Kaggle 2x GPUs.
-
 seed: 42
+
+runtime:
+  gpu_ids: [0, 1]
+  batch_size_per_gpu: 32
+  fallback_batch_size_per_gpu: 16
+  require_two_gpus: true
+  min_gpus: 2
+  memory_growth: true
+  use_mixed_precision: true
 
 data:
   num_classes: 7
@@ -56,6 +63,12 @@ training:
     geometry_stage4: 0.00003
     rgb_stage3: 0.00003
     geometry_stage3: 0.00003
+    rgb_stage2: 0.00003
+    geometry_stage2: 0.00003
+    rgb_stage1: 0.00003
+    geometry_stage1: 0.00003
+    rgb_stem: 0.00003
+    geometry_stem: 0.00003
 
 tta:
   enabled: true
