@@ -199,19 +199,20 @@ class DualConvNeXtSMIRKGuidedAttentionMS1MFERScratch(tf.keras.Model):
         pooled_3d = tf.reduce_mean(F_3d, axis=[1, 2])
         aux_3d_logits = tf.cast(self.aux_3d_head(pooled_3d), tf.float32)
 
-        self._log_shapes_once(
-            image,
-            depth_rgb,
-            normal_rgb,
-            F_rgb,
-            F_depth,
-            F_normal,
-            F_3d,
-            gate_4d,
-            F_guided,
-            final_logits,
-            aux_3d_logits,
-        )
+        if tf.executing_eagerly():
+            self._log_shapes_once(
+                image,
+                depth_rgb,
+                normal_rgb,
+                F_rgb,
+                F_depth,
+                F_normal,
+                F_3d,
+                gate_4d,
+                F_guided,
+                final_logits,
+                aux_3d_logits,
+            )
 
         return {
             "logits": final_logits,

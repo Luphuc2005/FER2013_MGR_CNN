@@ -470,37 +470,47 @@ def make_train_step(
             valid_grads1, valid_vars1 = zip(*valid1)
             grad_norm1 = tf.linalg.global_norm(valid_grads1)
             is_finite = tf.math.is_finite(grad_norm1)
+            safe_norm = tf.where(
+                tf.logical_and(is_finite, grad_norm1 > 0.0),
+                grad_norm1,
+                tf.ones_like(grad_norm1),
+            )
+            perturb_scale = tf.where(
+                is_finite,
+                tf.cast(sam_rho, tf.float32) / tf.cast(safe_norm, tf.float32),
+                tf.constant(0.0, dtype=tf.float32),
+            )
+            e_list = []
+            for g, v in zip(valid_grads1, valid_vars1):
+                e = tf.cast(tf.cast(g, tf.float32) * perturb_scale, v.dtype)
+                v.assign_add(e)
+                e_list.append((e, v))
 
-            def sam_pass():
-                safe_norm = grad_norm1 + 1e-12
-                e_list = []
-                for g, v in zip(valid_grads1, valid_vars1):
-                    e = tf.cast(sam_rho * g / safe_norm, v.dtype)
-                    v.assign_add(e)
-                    e_list.append((e, v))
+            with tf.GradientTape() as tape2:
+                outputs2 = model(inputs, training=True)
+                final_logits2 = outputs2['final_logits']
+                aux_logits2 = outputs2['aux_3d_logits']
+                l_final2 = compute_distributed_ce_loss(loss_fn, labels, final_logits2, global_batch_size)
+                l_aux2 = compute_distributed_ce_loss(loss_fn, labels, aux_logits2, global_batch_size)
+                total_loss2 = l_final2 + loss_weight_3d * l_aux2
+                scaled_loss2 = scale_loss(loss_scale_optimizer, total_loss2)
 
-                with tf.GradientTape() as tape2:
-                    outputs2 = model(inputs, training=True)
-                    final_logits2 = outputs2["final_logits"]
-                    aux_logits2 = outputs2["aux_3d_logits"]
-                    l_final2 = compute_distributed_ce_loss(loss_fn, labels, final_logits2, global_batch_size)
-                    l_aux2 = compute_distributed_ce_loss(loss_fn, labels, aux_logits2, global_batch_size)
-                    total_loss2 = l_final2 + loss_weight_3d * l_aux2
-                    scaled_loss2 = scale_loss(loss_scale_optimizer, total_loss2)
+            scaled_grads2 = tape2.gradient(scaled_loss2, active_vars)
+            grads2_all = unscale_gradients(loss_scale_optimizer, scaled_grads2)
+            grads2_by_var = {
+                id(var): grad
+                for grad, var in zip(grads2_all, active_vars)
+                if grad is not None
+            }
 
-                scaled_grads2 = tape2.gradient(scaled_loss2, active_vars)
-                grads2 = unscale_gradients(loss_scale_optimizer, scaled_grads2)
+            for e, v in e_list:
+                v.assign_sub(e)
 
-                for e, v in e_list:
-                    v.assign_sub(e)
-
-                v_grads2 = [g if g is not None else tf.zeros_like(v) for g, v in zip(grads2, valid_vars1)]
-                return tuple(v_grads2)
-
-            def fallback_pass():
-                return tuple(valid_grads1)
-
-            final_grads = tf.cond(is_finite, true_fn=sam_pass, false_fn=fallback_pass)
+            v_grads2 = [grads2_by_var.get(id(v), tf.zeros_like(v)) for v in valid_vars1]
+            final_grads = tuple(
+                tf.where(is_finite, g2, g1)
+                for g1, g2 in zip(valid_grads1, v_grads2)
+            )
             valid_grads, valid_vars = final_grads, valid_vars1
 
         grad_norm_before_clip = tf.linalg.global_norm(valid_grads)
