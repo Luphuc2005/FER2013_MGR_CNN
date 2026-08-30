@@ -23,6 +23,11 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import tensorflow as tf
+import logging
+
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
+tf.get_logger().setLevel("ERROR")
+
 import yaml
 from sklearn.metrics import classification_report, confusion_matrix
 
