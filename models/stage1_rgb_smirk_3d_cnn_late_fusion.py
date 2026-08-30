@@ -161,38 +161,23 @@ class Stage1RGBSMIRK3DCNNLateFusionFER(tf.keras.Model):
                 pass
 
     def _rgb_forward(self, image):
-        @tf.custom_gradient
-        def _custom_rgb_pass(x):
-            endpoints = self.rgb_baseline.backbone(
-                x,
-                training=False,
-                return_endpoints=True,
-                stage3_adapter=getattr(self.rgb_baseline, "stage3_adapter", None),
-            )
-            stage4 = endpoints["stage4"]
-            if getattr(self.rgb_baseline, "use_eca", False) and self.rgb_baseline.stage4_eca is not None:
-                stage4 = self.rgb_baseline.stage4_eca(stage4, training=False)
-                endpoints["stage4_eca"] = stage4
-            feat = self.rgb_baseline.gap(stage4)
-            dropped = self.rgb_baseline.head_dropout(feat, training=False)
-            logits = self.rgb_baseline.classifier(dropped)
-            
-            feat = tf.cast(feat, tf.float32)
-            logits = tf.cast(logits, tf.float32)
-
-            def grad(*args, **kwargs):
-                vars_list = kwargs.get("variables", None)
-                if vars_list is None and len(args) > 2:
-                    vars_list = args[2]
-                dx = tf.zeros_like(x)
-                if vars_list is not None:
-                    return dx, [tf.zeros_like(v) for v in vars_list]
-                return dx
-
-            return (feat, logits), grad
-
-        rgb_feature, rgb_logits = _custom_rgb_pass(image)
-        return rgb_feature, rgb_logits, {}
+        endpoints = self.rgb_baseline.backbone(
+            tf.stop_gradient(image),
+            training=False,
+            return_endpoints=True,
+            stage3_adapter=getattr(self.rgb_baseline, "stage3_adapter", None),
+        )
+        stage4 = endpoints["stage4"]
+        if getattr(self.rgb_baseline, "use_eca", False) and self.rgb_baseline.stage4_eca is not None:
+            stage4 = self.rgb_baseline.stage4_eca(stage4, training=False)
+            endpoints["stage4_eca"] = stage4
+        feat = self.rgb_baseline.gap(stage4)
+        dropped = self.rgb_baseline.head_dropout(feat, training=False)
+        logits = self.rgb_baseline.classifier(dropped)
+        
+        feat = tf.stop_gradient(tf.cast(feat, tf.float32))
+        logits = tf.stop_gradient(tf.cast(logits, tf.float32))
+        return feat, logits, endpoints
 
     def trainable_branch_variables(self) -> Tuple[list, list, list]:
         return (

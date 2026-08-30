@@ -67,6 +67,21 @@ def resolve_path(path_value: Optional[str]) -> Optional[Path]:
 
 def configure_runtime(cfg: Dict) -> None:
     runtime = cfg.get("runtime", {})
+    gpus = tf.config.list_physical_devices("GPU")
+    if gpus:
+        gpu_ids = list(runtime.get("gpu_ids", [0]))
+        visible = [gpus[i] for i in gpu_ids if i < len(gpus)] or [gpus[0]]
+        try:
+            tf.config.set_visible_devices(visible, "GPU")
+            if bool(runtime.get("memory_growth", True)):
+                for gpu in visible:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"[INFO] TensorFlow visible GPU(s): {[gpu.name for gpu in visible]} with memory_growth=True", flush=True)
+        except Exception as e:
+            print(f"[WARNING] Could not set GPU visible devices/memory growth: {e}", flush=True)
+    else:
+        print("[WARNING] TensorFlow sees no GPU. Running on CPU.", flush=True)
+
     intra_threads = runtime.get("intra_op_threads")
     inter_threads = runtime.get("inter_op_threads")
     if intra_threads:
@@ -77,20 +92,6 @@ def configure_runtime(cfg: Dict) -> None:
     if bool(runtime.get("use_mixed_precision", True)):
         tf.keras.mixed_precision.set_global_policy("mixed_float16")
         print("[INFO] TensorFlow mixed_float16 enabled for Stage 1 late fusion", flush=True)
-    gpus = tf.config.list_physical_devices("GPU")
-    if not gpus:
-        print("[WARNING] TensorFlow sees no GPU. Running on CPU.", flush=True)
-        return
-    gpu_ids = list(runtime.get("gpu_ids", [0]))
-    visible = [gpus[i] for i in gpu_ids if i < len(gpus)] or [gpus[0]]
-    tf.config.set_visible_devices(visible, "GPU")
-    if bool(runtime.get("memory_growth", True)):
-        for gpu in visible:
-            try:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            except Exception:
-                pass
-    print(f"[INFO] TensorFlow visible GPU(s): {[gpu.name for gpu in visible]}", flush=True)
 
 
 def cache_path_for(cache_dir: Path, pattern: str, split: str) -> Path:
@@ -608,8 +609,8 @@ def main() -> int:
     seed = int(cfg.get("seed", {}).get("random_seed", 42))
     random.seed(seed)
     np.random.seed(seed)
-    tf.keras.utils.set_random_seed(seed)
     configure_runtime(cfg)
+    tf.keras.utils.set_random_seed(seed)
 
     output_dir = resolve_path(cfg["paths"]["output_dir"]) or PROJECT_ROOT / "outputs" / "stage1_rgb_smirk_3d_cnn_late_fusion"
     output_dir.mkdir(parents=True, exist_ok=True)
