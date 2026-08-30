@@ -424,17 +424,18 @@ def make_train_step(
     loss_weight_3d: float,
     grad_clip_norm: float,
     global_batch_size: int,
+    phase: int = 1,
     use_sam: bool = False,
     sam_rho: float = 0.05,
     label_smoothing: float = 0.0,
 ):
-    def train_step(inputs, labels, phase: int):
-        groups = trainable_group_vars_for_phase(model, phase)
-        active_vars = unique_vars([var for vars_ in groups.values() for var in vars_])
-        if not active_vars:
-            raise RuntimeError("No active variables for train_step.")
-        loss_scale_optimizer = next(opt for name, opt in optimizers.items() if groups.get(name))
+    groups = trainable_group_vars_for_phase(model, phase)
+    active_vars = unique_vars([var for vars_ in groups.values() for var in vars_])
+    if not active_vars:
+        raise RuntimeError("No active variables for train_step.")
+    loss_scale_optimizer = next(opt for name, opt in optimizers.items() if groups.get(name))
 
+    def train_step(inputs, labels):
         if not use_sam:
             with tf.GradientTape() as tape:
                 outputs = model(inputs, training=True)
@@ -539,9 +540,9 @@ def make_train_step(
 
 def make_distributed_train_step(strategy, step_fn):
     @tf.function
-    def dist_step(dist_batch, phase: int):
+    def dist_step(dist_batch):
         def replica_step(inputs, labels):
-            return step_fn(inputs, labels, phase)
+            return step_fn(inputs, labels)
 
         per_replica = strategy.run(replica_step, args=dist_batch)
         reduced = {}
@@ -674,6 +675,7 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
         loss_weight_3d,
         grad_clip_norm,
         int(cfg["data"]["batch_size"]),
+        phase=1,
         use_sam=use_sam,
         sam_rho=sam_rho,
         label_smoothing=label_smoothing,
@@ -696,10 +698,10 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
         if idx >= dry_batches:
             break
         if strategy.num_replicas_in_sync > 1:
-            step_metrics = dist_step_fn(batch, phase=1)
+            step_metrics = dist_step_fn(batch)
         else:
             inputs, labels = batch
-            step_metrics = dist_step_fn(inputs, labels, phase=1)
+            step_metrics = dist_step_fn(inputs, labels)
         print(f"DRY_RUN_BATCH idx={idx+1} loss={step_metrics['loss']:.6f} acc={step_metrics['accuracy']:.6f}", flush=True)
 
     diff_rgb = max_abs_diff(rgb_before, rgb_backbone_vars)
@@ -820,22 +822,6 @@ def main() -> int:
         sam_rho = float(cfg["training"].get("sam_rho", 0.05))
         if use_sam:
             print(f"SAM_OPTIMIZER_ENABLED rho={sam_rho}", flush=True)
-        step_fn = make_train_step(
-            model,
-            optimizers,
-            loss_fn,
-            loss_weight_3d,
-            grad_clip_norm,
-            int(cfg["data"]["batch_size"]),
-            use_sam=use_sam,
-            sam_rho=sam_rho,
-            label_smoothing=label_smoothing,
-        )
-        if strategy.num_replicas_in_sync > 1:
-            dist_step_fn = make_distributed_train_step(strategy, step_fn)
-        else:
-            dist_step_fn = tf.function(step_fn)
-
     dist_train_ds = strategy.experimental_distribute_dataset(train_ds)
 
     best_val_acc = -1.0
@@ -857,6 +843,22 @@ def main() -> int:
             assert_group_contract(model, groups, phase)
             print(f"EPOCH_{epoch:02d}_ENTER_PHASE_{phase}", flush=True)
             print_epoch_lr_contract(cfg, phase)
+            step_fn = make_train_step(
+                model,
+                optimizers,
+                loss_fn,
+                loss_weight_3d,
+                grad_clip_norm,
+                int(cfg["data"]["batch_size"]),
+                phase=phase,
+                use_sam=use_sam,
+                sam_rho=sam_rho,
+                label_smoothing=label_smoothing,
+            )
+            if strategy.num_replicas_in_sync > 1:
+                dist_step_fn = make_distributed_train_step(strategy, step_fn)
+            else:
+                dist_step_fn = tf.function(step_fn)
 
         start = time.time()
         progress_interval = int(cfg["training"].get("progress_interval", 20))
@@ -869,10 +871,10 @@ def main() -> int:
         gate_means, mod_mins, mod_maxs = [], [], []
         for batch_idx, batch in enumerate(dist_train_ds, start=1):
             if strategy.num_replicas_in_sync > 1:
-                metrics = dist_step_fn(batch, phase=phase)
+                metrics = dist_step_fn(batch)
             else:
                 inputs, labels = batch
-                metrics = dist_step_fn(inputs, labels, phase=phase)
+                metrics = dist_step_fn(inputs, labels)
             losses.append(float(metrics["loss"].numpy()))
             accs.append(float(metrics["accuracy"].numpy()))
             aux_accs.append(float(metrics["aux_accuracy"].numpy()))
