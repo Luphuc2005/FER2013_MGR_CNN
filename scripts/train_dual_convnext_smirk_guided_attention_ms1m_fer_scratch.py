@@ -339,65 +339,69 @@ def compute_distributed_ce_loss(loss_fn, labels, logits, global_batch_size: int)
     per_example_loss = loss_fn(labels, logits)
     return tf.nn.compute_average_loss(per_example_loss, global_batch_size=global_batch_size)
 
-@tf.function(reduce_retracing=True)
-def train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d: float, grad_clip_norm: float, global_batch_size: int):
-    active_vars = unique_vars([var for vars_ in groups.values() for var in vars_])
-    if not active_vars:
-        raise RuntimeError("No active variables for train_step.")
-    loss_scale_optimizer = next(opt for name, opt in optimizers.items() if groups.get(name))
+def make_train_step(model, optimizers, loss_fn, loss_weight_3d: float, grad_clip_norm: float, global_batch_size: int):
+    @tf.function
+    def train_step(inputs, labels, phase: int):
+        groups = trainable_group_vars_for_phase(model, phase)
+        active_vars = unique_vars([var for vars_ in groups.values() for var in vars_])
+        if not active_vars:
+            raise RuntimeError("No active variables for train_step.")
+        loss_scale_optimizer = next(opt for name, opt in optimizers.items() if groups.get(name))
 
-    with tf.GradientTape() as tape:
-        outputs = model(inputs, training=True)
-        final_logits = outputs["final_logits"]
-        aux_logits = outputs["aux_3d_logits"]
-        l_final = compute_distributed_ce_loss(loss_fn, labels, final_logits, global_batch_size)
-        l_aux = compute_distributed_ce_loss(loss_fn, labels, aux_logits, global_batch_size)
-        total_loss = l_final + loss_weight_3d * l_aux
-        scaled_loss = loss_scale_optimizer.get_scaled_loss(total_loss)
+        with tf.GradientTape() as tape:
+            outputs = model(inputs, training=True)
+            final_logits = outputs["final_logits"]
+            aux_logits = outputs["aux_3d_logits"]
+            l_final = compute_distributed_ce_loss(loss_fn, labels, final_logits, global_batch_size)
+            l_aux = compute_distributed_ce_loss(loss_fn, labels, aux_logits, global_batch_size)
+            total_loss = l_final + loss_weight_3d * l_aux
+            scaled_loss = loss_scale_optimizer.get_scaled_loss(total_loss)
 
-    scaled_grads = tape.gradient(scaled_loss, active_vars)
-    grads = loss_scale_optimizer.get_unscaled_gradients(scaled_grads)
-    valid = [(g, v) for g, v in zip(grads, active_vars) if g is not None]
-    if not valid:
-        raise RuntimeError("No valid gradients produced for active variables.")
+        scaled_grads = tape.gradient(scaled_loss, active_vars)
+        grads = loss_scale_optimizer.get_unscaled_gradients(scaled_grads)
+        valid = [(g, v) for g, v in zip(grads, active_vars) if g is not None]
+        if not valid:
+            raise RuntimeError("No valid gradients produced for active variables.")
 
-    valid_grads, valid_vars = zip(*valid)
-    grad_norm_before_clip = tf.linalg.global_norm(valid_grads)
-    clipped_grads, _ = tf.clip_by_global_norm(valid_grads, grad_clip_norm)
-    clipped_by_var = {id(var): grad for grad, var in zip(clipped_grads, valid_vars)}
-    raw_by_var = {id(var): grad for grad, var in zip(valid_grads, valid_vars)}
+        valid_grads, valid_vars = zip(*valid)
+        grad_norm_before_clip = tf.linalg.global_norm(valid_grads)
+        clipped_grads, _ = tf.clip_by_global_norm(valid_grads, grad_clip_norm)
+        clipped_by_var = {id(var): grad for grad, var in zip(clipped_grads, valid_vars)}
+        raw_by_var = {id(var): grad for grad, var in zip(valid_grads, valid_vars)}
 
-    grad_norms = {}
-    for name, variables in groups.items():
-        group_pairs = [(clipped_by_var[id(var)], var) for var in variables if id(var) in clipped_by_var]
-        if not group_pairs:
-            grad_norms[name] = tf.constant(0.0, dtype=tf.float32)
-            continue
-        group_raw_grads = [raw_by_var[id(var)] for var in variables if id(var) in raw_by_var]
-        grad_norms[name] = tf.cast(tf.linalg.global_norm(group_raw_grads), tf.float32)
-        optimizers[name].apply_gradients(group_pairs)
+        grad_norms = {}
+        for name, variables in groups.items():
+            group_pairs = [(clipped_by_var[id(var)], var) for var in variables if id(var) in clipped_by_var]
+            if not group_pairs:
+                grad_norms[name] = tf.constant(0.0, dtype=tf.float32)
+                continue
+            group_raw_grads = [raw_by_var[id(var)] for var in variables if id(var) in raw_by_var]
+            grad_norms[name] = tf.cast(tf.linalg.global_norm(group_raw_grads), tf.float32)
+            optimizers[name].apply_gradients(group_pairs)
 
-    preds = tf.argmax(final_logits, axis=1, output_type=labels.dtype)
-    aux_preds = tf.argmax(aux_logits, axis=1, output_type=labels.dtype)
-    acc = tf.reduce_mean(tf.cast(tf.equal(preds, labels), tf.float32))
-    aux_acc = tf.reduce_mean(tf.cast(tf.equal(aux_preds, labels), tf.float32))
-    return {
-        "loss": total_loss,
-        "accuracy": acc,
-        "aux_accuracy": aux_acc,
-        "grad_norm": tf.cast(grad_norm_before_clip, tf.float32),
-        "alpha_raw": tf.cast(outputs["alpha_raw"], tf.float32),
-        "effective_alpha": tf.cast(outputs["effective_alpha"], tf.float32),
-        "mean_abs_channel_gate": tf.cast(outputs["mean_abs_channel_gate"], tf.float32),
-        "modulation_factor_min": tf.cast(outputs["modulation_factor_min"], tf.float32),
-        "modulation_factor_max": tf.cast(outputs["modulation_factor_max"], tf.float32),
-        "group_grad_norms": grad_norms,
-    }
+        preds = tf.argmax(final_logits, axis=1, output_type=labels.dtype)
+        aux_preds = tf.argmax(aux_logits, axis=1, output_type=labels.dtype)
+        acc = tf.reduce_mean(tf.cast(tf.equal(preds, labels), tf.float32))
+        aux_acc = tf.reduce_mean(tf.cast(tf.equal(aux_preds, labels), tf.float32))
+        return {
+            "loss": total_loss,
+            "accuracy": acc,
+            "aux_accuracy": aux_acc,
+            "grad_norm": tf.cast(grad_norm_before_clip, tf.float32),
+            "alpha_raw": tf.cast(outputs["alpha_raw"], tf.float32),
+            "effective_alpha": tf.cast(outputs["effective_alpha"], tf.float32),
+            "mean_abs_channel_gate": tf.cast(outputs["mean_abs_channel_gate"], tf.float32),
+            "modulation_factor_min": tf.cast(outputs["modulation_factor_min"], tf.float32),
+            "modulation_factor_max": tf.cast(outputs["modulation_factor_max"], tf.float32),
+            "group_grad_norms": grad_norms,
+        }
+
+    return train_step
 
 
-def distributed_train_step(strategy, model, optimizers, groups, dist_batch, loss_fn, loss_weight_3d: float, grad_clip_norm: float, global_batch_size: int):
+def distributed_train_step(strategy, step_fn, dist_batch, phase: int):
     def replica_step(inputs, labels):
-        return train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm, global_batch_size)
+        return step_fn(inputs, labels, phase)
 
     per_replica = strategy.run(replica_step, args=dist_batch)
     reduced = {}
@@ -506,6 +510,8 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
         raise RuntimeError("grad_clip_norm must be > 0 and is required for this experiment.")
     print(f"GRAD_CLIP_ENABLED global_norm={grad_clip_norm}", flush=True)
 
+    step_fn = make_train_step(model, optimizers, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
+
     rgb_backbone_vars = stem_vars(model.rgb_baseline) + stage_vars(model.rgb_baseline, 1) + stage_vars(model.rgb_baseline, 2) + stage_vars(model.rgb_baseline, 3) + stage_vars(model.rgb_baseline, 4)
     rgb_before = [v.numpy().copy() for v in rgb_backbone_vars]
     geom_frozen_vars = stem_vars(model.geometry_baseline) + stage_vars(model.geometry_baseline, 1) + stage_vars(model.geometry_baseline, 2) + stage_vars(model.geometry_baseline, 3)
@@ -518,10 +524,10 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
         if batch_idx > dry_batches:
             break
         if strategy.num_replicas_in_sync > 1:
-            metrics = distributed_train_step(strategy, model, optimizers, groups, batch, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
+            metrics = distributed_train_step(strategy, step_fn, batch, phase=1)
         else:
             inputs, labels = batch
-            metrics = train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
+            metrics = step_fn(inputs, labels, phase=1)
         print(
             f"DRY_RUN_BATCH {batch_idx} "
             f"loss={float(metrics['loss'].numpy()):.6f} "
@@ -646,6 +652,7 @@ def main() -> int:
         optimizers = build_optimizers(cfg)
 
         build_all_optimizer_slots(model, optimizers)
+        step_fn = make_train_step(model, optimizers, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
     dist_train_ds = strategy.experimental_distribute_dataset(train_ds)
 
     best_monitor = -1.0
@@ -665,8 +672,6 @@ def main() -> int:
             assert_group_contract(model, groups, phase)
             print(f"EPOCH_{epoch:02d}_ENTER_PHASE_{phase}", flush=True)
             print_epoch_lr_contract(cfg, phase)
-        else:
-            groups = trainable_group_vars_for_phase(model, phase)
 
         start = time.time()
         progress_interval = int(cfg["training"].get("progress_interval", 20))
@@ -674,10 +679,10 @@ def main() -> int:
         gate_means, mod_mins, mod_maxs = [], [], []
         for batch_idx, batch in enumerate(dist_train_ds, start=1):
             if strategy.num_replicas_in_sync > 1:
-                metrics = distributed_train_step(strategy, model, optimizers, groups, batch, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
+                metrics = distributed_train_step(strategy, step_fn, batch, phase=phase)
             else:
                 inputs, labels = batch
-                metrics = train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
+                metrics = step_fn(inputs, labels, phase=phase)
             losses.append(float(metrics["loss"].numpy()))
             accs.append(float(metrics["accuracy"].numpy()))
             aux_accs.append(float(metrics["aux_accuracy"].numpy()))
