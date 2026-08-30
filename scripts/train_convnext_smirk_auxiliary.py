@@ -7,10 +7,16 @@ import random
 import time
 import sys
 from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+import numpy as np
+import tensorflow as tf
+import yaml
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 
 from datasets.fer2013 import EMOTION_NAMES, collect_split_records
 from models.convnext_smirk_auxiliary import ConvNeXtSMIRKAuxiliaryFER, resolve_latest_checkpoint
