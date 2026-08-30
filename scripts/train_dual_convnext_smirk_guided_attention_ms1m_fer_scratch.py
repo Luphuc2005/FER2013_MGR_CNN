@@ -606,8 +606,12 @@ def main() -> int:
 
     output_dir = resolve_path(cfg["paths"]["output_dir"])
     ckpt_dir = output_dir / "checkpoints" / "best"
+    ckpt_best_acc_dir = output_dir / "checkpoints" / "best_acc"
+    ckpt_best_loss_dir = output_dir / "checkpoints" / "best_loss"
     output_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_best_acc_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_best_loss_dir.mkdir(parents=True, exist_ok=True)
 
     data_path = resolve_path(cfg["data"]["data_path"])
     cache_dir = resolve_path(cfg["geometry_cache"]["feature_dir"])
@@ -655,7 +659,8 @@ def main() -> int:
         step_fn = make_train_step(model, optimizers, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
     dist_train_ds = strategy.experimental_distribute_dataset(train_ds)
 
-    best_monitor = -1.0
+    best_val_acc = -1.0
+    best_val_loss = float("inf")
     patience_counter = 0
     current_phase = None
 
@@ -675,6 +680,11 @@ def main() -> int:
 
         start = time.time()
         progress_interval = int(cfg["training"].get("progress_interval", 20))
+        try:
+            total_batches = len(train_ds)
+        except Exception:
+            total_batches = None
+
         losses, accs, aux_accs, grad_norms = [], [], [], []
         gate_means, mod_mins, mod_maxs = [], [], []
         for batch_idx, batch in enumerate(dist_train_ds, start=1):
@@ -691,16 +701,17 @@ def main() -> int:
             mod_mins.append(float(metrics["modulation_factor_min"].numpy()))
             mod_maxs.append(float(metrics["modulation_factor_max"].numpy()))
             if batch_idx == 1 or (progress_interval > 0 and batch_idx % progress_interval == 0):
-                batch_elapsed = time.time() - start
+                lr_head = float(cfg["training"]["learning_rates"].get("head", 0.0001))
+                lr_backbone = float(cfg["training"]["learning_rates"].get("rgb_stage4", 0.0)) if phase >= 2 else 0.0
+                running_loss = float(np.mean(losses))
+                running_acc = float(np.mean(accs))
+                step_str = f"{batch_idx}/{total_batches}" if total_batches else f"{batch_idx}"
                 print(
-                    f"EPOCH_PROGRESS epoch={epoch:02d} phase={phase} batch={batch_idx} "
-                    f"elapsed={batch_elapsed:.1f}s loss={float(metrics['loss'].numpy()):.6f} "
-                    f"acc={float(metrics['accuracy'].numpy()):.6f} aux_acc={float(metrics['aux_accuracy'].numpy()):.6f} "
-                    f"grad_norm_before_clip={float(metrics['grad_norm'].numpy()):.6f} "
-                    f"alpha_raw={float(metrics['alpha_raw'].numpy()):.8f} effective_alpha={float(metrics['effective_alpha'].numpy()):.8f}",
+                    f"Epoch {epoch}/{epochs} step {step_str} loss={running_loss:.4f} running_acc={running_acc:.4f} lr_head={lr_head:.6f} lr_backbone={lr_backbone:.6f}",
                     flush=True,
                 )
 
+        print(f"[INFO] Epoch {epoch}: starting validation", flush=True)
         val_metrics = evaluate_model(model, val_ds, loss_weight_3d)
         elapsed = time.time() - start
         train_loss = float(np.mean(losses)) if losses else 0.0
@@ -725,14 +736,31 @@ def main() -> int:
         )
         print_epoch_lr_contract(cfg, phase)
 
-        monitor_value = val_metrics["macro_f1"] if cfg["training"].get("monitor") == "val_macro_f1" else val_metrics["accuracy"]
-        if monitor_value > best_monitor:
-            best_monitor = monitor_value
-            patience_counter = 0
+        cur_val_acc = val_metrics["accuracy"]
+        cur_val_loss = val_metrics["loss"]
+
+        improved_acc = False
+        improved_loss = False
+
+        if cur_val_acc > best_val_acc:
+            best_val_acc = cur_val_acc
+            improved_acc = True
             model.save_weights(str(ckpt_dir / "ckpt"))
-            with (output_dir / "best_val_metrics.json").open("w", encoding="utf-8") as f:
+            model.save_weights(str(ckpt_best_acc_dir / "ckpt"))
+            with (output_dir / "best_val_acc_metrics.json").open("w", encoding="utf-8") as f:
                 json.dump(val_metrics, f, indent=2)
-            print(f"SAVED_BEST_CHECKPOINT monitor={cfg['training'].get('monitor')} value={monitor_value:.6f}", flush=True)
+            print(f"SAVED_BEST_ACC_CHECKPOINT val_acc={best_val_acc:.6f}", flush=True)
+
+        if cur_val_loss < best_val_loss:
+            best_val_loss = cur_val_loss
+            improved_loss = True
+            model.save_weights(str(ckpt_best_loss_dir / "ckpt"))
+            with (output_dir / "best_val_loss_metrics.json").open("w", encoding="utf-8") as f:
+                json.dump(val_metrics, f, indent=2)
+            print(f"SAVED_BEST_LOSS_CHECKPOINT val_loss={best_val_loss:.6f}", flush=True)
+
+        if improved_acc or improved_loss:
+            patience_counter = 0
         else:
             patience_counter += 1
             if patience_counter >= patience:

@@ -6,7 +6,7 @@ seed: 42
 data:
   num_classes: 7
   image_size: 112
-  batch_size: 16
+  batch_size: 32
   data_path: "data/fer13-split"
   use_clean_filter: false
   predecode_pixels: true
@@ -38,7 +38,7 @@ training:
   weight_decay: 0.01
   grad_clip_norm: 1.0
   dry_run_batches: 3
-  monitor: "val_macro_f1"
+  monitor: "val_accuracy"
   best_checkpoint_start_epoch: 1
   progress_interval: 50
   stages:
