@@ -231,10 +231,15 @@ def build_optimizer(cfg: Dict):
         adamw = getattr(getattr(tf.keras.optimizers, "experimental", object()), "AdamW", None)
     if adamw is not None:
         try:
-            return adamw(weight_decay=weight_decay, jit_compile=False, **kwargs)
+            base_opt = adamw(weight_decay=weight_decay, jit_compile=False, **kwargs)
         except TypeError:
-            return adamw(weight_decay=weight_decay, **kwargs)
-    return tf.keras.optimizers.Adam(**kwargs)
+            base_opt = adamw(weight_decay=weight_decay, **kwargs)
+    else:
+        base_opt = tf.keras.optimizers.Adam(**kwargs)
+
+    if bool(cfg.get("runtime", {}).get("use_mixed_precision", True)):
+        return tf.keras.mixed_precision.LossScaleOptimizer(base_opt)
+    return base_opt
 
 
 def restore_baseline_into(model, checkpoint_path: str, *, strict: bool) -> str:
@@ -298,9 +303,20 @@ def train_step(model, optimizer, features, labels, loss_weight_3d: float, label_
         raw_loss = fusion_loss + tf.cast(loss_weight_3d, tf.float32) * geometry_loss
         if model.losses:
             raw_loss = raw_loss + tf.add_n([tf.cast(item, tf.float32) for item in model.losses])
-        scaled_loss = raw_loss * tf.cast(loss_scale, tf.float32)
+        
+        if isinstance(optimizer, tf.keras.mixed_precision.LossScaleOptimizer):
+            scaled_loss = optimizer.get_scaled_loss(raw_loss)
+        else:
+            scaled_loss = raw_loss * tf.cast(loss_scale, tf.float32)
+
     variables = model.trainable_variables
-    grads = tape.gradient(scaled_loss, variables)
+    scaled_grads = tape.gradient(scaled_loss, variables)
+    
+    if isinstance(optimizer, tf.keras.mixed_precision.LossScaleOptimizer):
+        grads = optimizer.get_unscaled_gradients(scaled_grads)
+    else:
+        grads = scaled_grads
+
     optimizer.apply_gradients([(g, v) for g, v in zip(grads, variables) if g is not None])
     fused_pred = tf.argmax(outputs["fusion_logits"], axis=-1, output_type=tf.int32)
     geom_pred = tf.argmax(outputs["geometry_logits"], axis=-1, output_type=tf.int32)
