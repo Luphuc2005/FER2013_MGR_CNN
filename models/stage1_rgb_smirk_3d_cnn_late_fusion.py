@@ -174,7 +174,11 @@ class Stage1RGBSMIRK3DCNNLateFusionFER(tf.keras.Model):
         rgb_feature = self.rgb_baseline.gap(stage4)
         dropped = self.rgb_baseline.head_dropout(rgb_feature, training=False)
         rgb_logits = self.rgb_baseline.classifier(dropped)
-        return tf.cast(rgb_feature, tf.float32), tf.cast(rgb_logits, tf.float32), endpoints
+        return (
+            tf.stop_gradient(tf.cast(rgb_feature, tf.float32)),
+            tf.stop_gradient(tf.cast(rgb_logits, tf.float32)),
+            {k: tf.stop_gradient(v) if isinstance(v, tf.Tensor) else v for k, v in endpoints.items()},
+        )
 
     def trainable_branch_variables(self) -> Tuple[list, list, list]:
         return (
