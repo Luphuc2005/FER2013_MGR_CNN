@@ -161,7 +161,11 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
         geometry_delta = tf.cast(self.correction_mlp(gap, training=training), tf.float32)
 
         # 5. Confidence-Aware Sample-Wise Dynamic Gate
-        gate_inputs = tf.concat([baseline_confidence, baseline_entropy, rgb_feat, gap], axis=-1)
+        baseline_conf_f32 = tf.cast(baseline_confidence, tf.float32)
+        baseline_ent_f32 = tf.cast(baseline_entropy, tf.float32)
+        rgb_feat_f32 = tf.cast(rgb_feat, tf.float32)
+        gap_f32 = tf.cast(gap, tf.float32)
+        gate_inputs = tf.concat([baseline_conf_f32, baseline_ent_f32, rgb_feat_f32, gap_f32], axis=-1)
         gate = tf.cast(self.gate_mlp(gate_inputs, training=training), tf.float32)
 
         if getattr(self, "force_zero_gate", False):
