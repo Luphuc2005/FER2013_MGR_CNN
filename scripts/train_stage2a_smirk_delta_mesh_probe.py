@@ -104,7 +104,14 @@ def evaluate_model(model: Stage2ASMIRKDeltaMeshGNN, dataset: tf.data.Dataset) ->
     acc = float(np.mean(preds == all_labels_arr))
     macro_f1 = float(f1_score(all_labels_arr, preds, average="macro", zero_division=0))
 
-    report = classification_report(all_labels_arr, preds, target_names=EMOTION_NAMES, output_dict=True, zero_division=0)
+    report = classification_report(
+        all_labels_arr,
+        preds,
+        labels=list(range(len(EMOTION_NAMES))),
+        target_names=EMOTION_NAMES,
+        output_dict=True,
+        zero_division=0,
+    )
     conf_mat = confusion_matrix(all_labels_arr, preds, labels=list(range(7)))
 
     return {
