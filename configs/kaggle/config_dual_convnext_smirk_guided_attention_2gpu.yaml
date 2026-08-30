@@ -25,7 +25,7 @@ rgb_backbone:
   ablation: "cnn_only"
 
 geometry_cache:
-  feature_dir: "/kaggle/input/datasets/lhngphc/3d-smirk"
+  feature_dir: "/kaggle/input/datasets/lhngphc/3d-data"
   map_file_pattern: "{split}_smirk_depth_normal_maps.npz"
   dtype: "float16"
 

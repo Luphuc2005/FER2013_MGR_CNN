@@ -76,6 +76,8 @@ def assert_no_fer_checkpoint_restore_config(cfg: Dict) -> None:
 def load_geometry_cache(cache_dir: Path, pattern: str, split: str) -> Dict[str, np.ndarray]:
     target_name = pattern.format(split=split)
     npz_path = cache_dir / target_name
+
+    # 1. Direct check or case-insensitive search
     if not npz_path.exists():
         kaggle_input = Path("/kaggle/input")
         if kaggle_input.exists():
@@ -87,14 +89,45 @@ def load_geometry_cache(cache_dir: Path, pattern: str, split: str) -> Dict[str, 
                         break
                 if npz_path.exists():
                     break
+
+    # 2. Auto-extract from .zip if dataset was uploaded as zip
     if not npz_path.exists():
-        print(f"[DEBUG] Geometry cache '{target_name}' not found. Files in /kaggle/input:", flush=True)
-        if Path("/kaggle/input").exists():
-            for root, _, files in os.walk("/kaggle/input"):
+        kaggle_input = Path("/kaggle/input")
+        if kaggle_input.exists():
+            import zipfile
+            for root, _, files in os.walk(kaggle_input):
                 for f in files:
-                    if "smirk" in f.lower() or "3d" in f.lower() or "map" in f.lower() or "geom" in f.lower():
-                        print(f"  -> {os.path.join(root, f)}", flush=True)
+                    if f.endswith(".zip"):
+                        zip_path = Path(root) / f
+                        try:
+                            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                                zip_contents = zip_ref.namelist()
+                                if any(target_name.lower() in name.lower() for name in zip_contents):
+                                    extract_dir = Path("/kaggle/working/geometry_maps")
+                                    extract_dir.mkdir(parents=True, exist_ok=True)
+                                    print(f"[INFO] Auto-unzipping {zip_path} to {extract_dir}...", flush=True)
+                                    zip_ref.extractall(extract_dir)
+                                    for ex_root, _, ex_files in os.walk(extract_dir):
+                                        for ex_f in ex_files:
+                                            if ex_f.lower() == target_name.lower():
+                                                npz_path = Path(ex_root) / ex_f
+                                                print(f"[INFO] Auto-resolved extracted cache for {split} -> {npz_path}", flush=True)
+                                                break
+                        except Exception as e:
+                            print(f"[WARNING] Failed inspecting zip file {zip_path}: {e}", flush=True)
+                if npz_path.exists():
+                    break
+
+    if not npz_path.exists():
+        print(f"\n[DEBUG] Geometry cache '{target_name}' not found. Listing ALL items in /kaggle/input:", flush=True)
+        if Path("/kaggle/input").exists():
+            for root, dirs, files in os.walk("/kaggle/input"):
+                for f in files:
+                    print(f"  [FILE] {os.path.join(root, f)}", flush=True)
+                for d in dirs:
+                    print(f"  [DIR]  {os.path.join(root, d)}", flush=True)
         raise FileNotFoundError(f"Geometry cache map '{target_name}' not found under {cache_dir} or /kaggle/input")
+
     data = np.load(npz_path)
     geom_maps = data["geometry_maps"]
     if geom_maps.dtype != np.float16:
