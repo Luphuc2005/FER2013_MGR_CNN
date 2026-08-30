@@ -31,7 +31,7 @@ model:
 training:
   epochs: 60
   patience: 15
-  loss_weight_3d: 0.3
+  loss_weight_3d: 0.1
   label_smoothing: 0.0
   optimizer: "adamw"
   lr_head: 0.0005

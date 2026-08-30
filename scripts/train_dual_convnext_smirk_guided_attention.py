@@ -129,7 +129,7 @@ def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, 
 
 
 def run_contract_smoke_test(model: DualConvNeXtSMIRKGuidedAttentionFER, baseline_checkpoint: str, sample_batch) -> bool:
-    """Requirement 6: Verify max_abs_diff(baseline_logits, new_model_logits) < 1e-5 when alpha = 0.0."""
+    """Requirement 4: Verify max_abs_diff(F_guided, F_rgb) < 1e-5 and max_abs_diff(baseline_logits, dual_logits) < 1e-5 when alpha = 0.0."""
     print("\n" + "=" * 65, flush=True)
     print(" CONTRACT SMOKE TEST: VERIFYING BASELINE EQUIVALENCE (alpha = 0)", flush=True)
     print("=" * 65, flush=True)
@@ -155,18 +155,23 @@ def run_contract_smoke_test(model: DualConvNeXtSMIRKGuidedAttentionFER, baseline
 
     dual_out = model(inputs, training=False)
     dual_logits = dual_out["final_logits"].numpy()
+    F_rgb = dual_out["F_rgb"].numpy()
+    F_guided = dual_out["F_guided"].numpy()
 
+    feat_diff = float(np.max(np.abs(F_guided - F_rgb)))
     max_diff = float(np.max(np.abs(baseline_logits - dual_logits)))
+
     print(f"[SMOKE_TEST] Baseline logits shape: {baseline_logits.shape}", flush=True)
     print(f"[SMOKE_TEST] Dual Model logits shape: {dual_logits.shape}", flush=True)
-    print(f"[SMOKE_TEST] Max absolute difference: {max_diff:.8e}", flush=True)
+    print(f"[SMOKE_TEST] Max abs diff (F_guided - F_rgb): {feat_diff:.8e}", flush=True)
+    print(f"[SMOKE_TEST] Max abs diff (baseline_logits - dual_logits): {max_diff:.8e}", flush=True)
 
-    if max_diff < 1e-5:
-        print("  --> [PASS] CONTRACT SMOKE TEST PASSED! (max_abs_diff < 1e-5 when alpha = 0)", flush=True)
+    if feat_diff < 1e-5 and max_diff < 1e-5:
+        print("  --> [PASS] CONTRACT SMOKE TEST PASSED! (F_guided == F_rgb and logits match when alpha = 0)", flush=True)
         print("=" * 65 + "\n", flush=True)
         return True
     else:
-        print(f"  --> [FAIL] Contract Smoke Test FAILED! max_abs_diff={max_diff:.8e} >= 1e-5", flush=True)
+        print(f"  --> [FAIL] Contract Smoke Test FAILED! feat_diff={feat_diff:.8e}, logits_diff={max_diff:.8e}", flush=True)
         print("=" * 65 + "\n", flush=True)
         return False
 
@@ -193,7 +198,7 @@ def build_optimizers(cfg: Dict):
     return opt_head, opt_geom
 
 
-def evaluate_model(model: DualConvNeXtSMIRKGuidedAttentionFER, dataset: tf.data.Dataset) -> Dict:
+def evaluate_model(model: DualConvNeXtSMIRKGuidedAttentionFER, dataset: tf.data.Dataset, loss_weight_3d: float = 0.1) -> Dict:
     all_logits = []
     all_labels = []
     total_loss = 0.0
@@ -207,7 +212,7 @@ def evaluate_model(model: DualConvNeXtSMIRKGuidedAttentionFER, dataset: tf.data.
 
         l_final = loss_fn(y_batch, logits)
         l_aux = loss_fn(y_batch, aux_logits)
-        batch_loss = l_final + 0.3 * l_aux
+        batch_loss = l_final + loss_weight_3d * l_aux
 
         batch_size = tf.shape(y_batch)[0]
         total_loss += float(batch_loss.numpy()) * int(batch_size)
@@ -299,6 +304,7 @@ def main() -> int:
         model.rgb_baseline.load_weights(resolved_ckpt).expect_partial()
 
     # 4. Setup Optimizers
+    loss_weight_3d = float(cfg.get("training", {}).get("loss_weight_3d", 0.1))
     opt_head, opt_geom = build_optimizers(cfg)
     loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
@@ -328,7 +334,7 @@ def main() -> int:
 
             l_final = loss_fn(y_batch, f_logits)
             l_aux = loss_fn(y_batch, a_logits)
-            total_loss = l_final + 0.3 * l_aux
+            total_loss = l_final + loss_weight_3d * l_aux
 
             scaled_loss = loss_scale_head.get_scaled_loss(total_loss)
 
@@ -381,7 +387,7 @@ def main() -> int:
         train_loss /= max(1, num_batches)
         train_acc /= max(1, num_batches)
 
-        val_metrics = evaluate_model(model, val_ds)
+        val_metrics = evaluate_model(model, val_ds, loss_weight_3d=loss_weight_3d)
         val_acc = val_metrics["accuracy"]
         val_loss = val_metrics["loss"]
         current_alpha = val_metrics["alpha"]
@@ -407,7 +413,7 @@ def main() -> int:
 
     print("\n[INFO] Evaluating best model on test set...", flush=True)
     model.load_weights(str(ckpt_dir / "ckpt"))
-    test_metrics = evaluate_model(model, test_ds)
+    test_metrics = evaluate_model(model, test_ds, loss_weight_3d=loss_weight_3d)
     print(f"[TEST METRICS] Test Accuracy: {test_metrics['accuracy']:.4f} | Test Loss: {test_metrics['loss']:.4f}", flush=True)
     print("Classification Report:\n", json.dumps(test_metrics["classification_report"], indent=2))
 
