@@ -30,14 +30,15 @@ model:
   alpha_max: 0.2
 
 training:
-  epochs: 60
-  patience: 15
+  epochs: 100
+  patience: 25
   use_sam: true
-  sam_rho: 0.02
+  sam_rho: 0.03
   loss_weight_3d: 0.1
-  label_smoothing: 0.0
+  label_smoothing: 0.10
+  top_k_checkpoints: 5
   optimizer: "adamw"
-  weight_decay: 0.01
+  weight_decay: 0.035
   grad_clip_norm: 1.0
   dry_run_batches: 3
   monitor: "val_accuracy"
@@ -47,12 +48,35 @@ training:
     phase1_end_epoch: 5
     phase2_end_epoch: 20
   learning_rates:
-    head: 0.0001
-    alpha_raw: 0.0001
-    rgb_stage4: 0.00001
-    geometry_stage4: 0.00001
-    rgb_stage3: 0.000005
-    geometry_stage3: 0.000005
+    head: 0.0003
+    alpha_raw: 0.0003
+    fusion: 0.0003
+    attention: 0.0003
+    aux_head: 0.0003
+    rgb_stage4: 0.00003
+    geometry_stage4: 0.00003
+    rgb_stage3: 0.00003
+    geometry_stage3: 0.00003
+
+tta:
+  enabled: true
+  hflip: true
+  original_weight: 0.5
+  flip_weight: 0.5
+
+augmentation:
+  horizontal_flip: true
+  rotation_degrees: 15.0
+  brightness_delta: 0.15
+  contrast_lower: 0.85
+  contrast_upper: 1.15
+  gamma_prob: 0.5
+  gamma_min: 0.5
+  gamma_max: 2.0
+  random_erasing_prob: 0.40
+  random_erasing_area_min: 0.02
+  random_erasing_area_max: 0.15
+  random_erasing_value: "random"
 
 paths:
   output_dir: "outputs/dual_convnext_smirk_guided_attention_ms1m_fer_scratch"

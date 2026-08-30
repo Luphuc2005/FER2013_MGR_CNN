@@ -93,10 +93,10 @@ def preprocess_batch_images(images: tf.Tensor, target_size: int = 112) -> tf.Ten
     images = tf.image.resize(images, [target_size, target_size], method="bilinear")
     if images.shape[-1] == 1:
         images = tf.image.grayscale_to_rgb(images)
-    return images / 255.0
+    return images
 
 
-def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, is_training: bool = True) -> tf.data.Dataset:
+def create_dataset(records, cache_dict: Dict, cfg: Dict, batch_size: int, is_training: bool = False, use_aug: bool = True) -> tf.data.Dataset:
     images = records.images
     if images.ndim == 3:
         images = np.expand_dims(images, axis=-1)
@@ -129,11 +129,23 @@ def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, 
         ds = ds.shuffle(buffer_size=min(num_samples, 2048), reshuffle_each_iteration=True)
     ds = ds.batch(batch_size, drop_remainder=is_training)
 
+    aug_cfg = cfg.get("augmentation", {})
+
     def batch_mapper(item, label):
-        return {
-            "image": preprocess_batch_images(item["image"], target_size=112),
-            "geometry_maps": item["geometry_maps"],
-        }, label
+        img = preprocess_batch_images(item["image"], target_size=112)
+        geom = item["geometry_maps"]
+
+        if is_training and use_aug:
+            # 1. Apply baseline augmentations to RGB image & geometry map
+            img, geom = _augment_pair(img, geom, None, aug_cfg, split="train")
+            # 2. Normalize RGB image
+            img = (img / 255.0 - tf.constant([0.485, 0.456, 0.406])) / tf.constant([0.229, 0.224, 0.225])
+            # 3. Apply baseline Random Erasing
+            img = _random_erasing(img, aug_cfg)
+        else:
+            img = (img / 255.0 - tf.constant([0.485, 0.456, 0.406])) / tf.constant([0.229, 0.224, 0.225])
+
+        return {"image": img, "geometry_maps": geom}, label
 
     ds = ds.map(batch_mapper, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
     options = tf.data.Options()
@@ -189,8 +201,8 @@ def trainable_group_vars_for_phase(model, phase: int) -> Dict[str, List[tf.Varia
     if phase >= 2:
         groups["rgb_stage4"] = stage_vars(model.rgb_baseline, 4)
     if phase >= 3:
-        groups["rgb_stage3"] = stage_vars(model.rgb_baseline, 3)
-        groups["geometry_stage3"] = stage_vars(model.geometry_baseline, 3)
+        groups["rgb_stage3"] = stage_vars(model.rgb_baseline, 3) + stage_vars(model.rgb_baseline, 2) + stage_vars(model.rgb_baseline, 1) + stem_vars(model.rgb_baseline)
+        groups["geometry_stage3"] = stage_vars(model.geometry_baseline, 3) + stage_vars(model.geometry_baseline, 2)
     return {name: unique_vars(vars_) for name, vars_ in groups.items()}
 
 
@@ -216,9 +228,7 @@ def set_trainable_flags(model, phase: int) -> None:
         model.rgb_baseline.backbone.downsample_layers[2].trainable = True
 
     if phase >= 3:
-        for block in model.rgb_baseline.backbone.stages[2]:
-            block.trainable = True
-        model.rgb_baseline.backbone.downsample_layers[1].trainable = True
+        model.rgb_baseline.trainable = True
         for block in model.geometry_baseline.backbone.stages[2]:
             block.trainable = True
         model.geometry_baseline.backbone.downsample_layers[1].trainable = True
@@ -478,7 +488,7 @@ def distributed_train_step(strategy, step_fn, dist_batch, phase: int):
     return reduced
 
 
-def evaluate_model(model, dataset: tf.data.Dataset, loss_weight_3d: float) -> Dict:
+def evaluate_model(model, dataset: tf.data.Dataset, loss_weight_3d: float, use_tta: bool = True) -> Dict:
     all_logits = []
     all_aux_logits = []
     all_labels = []
@@ -490,9 +500,21 @@ def evaluate_model(model, dataset: tf.data.Dataset, loss_weight_3d: float) -> Di
     loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
     for inputs, y_batch in dataset:
-        outputs = model(inputs, training=False)
-        logits = outputs["final_logits"]
-        aux_logits = outputs["aux_3d_logits"]
+        outputs_orig = model(inputs, training=False)
+        if use_tta:
+            flipped_inputs = {
+                "image": tf.image.flip_left_right(inputs["image"]),
+                "geometry_maps": tf.image.flip_left_right(inputs["geometry_maps"]),
+            }
+            outputs_flip = model(flipped_inputs, training=False)
+            logits = 0.5 * (outputs_orig["final_logits"] + outputs_flip["final_logits"])
+            aux_logits = 0.5 * (outputs_orig["aux_3d_logits"] + outputs_flip["aux_3d_logits"])
+            outputs = outputs_orig
+        else:
+            outputs = outputs_orig
+            logits = outputs["final_logits"]
+            aux_logits = outputs["aux_3d_logits"]
+
         l_final = loss_fn(y_batch, logits)
         l_aux = loss_fn(y_batch, aux_logits)
         batch_loss = l_final + loss_weight_3d * l_aux
@@ -565,6 +587,7 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
     build_all_optimizer_slots(model, optimizers)
     loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
     loss_weight_3d = float(cfg["training"].get("loss_weight_3d", 0.1))
+    label_smoothing = float(cfg["training"].get("label_smoothing", 0.0))
     grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 1.0))
     if grad_clip_norm <= 0.0:
         raise RuntimeError("grad_clip_norm must be > 0 and is required for this experiment.")
@@ -581,6 +604,7 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
         int(cfg["data"]["batch_size"]),
         use_sam=use_sam,
         sam_rho=sam_rho,
+        label_smoothing=label_smoothing,
     )
 
     rgb_backbone_vars = stem_vars(model.rgb_baseline) + stage_vars(model.rgb_baseline, 1) + stage_vars(model.rgb_baseline, 2) + stage_vars(model.rgb_baseline, 3) + stage_vars(model.rgb_baseline, 4)
@@ -591,38 +615,24 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
 
     dry_batches = int(cfg["training"].get("dry_run_batches", 3))
     train_iter = strategy.experimental_distribute_dataset(train_ds)
-    for batch_idx, batch in enumerate(train_iter, start=1):
-        if batch_idx > dry_batches:
+    for idx, batch in enumerate(train_iter):
+        if idx >= dry_batches:
             break
         if strategy.num_replicas_in_sync > 1:
-            metrics = distributed_train_step(strategy, step_fn, batch, phase=1)
+            step_metrics = distributed_train_step(strategy, step_fn, batch, phase=1)
         else:
             inputs, labels = batch
-            metrics = step_fn(inputs, labels, phase=1)
-        print(
-            f"DRY_RUN_BATCH {batch_idx} "
-            f"loss={float(metrics['loss'].numpy()):.6f} "
-            f"acc={float(metrics['accuracy'].numpy()):.6f} "
-            f"aux_acc={float(metrics['aux_accuracy'].numpy()):.6f} "
-            f"grad_norm_before_clip={float(metrics['grad_norm'].numpy()):.6f} "
-            f"alpha_raw={float(metrics['alpha_raw'].numpy()):.8f} "
-            f"effective_alpha={float(metrics['effective_alpha'].numpy()):.8f} "
-            f"mean_abs_channel_gate={float(metrics['mean_abs_channel_gate'].numpy()):.8f} "
-            f"modulation_min={float(metrics['modulation_factor_min'].numpy()):.8f} "
-            f"modulation_max={float(metrics['modulation_factor_max'].numpy()):.8f}",
-            flush=True,
-        )
+            step_metrics = step_fn(inputs, labels, phase=1)
+        print(f"DRY_RUN_BATCH idx={idx+1} loss={step_metrics['loss']:.6f} acc={step_metrics['accuracy']:.6f}", flush=True)
 
-    rgb_diff = max_abs_diff(rgb_before, rgb_backbone_vars)
-    geom_frozen_diff = max_abs_diff(geom_frozen_before, geom_frozen_vars)
-    fer_head_diff = max_abs_diff(fer_head_before, groups["fer_head"])
-    print(f"DRY_RUN_RGB_BACKBONE_MAX_DIFF phase1_expected_0={rgb_diff:.8e}", flush=True)
-    print(f"DRY_RUN_GEOMETRY_STEM_STAGE1_2_3_MAX_DIFF phase1_expected_0={geom_frozen_diff:.8e}", flush=True)
-    print(f"DRY_RUN_FER_HEAD_MAX_DIFF phase1_expected_trainable={fer_head_diff:.8e}", flush=True)
-    if rgb_diff != 0.0:
-        raise RuntimeError(f"Phase 1 RGB backbone changed during dry-run: max_diff={rgb_diff:.8e}")
-    if geom_frozen_diff != 0.0:
-        raise RuntimeError(f"Phase 1 frozen geometry variables changed during dry-run: max_diff={geom_frozen_diff:.8e}")
+    diff_rgb = max_abs_diff(rgb_before, rgb_backbone_vars)
+    diff_geom = max_abs_diff(geom_frozen_before, geom_frozen_vars)
+    diff_head = max_abs_diff(fer_head_before, groups["fer_head"])
+    print(f"DRY_RUN_VAR_DIFFS rgb_frozen_max_diff={diff_rgb:.8e} geom_frozen_max_diff={diff_geom:.8e} fer_head_max_diff={diff_head:.8e}", flush=True)
+    if diff_rgb > 0.0 or diff_geom > 0.0:
+        raise RuntimeError("Frozen backbone variables modified during Phase 1 dry run.")
+    if diff_head == 0.0:
+        raise RuntimeError("Trainable FER head variables were not updated during Phase 1 dry run.")
     print("DRY_RUN_PHASE1_CONTRACT_OK", flush=True)
 
 
@@ -663,8 +673,6 @@ def main() -> int:
 
     tf.keras.mixed_precision.set_global_policy("mixed_float16")
     print(f"MIXED_PRECISION_POLICY={tf.keras.mixed_precision.global_policy().name}", flush=True)
-    print(f"TENSORFLOW_VERSION={tf.__version__}", flush=True)
-    print(f"VISIBLE_GPU_COUNT={len(gpus)}", flush=True)
 
     if args.multi_gpu:
         if len(gpus) < 2:
@@ -679,10 +687,13 @@ def main() -> int:
     ckpt_dir = output_dir / "checkpoints" / "best"
     ckpt_best_acc_dir = output_dir / "checkpoints" / "best_acc"
     ckpt_best_loss_dir = output_dir / "checkpoints" / "best_loss"
+    ckpt_topk_dir = output_dir / "checkpoints" / "top_k"
+
     output_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_best_acc_dir.mkdir(parents=True, exist_ok=True)
     ckpt_best_loss_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_topk_dir.mkdir(parents=True, exist_ok=True)
 
     data_path = resolve_path(cfg["data"]["data_path"])
     cache_dir = resolve_path(cfg["geometry_cache"]["feature_dir"])
@@ -694,12 +705,12 @@ def main() -> int:
     val_records = collect_split_records(data_path, "val", predecode_pixels=True)
     train_cache = load_geometry_cache(cache_dir, pattern, "train")
     val_cache = load_geometry_cache(cache_dir, pattern, "val")
-    train_ds = create_dataset(train_records, train_cache, batch_size, is_training=True)
-    val_ds = create_dataset(val_records, val_cache, batch_size, is_training=False)
+    train_ds = create_dataset(train_records, train_cache, cfg, batch_size, is_training=True)
+    val_ds = create_dataset(val_records, val_cache, cfg, batch_size, is_training=False)
 
     with strategy.scope():
+        print("[INFO] Instantiating DualConvNeXtSMIRKGuidedAttentionMS1MFERScratch architecture...", flush=True)
         model = DualConvNeXtSMIRKGuidedAttentionMS1MFERScratch(cfg)
-        # Build the random FER classifier first, then load only ConvNeXt backbones.
         model.rgb_baseline._build_variables()
         model.geometry_baseline._build_variables()
         model.load_ms1m_pretrained_weights(cfg)
@@ -707,7 +718,6 @@ def main() -> int:
         first_inputs, _ = next(iter(train_ds))
         _ = model(first_inputs, training=False)
         run_baseline_equivalence_smoke(model, first_inputs)
-        print_phase_params(model, cfg)
 
         initial_weights = model.get_weights()
         if not args.skip_dry_run:
@@ -722,7 +732,9 @@ def main() -> int:
         epochs = int(cfg["training"]["epochs"])
         patience = int(cfg["training"]["patience"])
         loss_weight_3d = float(cfg["training"].get("loss_weight_3d", 0.1))
+        label_smoothing = float(cfg["training"].get("label_smoothing", 0.10))
         grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 1.0))
+        top_k_num = int(cfg["training"].get("top_k_checkpoints", 5))
         loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
         optimizers = build_optimizers(cfg)
 
@@ -740,6 +752,7 @@ def main() -> int:
             int(cfg["data"]["batch_size"]),
             use_sam=use_sam,
             sam_rho=sam_rho,
+            label_smoothing=label_smoothing,
         )
     dist_train_ds = strategy.experimental_distribute_dataset(train_ds)
 
@@ -747,9 +760,10 @@ def main() -> int:
     best_val_loss = float("inf")
     patience_counter = 0
     current_phase = None
+    top_k_list = []
 
     print("\n" + "=" * 72, flush=True)
-    print("STARTING REAL TRAINING: DUAL CONVNEXT MS1M RGB + SMIRK GEOMETRY", flush=True)
+    print(f"STARTING REAL TRAINING: DUAL CONVNEXT MS1M RGB + SMIRK GEOMETRY ({epochs} Epochs)", flush=True)
     print("=" * 72, flush=True)
 
     for epoch in range(1, epochs + 1):
@@ -795,8 +809,8 @@ def main() -> int:
                     flush=True,
                 )
 
-        print(f"[INFO] Epoch {epoch}: starting validation", flush=True)
-        val_metrics = evaluate_model(model, val_ds, loss_weight_3d)
+        print(f"[INFO] Epoch {epoch}: starting validation with TTA...", flush=True)
+        val_metrics = evaluate_model(model, val_ds, loss_weight_3d, use_tta=True)
         elapsed = time.time() - start
         train_loss = float(np.mean(losses)) if losses else 0.0
         train_acc = float(np.mean(accs)) if accs else 0.0
@@ -843,6 +857,33 @@ def main() -> int:
                 json.dump(val_metrics, f, indent=2)
             print(f"SAVED_BEST_LOSS_CHECKPOINT val_loss={best_val_loss:.6f}", flush=True)
 
+        # Top-K Checkpoint Tracking
+        if len(top_k_list) < top_k_num or cur_val_acc > min(item["acc"] for item in top_k_list):
+            ckpt_prefix = str(ckpt_topk_dir / f"ckpt_epoch_{epoch:03d}_acc_{cur_val_acc:.4f}")
+            model.save_weights(ckpt_prefix)
+            top_k_list.append({
+                "acc": cur_val_acc,
+                "epoch": epoch,
+                "ckpt_prefix": ckpt_prefix,
+            })
+            top_k_list.sort(key=lambda x: x["acc"], reverse=True)
+
+            while len(top_k_list) > top_k_num:
+                removed = top_k_list.pop()
+                for p in ckpt_topk_dir.glob(Path(removed["ckpt_prefix"]).name + "*"):
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+
+            top_k_summary = [
+                {"rank": i + 1, "epoch": item["epoch"], "val_acc": item["acc"], "ckpt_prefix": item["ckpt_prefix"]}
+                for i, item in enumerate(top_k_list)
+            ]
+            with (output_dir / "top_k_checkpoints.json").open("w", encoding="utf-8") as f:
+                json.dump(top_k_summary, f, indent=2)
+            print(f"[TOP_K_CHECKPOINT] Epoch {epoch:02d} saved to Top-{top_k_num} with val_acc={cur_val_acc:.6f}", flush=True)
+
         if improved_acc or improved_loss:
             patience_counter = 0
         else:
@@ -850,6 +891,72 @@ def main() -> int:
             if patience_counter >= patience:
                 print(f"EARLY_STOPPING epoch={epoch} patience={patience}", flush=True)
                 break
+
+    # Top-K Softmax Ensemble Evaluation
+    if top_k_list:
+        print("\n" + "=" * 76, flush=True)
+        print(f" RUNNING TOP-{len(top_k_list)} ENSEMBLE EVALUATION ON VALIDATION SET", flush=True)
+        print("=" * 76, flush=True)
+        all_models_probs = []
+        labels_arr = None
+
+        for idx, item in enumerate(top_k_list, start=1):
+            print(f"[ENSEMBLE] Loading Checkpoint #{idx} (Epoch {item['epoch']} Acc: {item['acc']*100:.2f}%)", flush=True)
+            model.load_weights(item["ckpt_prefix"]).expect_partial()
+
+            logits_list = []
+            labels_list = []
+            for inputs, y_batch in val_ds:
+                outputs_orig = model(inputs, training=False)
+                flipped_inputs = {
+                    "image": tf.image.flip_left_right(inputs["image"]),
+                    "geometry_maps": tf.image.flip_left_right(inputs["geometry_maps"]),
+                }
+                outputs_flip = model(flipped_inputs, training=False)
+                avg_logits = 0.5 * (outputs_orig["final_logits"] + outputs_flip["final_logits"])
+                logits_list.append(avg_logits.numpy())
+                labels_list.append(y_batch.numpy())
+
+            logits_arr = np.concatenate(logits_list, axis=0)
+            if labels_arr is None:
+                labels_arr = np.concatenate(labels_list, axis=0)
+
+            exp_logits = np.exp(logits_arr - np.max(logits_arr, axis=1, keepdims=True))
+            probs = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+            all_models_probs.append(probs)
+
+        ensemble_probs = np.mean(all_models_probs, axis=0)
+        ensemble_preds = np.argmax(ensemble_probs, axis=1)
+        ensemble_acc = float(np.mean(ensemble_preds == labels_arr))
+
+        ensemble_report = classification_report(
+            labels_arr,
+            ensemble_preds,
+            labels=list(range(len(EMOTION_NAMES))),
+            target_names=EMOTION_NAMES,
+            output_dict=True,
+            zero_division=0,
+        )
+        ensemble_macro_f1 = float(ensemble_report["macro avg"]["f1-score"])
+
+        print(f"\n" + "*" * 76, flush=True)
+        print(f" 🔥 TOP-{len(top_k_list)} ENSEMBLE EVALUATION RESULTS 🔥", flush=True)
+        print(f"   Single Best Val Acc: {best_val_acc * 100:.2f}%", flush=True)
+        print(f"   ENSEMBLE VAL ACC:    {ensemble_acc * 100:.2f}%", flush=True)
+        print(f"   ENSEMBLE MACRO F1:   {ensemble_macro_f1:.4f}", flush=True)
+        print("*" * 76 + "\n", flush=True)
+
+        ensemble_res = {
+            "ensemble_accuracy": ensemble_acc,
+            "ensemble_macro_f1": ensemble_macro_f1,
+            "single_best_val_acc": best_val_acc,
+            "num_checkpoints": len(top_k_list),
+            "top_k_checkpoints": top_k_list,
+            "classification_report": ensemble_report,
+            "confusion_matrix": confusion_matrix(labels_arr, ensemble_preds, labels=list(range(7))).tolist(),
+        }
+        with (output_dir / "top_k_ensemble_metrics.json").open("w", encoding="utf-8") as f:
+            json.dump(ensemble_res, f, indent=2)
 
     print("TRAINING_COMPLETE", flush=True)
     return 0

@@ -46,7 +46,11 @@ export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVI
 "$FER_PY" -u scripts/train_dual_convnext_smirk_guided_attention_ms1m_fer_scratch.py \
     --config "$CONFIG"
 
+echo "[INFO] Running Top-5 Checkpoint Softmax Ensemble Evaluation..."
+"$FER_PY" -u scripts/evaluate_top5_ensemble_dual_convnext.py \
+    --config "$CONFIG"
+
 echo "============================================================"
-echo " Training completed"
+echo " Training & Top-5 Ensemble evaluation completed"
 echo " End: $(date)"
 echo "============================================================"
