@@ -16,8 +16,8 @@ import tensorflow as tf
 
 from datasets.fer2013 import collect_split_records
 from models.convnext_base_face_baseline import ConvNeXtBaseFaceFERBaseline
-from models.stage1_rgb_smirk_3d_cnn_late_fusion import (
-    Stage1RGBSMIRK3DCNNLateFusionFER,
+from models.stage1_rgb_smirk_3d_cnn_late_fusion import Stage1RGBSMIRK3DCNNLateFusionFER
+from scripts.train_stage1_rgb_smirk_3d_cnn_late_fusion import (
     load_yaml,
     resolve_path,
     cache_path_for,
