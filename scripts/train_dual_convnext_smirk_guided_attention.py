@@ -73,27 +73,18 @@ def load_geometry_cache(cache_dir: Path, pattern: str, split: str) -> Dict[str, 
     }
 
 
-import cv2
-
-
-def preprocess_fer_image(raw_img: np.ndarray, target_size: int = 112) -> np.ndarray:
-    if raw_img.ndim == 2:
-        img_3ch = cv2.cvtColor(raw_img, cv2.COLOR_GRAY2RGB)
-    elif raw_img.ndim == 3 and raw_img.shape[-1] == 1:
-        img_3ch = cv2.cvtColor(raw_img.squeeze(-1), cv2.COLOR_GRAY2RGB)
-    elif raw_img.ndim == 3 and raw_img.shape[-1] == 3:
-        img_3ch = raw_img
-    else:
-        raise ValueError(f"Unexpected image shape: {raw_img.shape}")
-
-    if img_3ch.shape[0] != target_size or img_3ch.shape[1] != target_size:
-        img_3ch = cv2.resize(img_3ch, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
-
-    return img_3ch.astype(np.float32) / 255.0
+def preprocess_batch_images(images: tf.Tensor, target_size: int = 112) -> tf.Tensor:
+    images = tf.cast(images, tf.float32)
+    images = tf.image.resize(images, [target_size, target_size], method="bilinear")
+    if images.shape[-1] == 1:
+        images = tf.image.grayscale_to_rgb(images)
+    return images / 255.0
 
 
 def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, is_training: bool = True) -> tf.data.Dataset:
     images = records.images
+    if images.ndim == 3:
+        images = np.expand_dims(images, axis=-1)
     labels = records.labels
     geom_maps = cache_dict["geometry_maps"]
 
@@ -107,15 +98,16 @@ def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, 
         if is_training:
             np.random.shuffle(indices)
         for idx in indices:
-            img = preprocess_fer_image(images[idx], target_size=112)
+            img = images[idx]
             g_map = geom_maps[idx]
             lbl = labels[idx]
             yield {"image": img, "geometry_maps": g_map}, lbl
 
+    img_shape = images.shape[1:]
     geom_shape = geom_maps.shape[1:]
     output_signature = (
         {
-            "image": tf.TensorSpec(shape=(112, 112, 3), dtype=tf.float32),
+            "image": tf.TensorSpec(shape=img_shape, dtype=tf.uint8),
             "geometry_maps": tf.TensorSpec(shape=geom_shape, dtype=tf.float16),
         },
         tf.TensorSpec(shape=(), dtype=tf.int64),
@@ -124,7 +116,17 @@ def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, 
     dataset = tf.data.Dataset.from_generator(generator, output_signature=output_signature)
     if is_training:
         dataset = dataset.shuffle(buffer_size=min(num_samples, 2048), reshuffle_each_iteration=True)
-    dataset = dataset.batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
+    dataset = dataset.batch(batch_size, drop_remainder=False)
+
+    def batch_mapper(item, lbl):
+        processed_item = {
+            "image": preprocess_batch_images(item["image"], target_size=112),
+            "geometry_maps": item["geometry_maps"],
+        }
+        return processed_item, lbl
+
+    dataset = dataset.map(batch_mapper, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
     return dataset
 
 
