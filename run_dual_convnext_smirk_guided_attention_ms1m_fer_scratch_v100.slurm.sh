@@ -3,7 +3,7 @@
 #SBATCH --partition=gpu-queue
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
-#SBATCH --gres=gpu:v100:1
+#SBATCH --gres=gpu:v100:2
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_DUAL_MS1M_3D_GUIDED_%j.out
@@ -44,7 +44,8 @@ export NVIDIA_LIB=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/lib/python3.9
 export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVIDIA_LIB/cudnn/lib:$NVIDIA_LIB/cufft/lib:$NVIDIA_LIB/curand/lib:$NVIDIA_LIB/cusolver/lib:$NVIDIA_LIB/cusparse/lib:${LD_LIBRARY_PATH:-}"
 
 "$FER_PY" -u scripts/train_dual_convnext_smirk_guided_attention_ms1m_fer_scratch.py \
-    --config "$CONFIG"
+    --config "$CONFIG" \
+    --multi-gpu
 
 echo "============================================================"
 echo " Training completed"

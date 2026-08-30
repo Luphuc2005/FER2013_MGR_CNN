@@ -39,6 +39,7 @@ EMOTION_NAMES = ["Angry", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutra
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train dual ConvNeXt MS1M + SMIRK guided attention without FER ckpt restore.")
     parser.add_argument("--config", type=str, default="config_dual_convnext_smirk_guided_attention_ms1m_fer_scratch.yaml")
+    parser.add_argument("--multi-gpu", action="store_true", help="Use MirroredStrategy across visible GPUs.")
     parser.add_argument("--smoke-test-only", action="store_true", help="Run smoke/dry-run contract checks and exit before training.")
     parser.add_argument("--skip-dry-run", action="store_true", help="Skip dry-run checks. Intended only for emergency debugging.")
     return parser.parse_args()
@@ -126,7 +127,7 @@ def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, 
     ds = tf.data.Dataset.from_generator(generator, output_signature=output_signature)
     if is_training:
         ds = ds.shuffle(buffer_size=min(num_samples, 2048), reshuffle_each_iteration=True)
-    ds = ds.batch(batch_size, drop_remainder=False)
+    ds = ds.batch(batch_size, drop_remainder=is_training)
 
     def batch_mapper(item, label):
         return {
@@ -331,59 +332,52 @@ def group_learning_rates(cfg: Dict) -> Dict[str, float]:
     }
 
 
-def apply_group_gradients(tape, scaled_loss, group_name: str, variables: List[tf.Variable], optimizer, clip_norm: float) -> tf.Tensor:
-    if not variables:
-        return tf.constant(0.0, dtype=tf.float32)
-    scaled_grads = tape.gradient(scaled_loss, variables)
-    grads = optimizer.get_unscaled_gradients(scaled_grads)
-    valid = [(g, v) for g, v in zip(grads, variables) if g is not None]
-    if not valid:
-        print(f"[WARNING] No gradients for group={group_name}", flush=True)
-        return tf.constant(0.0, dtype=tf.float32)
-    valid_grads, valid_vars = zip(*valid)
-    grad_norm = tf.linalg.global_norm(valid_grads)
-    clipped_grads, _ = tf.clip_by_global_norm(valid_grads, clip_norm)
-    optimizer.apply_gradients(zip(clipped_grads, valid_vars))
-    return tf.cast(grad_norm, tf.float32)
-
-
 def train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d: float, grad_clip_norm: float):
-    with tf.GradientTape(persistent=True) as tape:
+    active_vars = unique_vars([var for vars_ in groups.values() for var in vars_])
+    if not active_vars:
+        raise RuntimeError("No active variables for train_step.")
+    loss_scale_optimizer = next(opt for name, opt in optimizers.items() if groups.get(name))
+
+    with tf.GradientTape() as tape:
         outputs = model(inputs, training=True)
         final_logits = outputs["final_logits"]
         aux_logits = outputs["aux_3d_logits"]
         l_final = loss_fn(labels, final_logits)
         l_aux = loss_fn(labels, aux_logits)
         total_loss = l_final + loss_weight_3d * l_aux
-        scaled_losses = {
-            name: optimizers[name].get_scaled_loss(total_loss)
-            for name in groups
-            if groups[name]
-        }
+        scaled_loss = loss_scale_optimizer.get_scaled_loss(total_loss)
+
+    scaled_grads = tape.gradient(scaled_loss, active_vars)
+    grads = loss_scale_optimizer.get_unscaled_gradients(scaled_grads)
+    valid = [(g, v) for g, v in zip(grads, active_vars) if g is not None]
+    if not valid:
+        raise RuntimeError("No valid gradients produced for active variables.")
+
+    valid_grads, valid_vars = zip(*valid)
+    grad_norm_before_clip = tf.linalg.global_norm(valid_grads)
+    clipped_grads, _ = tf.clip_by_global_norm(valid_grads, grad_clip_norm)
+    clipped_by_var = {id(var): grad for grad, var in zip(clipped_grads, valid_vars)}
+    raw_by_var = {id(var): grad for grad, var in zip(valid_grads, valid_vars)}
 
     grad_norms = {}
     for name, variables in groups.items():
-        if variables:
-            grad_norms[name] = apply_group_gradients(
-                tape,
-                scaled_losses[name],
-                name,
-                variables,
-                optimizers[name],
-                grad_clip_norm,
-            )
-    del tape
+        group_pairs = [(clipped_by_var[id(var)], var) for var in variables if id(var) in clipped_by_var]
+        if not group_pairs:
+            grad_norms[name] = tf.constant(0.0, dtype=tf.float32)
+            continue
+        group_raw_grads = [raw_by_var[id(var)] for var in variables if id(var) in raw_by_var]
+        grad_norms[name] = tf.cast(tf.linalg.global_norm(group_raw_grads), tf.float32)
+        optimizers[name].apply_gradients(group_pairs)
 
     preds = tf.argmax(final_logits, axis=1, output_type=labels.dtype)
     aux_preds = tf.argmax(aux_logits, axis=1, output_type=labels.dtype)
     acc = tf.reduce_mean(tf.cast(tf.equal(preds, labels), tf.float32))
     aux_acc = tf.reduce_mean(tf.cast(tf.equal(aux_preds, labels), tf.float32))
-    global_norm = tf.linalg.global_norm(list(grad_norms.values())) if grad_norms else tf.constant(0.0, dtype=tf.float32)
     return {
         "loss": total_loss,
         "accuracy": acc,
         "aux_accuracy": aux_acc,
-        "grad_norm": global_norm,
+        "grad_norm": tf.cast(grad_norm_before_clip, tf.float32),
         "alpha_raw": tf.cast(outputs["alpha_raw"], tf.float32),
         "effective_alpha": tf.cast(outputs["effective_alpha"], tf.float32),
         "mean_abs_channel_gate": tf.cast(outputs["mean_abs_channel_gate"], tf.float32),
@@ -391,6 +385,23 @@ def train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3
         "modulation_factor_max": tf.cast(outputs["modulation_factor_max"], tf.float32),
         "group_grad_norms": grad_norms,
     }
+
+
+def distributed_train_step(strategy, model, optimizers, groups, dist_batch, loss_fn, loss_weight_3d: float, grad_clip_norm: float):
+    def replica_step(inputs, labels):
+        return train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm)
+
+    per_replica = strategy.run(replica_step, args=dist_batch)
+    reduced = {}
+    for key, value in per_replica.items():
+        if key == "group_grad_norms":
+            reduced[key] = {
+                name: strategy.reduce(tf.distribute.ReduceOp.MEAN, group_value, axis=None)
+                for name, group_value in value.items()
+            }
+        else:
+            reduced[key] = strategy.reduce(tf.distribute.ReduceOp.MEAN, value, axis=None)
+    return reduced
 
 
 def evaluate_model(model, dataset: tf.data.Dataset, loss_weight_3d: float) -> Dict:
@@ -469,7 +480,7 @@ def run_baseline_equivalence_smoke(model, inputs) -> None:
     print("BASELINE_EQUIVALENCE_SMOKE_OK tolerance=1e-7", flush=True)
 
 
-def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset) -> None:
+def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
     print("\n" + "=" * 72, flush=True)
     print("DRY_RUN_PHASE1_CONTRACT", flush=True)
     print("=" * 72, flush=True)
@@ -491,8 +502,15 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset) -> None:
     fer_head_before = [v.numpy().copy() for v in groups["fer_head"]]
 
     dry_batches = int(cfg["training"].get("dry_run_batches", 3))
-    for batch_idx, (inputs, labels) in enumerate(train_ds.take(dry_batches), start=1):
-        metrics = train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm)
+    train_iter = strategy.experimental_distribute_dataset(train_ds)
+    for batch_idx, batch in enumerate(train_iter, start=1):
+        if batch_idx > dry_batches:
+            break
+        if strategy.num_replicas_in_sync > 1:
+            metrics = distributed_train_step(strategy, model, optimizers, groups, batch, loss_fn, loss_weight_3d, grad_clip_norm)
+        else:
+            inputs, labels = batch
+            metrics = train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm)
         print(
             f"DRY_RUN_BATCH {batch_idx} "
             f"loss={float(metrics['loss'].numpy()):.6f} "
@@ -546,6 +564,16 @@ def main() -> int:
     tf.keras.mixed_precision.set_global_policy("mixed_float16")
     print(f"MIXED_PRECISION_POLICY={tf.keras.mixed_precision.global_policy().name}", flush=True)
     print(f"TENSORFLOW_VERSION={tf.__version__}", flush=True)
+    print(f"VISIBLE_GPU_COUNT={len(gpus)}", flush=True)
+
+    if args.multi_gpu:
+        if len(gpus) < 2:
+            raise RuntimeError(f"--multi-gpu requested but TensorFlow sees only {len(gpus)} GPU(s).")
+        strategy = tf.distribute.MirroredStrategy(devices=[f"/GPU:{idx}" for idx in range(len(gpus))])
+        print(f"MIRRORED_STRATEGY_OK replicas={strategy.num_replicas_in_sync}", flush=True)
+    else:
+        strategy = tf.distribute.get_strategy()
+        print(f"DEFAULT_STRATEGY replicas={strategy.num_replicas_in_sync}", flush=True)
 
     output_dir = resolve_path(cfg["paths"]["output_dir"])
     ckpt_dir = output_dir / "checkpoints" / "best"
@@ -565,33 +593,36 @@ def main() -> int:
     train_ds = create_dataset(train_records, train_cache, batch_size, is_training=True)
     val_ds = create_dataset(val_records, val_cache, batch_size, is_training=False)
 
-    model = DualConvNeXtSMIRKGuidedAttentionMS1MFERScratch(cfg)
-    # Build the random FER classifier first, then load only ConvNeXt backbones.
-    model.rgb_baseline._build_variables()
-    model.geometry_baseline._build_variables()
-    model.load_ms1m_pretrained_weights(cfg)
+    with strategy.scope():
+        model = DualConvNeXtSMIRKGuidedAttentionMS1MFERScratch(cfg)
+        # Build the random FER classifier first, then load only ConvNeXt backbones.
+        model.rgb_baseline._build_variables()
+        model.geometry_baseline._build_variables()
+        model.load_ms1m_pretrained_weights(cfg)
 
-    first_inputs, _ = next(iter(train_ds))
-    _ = model(first_inputs, training=False)
-    run_baseline_equivalence_smoke(model, first_inputs)
-    print_phase_params(model, cfg)
+        first_inputs, _ = next(iter(train_ds))
+        _ = model(first_inputs, training=False)
+        run_baseline_equivalence_smoke(model, first_inputs)
+        print_phase_params(model, cfg)
 
-    initial_weights = model.get_weights()
-    if not args.skip_dry_run:
-        run_dry_run(model, cfg, train_ds)
-        model.set_weights(initial_weights)
-        print("DRY_RUN_WEIGHTS_RESTORED_BEFORE_REAL_TRAINING_OK", flush=True)
+        initial_weights = model.get_weights()
+        if not args.skip_dry_run:
+            run_dry_run(model, cfg, train_ds, strategy)
+            model.set_weights(initial_weights)
+            print("DRY_RUN_WEIGHTS_RESTORED_BEFORE_REAL_TRAINING_OK", flush=True)
 
-    if args.smoke_test_only:
-        print("[INFO] --smoke-test-only requested. Exiting before real training.", flush=True)
-        return 0
+        if args.smoke_test_only:
+            print("[INFO] --smoke-test-only requested. Exiting before real training.", flush=True)
+            return 0
 
-    epochs = int(cfg["training"]["epochs"])
-    patience = int(cfg["training"]["patience"])
-    loss_weight_3d = float(cfg["training"].get("loss_weight_3d", 0.1))
-    grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 1.0))
-    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-    optimizers = build_optimizers(cfg)
+        epochs = int(cfg["training"]["epochs"])
+        patience = int(cfg["training"]["patience"])
+        loss_weight_3d = float(cfg["training"].get("loss_weight_3d", 0.1))
+        grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 1.0))
+        loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+        optimizers = build_optimizers(cfg)
+
+    dist_train_ds = strategy.experimental_distribute_dataset(train_ds)
 
     best_monitor = -1.0
     patience_counter = 0
@@ -616,8 +647,12 @@ def main() -> int:
         start = time.time()
         losses, accs, aux_accs, grad_norms = [], [], [], []
         gate_means, mod_mins, mod_maxs = [], [], []
-        for inputs, labels in train_ds:
-            metrics = train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm)
+        for batch in dist_train_ds:
+            if strategy.num_replicas_in_sync > 1:
+                metrics = distributed_train_step(strategy, model, optimizers, groups, batch, loss_fn, loss_weight_3d, grad_clip_norm)
+            else:
+                inputs, labels = batch
+                metrics = train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm)
             losses.append(float(metrics["loss"].numpy()))
             accs.append(float(metrics["accuracy"].numpy()))
             aux_accs.append(float(metrics["aux_accuracy"].numpy()))
