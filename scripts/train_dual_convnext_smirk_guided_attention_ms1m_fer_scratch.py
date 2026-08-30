@@ -79,12 +79,13 @@ def load_geometry_cache(cache_dir: Path, pattern: str, split: str) -> Dict[str, 
     if not npz_path.exists():
         kaggle_input = Path("/kaggle/input")
         if kaggle_input.exists():
-            matches = list(kaggle_input.glob(f"**/{target_name}"))
-            if matches:
-                npz_path = matches[0]
-                print(f"[INFO] Auto-resolved Kaggle geometry cache for {split} -> {npz_path}", flush=True)
+            for root, _, files in os.walk(kaggle_input):
+                if target_name in files:
+                    npz_path = Path(root) / target_name
+                    print(f"[INFO] Auto-resolved Kaggle geometry cache for {split} -> {npz_path}", flush=True)
+                    break
     if not npz_path.exists():
-        raise FileNotFoundError(f"Geometry cache map not found: {npz_path}")
+        raise FileNotFoundError(f"Geometry cache map '{target_name}' not found under {cache_dir} or /kaggle/input")
     data = np.load(npz_path)
     geom_maps = data["geometry_maps"]
     if geom_maps.dtype != np.float16:

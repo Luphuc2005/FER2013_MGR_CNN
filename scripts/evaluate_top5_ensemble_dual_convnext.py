@@ -17,6 +17,7 @@ from typing import Dict, List
 
 import numpy as np
 import tensorflow as tf
+import yaml
 from sklearn.metrics import classification_report, confusion_matrix
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -88,9 +89,17 @@ def evaluate_checkpoint_probs(model, dataset: tf.data.Dataset, use_tta: bool = T
     return probs_arr, labels_arr
 
 
+def load_yaml(path: str) -> Dict:
+    config_path = Path(path)
+    if not config_path.is_absolute():
+        config_path = PROJECT_ROOT / config_path
+    with config_path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
 def main():
     args = parse_args()
-    cfg = load_config(args.config)
+    cfg = load_yaml(args.config)
     output_dir = resolve_path(cfg["paths"]["output_dir"])
 
     def load_geometry_cache(cache_dir: Path, pattern: str, split: str) -> Dict[str, np.ndarray]:
@@ -99,12 +108,13 @@ def main():
         if not npz_path.exists():
             kaggle_input = Path("/kaggle/input")
             if kaggle_input.exists():
-                matches = list(kaggle_input.glob(f"**/{target_name}"))
-                if matches:
-                    npz_path = matches[0]
-                    print(f"[INFO] Auto-resolved Kaggle geometry cache for {split} -> {npz_path}", flush=True)
+                for root, _, files in os.walk(kaggle_input):
+                    if target_name in files:
+                        npz_path = Path(root) / target_name
+                        print(f"[INFO] Auto-resolved Kaggle geometry cache for {split} -> {npz_path}", flush=True)
+                        break
         if not npz_path.exists():
-            raise FileNotFoundError(f"Geometry cache map not found: {npz_path}")
+            raise FileNotFoundError(f"Geometry cache map '{target_name}' not found under {cache_dir} or /kaggle/input")
         return np.load(npz_path)
 
     json_path = Path(args.top_k_json) if args.top_k_json else output_dir / "top_k_checkpoints.json"
