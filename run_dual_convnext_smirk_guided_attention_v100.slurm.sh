@@ -52,7 +52,8 @@ echo " STARTING DUAL CONVNEXT MS1M RGB + SMIRK GEOMETRY TRAINING"
 echo "============================================================"
 
 "$FER_PY" -u scripts/train_dual_convnext_smirk_guided_attention.py \
-    --config "$CONFIG"
+    --config "$CONFIG" \
+    --use-sam --sam-rho 0.02
 
 echo
 echo "============================================================"
