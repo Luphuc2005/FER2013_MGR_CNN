@@ -1018,6 +1018,10 @@ def main() -> int:
                     f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f}",
                     flush=True,
                 )
+        train_time_sec = time.time() - epoch_start_time
+        train_steps = len(total_losses)
+        train_samples_per_sec = float(seen) / max(train_time_sec, 1e-9)
+        train_steps_per_sec = float(train_steps) / max(train_time_sec, 1e-9)
         train_loss = float(np.mean(total_losses)) if total_losses else float("nan")
         train_ce_loss = float(np.mean(ce_losses)) if ce_losses else float("nan")
         train_sem_loss = float(np.mean(sem_losses)) if sem_losses else float("nan")
@@ -1074,6 +1078,9 @@ def main() -> int:
         row = {
             "epoch": epoch + 1,
             "epoch_time_sec": round(epoch_time_sec, 2),
+            "train_time_sec": round(train_time_sec, 2),
+            "train_samples_per_sec": round(train_samples_per_sec, 2),
+            "train_steps_per_sec": round(train_steps_per_sec, 4),
             "train_loss": train_loss,
             "train_ce_loss": train_ce_loss,
             "train_semantic_loss": train_sem_loss,
@@ -1106,6 +1113,8 @@ def main() -> int:
             f"loss={train_loss:.4f} acc={train_acc:.4f} "
             f"val_loss={row['val_loss']:.4f} val_acc={row['val_accuracy']:.4f} "
             f"val_macro_f1={row['val_macro_f1']:.4f} "
+            f"train_time={train_time_sec:.1f}s "
+            f"throughput={train_samples_per_sec:.1f} samples/s "
             f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f} "
             f"patience={patience_counter}/{patience_limit} "
             f"{monitor_name}={monitor:.4f}",
