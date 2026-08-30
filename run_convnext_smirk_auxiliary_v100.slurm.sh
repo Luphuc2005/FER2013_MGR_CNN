@@ -18,14 +18,19 @@ mkdir -p logs
 FER_PY="$ROOT/fer2013_env/bin/python"
 CONFIG="$ROOT/config_convnext_smirk_auxiliary.yaml"
 
+export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 export TF_CPP_MIN_LOG_LEVEL=2
 export PYTHONUNBUFFERED=1
+
+# Configure NVIDIA CUDA/cuDNN libraries for TensorFlow GPU
+export NVIDIA_LIB="$ROOT/fer2013_env/lib/python3.9/site-packages/nvidia"
+export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVIDIA_LIB/cudnn/lib:$NVIDIA_LIB/cufft/lib:$NVIDIA_LIB/curand/lib:$NVIDIA_LIB/cusolver/lib:$NVIDIA_LIB/cusparse/lib:${LD_LIBRARY_PATH:-}"
 
 echo "============================================================"
 echo " FER2013 - CONVNEXT SMIRK 3D AUXILIARY SUPERVISION"
 echo "============================================================"
-echo "Job ID: $SLURM_JOB_ID"
-echo "Node: $SLURMD_NODENAME"
+echo "Job ID: ${SLURM_JOB_ID:-standalone}"
+echo "Node: $(hostname)"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}"
 echo "Start: $(date)"
 echo "============================================================"
