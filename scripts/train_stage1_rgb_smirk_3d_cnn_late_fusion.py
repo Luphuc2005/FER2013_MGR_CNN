@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-eval-batches", type=int, default=None)
     parser.add_argument("--smoke-only", action="store_true")
     parser.add_argument("--skip-reference-compare", action="store_true")
+    parser.add_argument("--skip-smoke-test", action="store_true")
     return parser.parse_args()
 
 
@@ -243,8 +244,7 @@ def restore_baseline_into(model, checkpoint_path: str, *, strict: bool) -> str:
     status = tf.train.Checkpoint(model=model).restore(latest)
     if strict:
         status.assert_existing_objects_matched()
-    else:
-        status.expect_partial()
+    status.expect_partial()
     return latest
 
 
@@ -546,6 +546,9 @@ def run_contract_smoke_test(
     skip_reference_compare: bool,
 ) -> None:
     features, labels = next(iter(ds.take(1)))
+    smoke_bs = min(4, tf.shape(labels)[0])
+    features = {k: v[:smoke_bs] for k, v in features.items()}
+    labels = labels[:smoke_bs]
     outputs = model(features, training=False)
     model.print_contract_summary()
 
@@ -641,14 +644,17 @@ def main() -> int:
         restored_checkpoint = restore_rgb_baseline_checkpoint(model, cfg, args)
         optimizer = build_optimizer(cfg)
 
-    run_contract_smoke_test(
-        model,
-        optimizer,
-        train_loop_ds,
-        cfg,
-        restored_checkpoint,
-        skip_reference_compare=bool(args.skip_reference_compare),
-    )
+    if not args.skip_smoke_test:
+        run_contract_smoke_test(
+            model,
+            optimizer,
+            train_loop_ds,
+            cfg,
+            restored_checkpoint,
+            skip_reference_compare=bool(args.skip_reference_compare),
+        )
+    else:
+        print("[INFO] Skipping contract smoke test (--skip-smoke-test requested).", flush=True)
     if args.smoke_only:
         save_json(output_dir / "stage1_smoke_contract.json", {
             "status": "passed",

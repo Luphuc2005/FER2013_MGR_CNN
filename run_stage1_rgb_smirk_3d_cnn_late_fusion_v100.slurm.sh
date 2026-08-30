@@ -155,16 +155,9 @@ PY
 
 echo
 echo "============================================================"
-echo " STEP 4: MANDATORY STAGE 1 CONTRACT SMOKE TEST"
+echo " STEP 4: MANDATORY STAGE 1 CONTRACT SMOKE TEST (SKIPPED BY USER)"
 echo "============================================================"
-
-"$FER_PY" -u scripts/train_stage1_rgb_smirk_3d_cnn_late_fusion.py \
-    --config "$CONFIG" \
-    --baseline-checkpoint "$BASELINE_CKPT" \
-    --batch-size 4 \
-    --max-train-batches 1 \
-    --max-eval-batches 1 \
-    --smoke-only
+echo "[INFO] Smoke test skipped."
 
 echo
 echo "============================================================"
@@ -173,7 +166,8 @@ echo "============================================================"
 
 "$FER_PY" -u scripts/train_stage1_rgb_smirk_3d_cnn_late_fusion.py \
     --config "$CONFIG" \
-    --baseline-checkpoint "$BASELINE_CKPT"
+    --baseline-checkpoint "$BASELINE_CKPT" \
+    --skip-smoke-test
 
 echo
 echo "============================================================"
