@@ -285,6 +285,9 @@ def _random_erasing(image: tf.Tensor, cfg: Dict) -> tf.Tensor:
 
 def _rotate_tensor(tensor: tf.Tensor, radians: tf.Tensor, interpolation: str = "BILINEAR") -> tf.Tensor:
     shape = tf.shape(tensor)
+    orig_dtype = tensor.dtype
+    if orig_dtype != tf.float32:
+        tensor = tf.cast(tensor, tf.float32)
     height = tf.cast(shape[0], tf.float32)
     width = tf.cast(shape[1], tf.float32)
     center_x = (width - 1.0) / 2.0
@@ -307,9 +310,12 @@ def _rotate_tensor(tensor: tf.Tensor, radians: tf.Tensor, interpolation: str = "
         output_shape=shape[:2],
         interpolation=interpolation,
         fill_mode="CONSTANT",
-        fill_value=tf.constant(0.0, dtype=tensor.dtype),
+        fill_value=tf.constant(0.0, dtype=tf.float32),
     )
-    return tf.squeeze(rotated, axis=0)
+    rotated = tf.squeeze(rotated, axis=0)
+    if rotated.dtype != orig_dtype:
+        rotated = tf.cast(rotated, orig_dtype)
+    return rotated
 
 
 def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
