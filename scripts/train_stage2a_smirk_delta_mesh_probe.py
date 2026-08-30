@@ -184,8 +184,16 @@ def main() -> int:
     print("  --> PASS: Gradient flows exclusively into Graph Encoder + Classifier Head.", flush=True)
     print("=" * 65 + "\n", flush=True)
 
-    # 4. Setup Optimizer & Loss
-    optimizer = tf.keras.optimizers.AdamW(learning_rate=learning_rate, weight_decay=weight_decay)
+    adamw = getattr(tf.keras.optimizers, "AdamW", None)
+    if adamw is None:
+        adamw = getattr(getattr(tf.keras.optimizers, "experimental", object()), "AdamW", None)
+    if adamw is not None:
+        try:
+            optimizer = adamw(learning_rate=learning_rate, weight_decay=weight_decay, jit_compile=False)
+        except TypeError:
+            optimizer = adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+    else:
+        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
     best_val_acc = -1.0
