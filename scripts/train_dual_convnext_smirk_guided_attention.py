@@ -47,6 +47,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default="config_dual_convnext_smirk_guided_attention.yaml")
     parser.add_argument("--skip-smoke-test", action="store_true", help="Skip contract smoke test.")
     parser.add_argument("--smoke-test-only", action="store_true", help="Run contract smoke test and exit.")
+    parser.add_argument("--skip-baseline-checkpoint", action="store_true", help="Skip restoring FER baseline checkpoint ckpt-43.")
+    parser.add_argument("--use-sam", action="store_true", help="Enable Sharpness-Aware Minimization (SAM) optimizer.")
+    parser.add_argument("--sam-rho", type=float, default=0.05, help="SAM neighborhood size rho (default: 0.05).")
+    parser.add_argument("--multi-gpu", action="store_true", help="Enable 2-GPU MirroredStrategy training.")
     return parser.parse_args()
 
 
@@ -321,6 +325,11 @@ def main() -> int:
     loss_scale_head = tf.keras.mixed_precision.LossScaleOptimizer(opt_head)
     loss_scale_geom = tf.keras.mixed_precision.LossScaleOptimizer(opt_geom)
 
+    use_sam = bool(args.use_sam or cfg.get("training", {}).get("use_sam", False))
+    sam_rho = float(args.sam_rho or cfg.get("training", {}).get("sam_rho", 0.05))
+    if use_sam:
+        print(f"[INFO] SAM (Sharpness-Aware Minimization) ENABLED with rho={sam_rho:.4f}", flush=True)
+
     # Variables Grouping
     def get_variables():
         geom_vars = [v for v in model.geometry_baseline.trainable_variables if "fer_classifier" not in v.name]
@@ -336,7 +345,7 @@ def main() -> int:
         return geom_vars, head_vars
 
     @tf.function
-    def train_step(x_batch, y_batch, is_unfrozen: bool = False):
+    def train_step_standard(x_batch, y_batch):
         with tf.GradientTape(persistent=True) as tape:
             outputs = model(x_batch, training=True)
             f_logits = outputs["final_logits"]
@@ -369,6 +378,86 @@ def main() -> int:
         preds = tf.argmax(f_logits, axis=1)
         acc = tf.reduce_mean(tf.cast(tf.equal(preds, y_batch), tf.float32))
         return total_loss, acc, outputs["alpha"]
+
+    @tf.function
+    def train_step_sam(x_batch, y_batch):
+        geom_vars, head_vars = get_variables()
+
+        with tf.GradientTape(persistent=True) as tape:
+            outputs = model(x_batch, training=True)
+            f_logits = outputs["final_logits"]
+            a_logits = outputs["aux_3d_logits"]
+
+            l_final = loss_fn(y_batch, f_logits)
+            l_aux = loss_fn(y_batch, a_logits)
+            total_loss = l_final + loss_weight_3d * l_aux
+
+            scaled_loss_head = loss_scale_head.get_scaled_loss(total_loss)
+            scaled_loss_geom = loss_scale_geom.get_scaled_loss(total_loss)
+
+        scaled_grads_head = tape.gradient(scaled_loss_head, head_vars)
+        grads_head = loss_scale_head.get_unscaled_gradients(scaled_grads_head)
+
+        grads_geom = []
+        if geom_vars:
+            scaled_grads_geom = tape.gradient(scaled_loss_geom, geom_vars)
+            grads_geom = loss_scale_geom.get_unscaled_gradients(scaled_grads_geom)
+
+        del tape
+
+        head_e = []
+        for g, v in zip(grads_head, head_vars):
+            if g is not None:
+                norm = tf.norm(g) + 1e-12
+                e = tf.cast(sam_rho * g / norm, v.dtype)
+                v.assign_add(e)
+                head_e.append((e, v))
+
+        geom_e = []
+        for g, v in zip(grads_geom, geom_vars):
+            if g is not None:
+                norm = tf.norm(g) + 1e-12
+                e = tf.cast(sam_rho * g / norm, v.dtype)
+                v.assign_add(e)
+                geom_e.append((e, v))
+
+        with tf.GradientTape(persistent=True) as tape2:
+            outputs2 = model(x_batch, training=True)
+            f_logits2 = outputs2["final_logits"]
+            a_logits2 = outputs2["aux_3d_logits"]
+
+            l_final2 = loss_fn(y_batch, f_logits2)
+            l_aux2 = loss_fn(y_batch, a_logits2)
+            total_loss2 = l_final2 + loss_weight_3d * l_aux2
+
+            scaled_loss_head2 = loss_scale_head.get_scaled_loss(total_loss2)
+            scaled_loss_geom2 = loss_scale_geom.get_scaled_loss(total_loss2)
+
+        for e, v in head_e:
+            v.assign_sub(e)
+        for e, v in geom_e:
+            v.assign_sub(e)
+
+        scaled_grads_head2 = tape2.gradient(scaled_loss_head2, head_vars)
+        grads_head2 = loss_scale_head.get_unscaled_gradients(scaled_grads_head2)
+        valid_head_grads_and_vars = [(g, v) for g, v in zip(grads_head2, head_vars) if g is not None]
+        if valid_head_grads_and_vars:
+            loss_scale_head.apply_gradients(valid_head_grads_and_vars)
+
+        if geom_vars:
+            scaled_grads_geom2 = tape2.gradient(scaled_loss_geom2, geom_vars)
+            grads_geom2 = loss_scale_geom.get_unscaled_gradients(scaled_grads_geom2)
+            valid_geom_grads_and_vars = [(g, v) for g, v in zip(grads_geom2, geom_vars) if g is not None]
+            if valid_geom_grads_and_vars:
+                loss_scale_geom.apply_gradients(valid_geom_grads_and_vars)
+
+        del tape2
+
+        preds = tf.argmax(f_logits, axis=1)
+        acc = tf.reduce_mean(tf.cast(tf.equal(preds, y_batch), tf.float32))
+        return total_loss, acc, outputs["alpha"]
+
+    train_step = train_step_sam if use_sam else train_step_standard
 
     # 5. Training Loop
     epochs = int(cfg["training"]["epochs"])
