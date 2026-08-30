@@ -135,7 +135,10 @@ def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, 
             "geometry_maps": item["geometry_maps"],
         }, label
 
-    return ds.map(batch_mapper, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
+    ds = ds.map(batch_mapper, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
+    options = tf.data.Options()
+    options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.DATA
+    return ds.with_options(options)
 
 
 def unique_vars(variables: Iterable[tf.Variable]) -> List[tf.Variable]:
@@ -336,6 +339,7 @@ def compute_distributed_ce_loss(loss_fn, labels, logits, global_batch_size: int)
     per_example_loss = loss_fn(labels, logits)
     return tf.nn.compute_average_loss(per_example_loss, global_batch_size=global_batch_size)
 
+@tf.function(reduce_retracing=True)
 def train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d: float, grad_clip_norm: float, global_batch_size: int):
     active_vars = unique_vars([var for vars_ in groups.values() for var in vars_])
     if not active_vars:
@@ -494,6 +498,7 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
     groups = trainable_group_vars_for_phase(model, phase=1)
     assert_group_contract(model, groups, phase=1)
     optimizers = build_optimizers(cfg)
+    build_all_optimizer_slots(model, optimizers)
     loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
     loss_weight_3d = float(cfg["training"].get("loss_weight_3d", 0.1))
     grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 1.0))
@@ -543,6 +548,18 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
         raise RuntimeError(f"Phase 1 frozen geometry variables changed during dry-run: max_diff={geom_frozen_diff:.8e}")
     print("DRY_RUN_PHASE1_CONTRACT_OK", flush=True)
 
+
+def build_all_optimizer_slots(model, optimizers) -> None:
+    groups = trainable_group_vars_for_phase(model, phase=3)
+    for name, variables in groups.items():
+        if not variables:
+            continue
+        inner = getattr(optimizers[name], "inner_optimizer", getattr(optimizers[name], "_optimizer", optimizers[name]))
+        if hasattr(inner, "build"):
+            inner.build(variables)
+        elif hasattr(inner, "_create_all_weights"):
+            inner._create_all_weights(variables)
+    print("OPTIMIZER_SLOT_BUILD_OK all_phase3_groups", flush=True)
 
 def print_epoch_lr_contract(cfg: Dict, phase: int) -> None:
     lrs = group_learning_rates(cfg)
@@ -628,6 +645,7 @@ def main() -> int:
         loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
         optimizers = build_optimizers(cfg)
 
+        build_all_optimizer_slots(model, optimizers)
     dist_train_ds = strategy.experimental_distribute_dataset(train_ds)
 
     best_monitor = -1.0
@@ -651,9 +669,10 @@ def main() -> int:
             groups = trainable_group_vars_for_phase(model, phase)
 
         start = time.time()
+        progress_interval = int(cfg["training"].get("progress_interval", 20))
         losses, accs, aux_accs, grad_norms = [], [], [], []
         gate_means, mod_mins, mod_maxs = [], [], []
-        for batch in dist_train_ds:
+        for batch_idx, batch in enumerate(dist_train_ds, start=1):
             if strategy.num_replicas_in_sync > 1:
                 metrics = distributed_train_step(strategy, model, optimizers, groups, batch, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
             else:
@@ -666,6 +685,16 @@ def main() -> int:
             gate_means.append(float(metrics["mean_abs_channel_gate"].numpy()))
             mod_mins.append(float(metrics["modulation_factor_min"].numpy()))
             mod_maxs.append(float(metrics["modulation_factor_max"].numpy()))
+            if batch_idx == 1 or (progress_interval > 0 and batch_idx % progress_interval == 0):
+                batch_elapsed = time.time() - start
+                print(
+                    f"EPOCH_PROGRESS epoch={epoch:02d} phase={phase} batch={batch_idx} "
+                    f"elapsed={batch_elapsed:.1f}s loss={float(metrics['loss'].numpy()):.6f} "
+                    f"acc={float(metrics['accuracy'].numpy()):.6f} aux_acc={float(metrics['aux_accuracy'].numpy()):.6f} "
+                    f"grad_norm_before_clip={float(metrics['grad_norm'].numpy()):.6f} "
+                    f"alpha_raw={float(metrics['alpha_raw'].numpy()):.8f} effective_alpha={float(metrics['effective_alpha'].numpy()):.8f}",
+                    flush=True,
+                )
 
         val_metrics = evaluate_model(model, val_ds, loss_weight_3d)
         elapsed = time.time() - start
