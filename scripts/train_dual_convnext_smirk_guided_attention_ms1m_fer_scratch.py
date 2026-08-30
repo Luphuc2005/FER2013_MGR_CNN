@@ -403,6 +403,20 @@ def compute_distributed_ce_loss(loss_fn, labels, logits, global_batch_size: int)
     per_example_loss = loss_fn(labels, logits)
     return tf.nn.compute_average_loss(per_example_loss, global_batch_size=global_batch_size)
 
+def scale_loss(opt, loss):
+    if hasattr(opt, "get_scaled_loss"):
+        return opt.get_scaled_loss(loss)
+    elif hasattr(opt, "scale_loss"):
+        return opt.scale_loss(loss)
+    return loss
+
+
+def unscale_gradients(opt, grads):
+    if hasattr(opt, "get_unscaled_gradients"):
+        return opt.get_unscaled_gradients(grads)
+    return grads
+
+
 def make_train_step(
     model,
     optimizers,
@@ -430,10 +444,10 @@ def make_train_step(
                 l_final = compute_distributed_ce_loss(loss_fn, labels, final_logits, global_batch_size)
                 l_aux = compute_distributed_ce_loss(loss_fn, labels, aux_logits, global_batch_size)
                 total_loss = l_final + loss_weight_3d * l_aux
-                scaled_loss = loss_scale_optimizer.get_scaled_loss(total_loss)
+                scaled_loss = scale_loss(loss_scale_optimizer, total_loss)
 
             scaled_grads = tape.gradient(scaled_loss, active_vars)
-            grads = loss_scale_optimizer.get_unscaled_gradients(scaled_grads)
+            grads = unscale_gradients(loss_scale_optimizer, scaled_grads)
             valid = [(g, v) for g, v in zip(grads, active_vars) if g is not None]
             if not valid:
                 raise RuntimeError("No valid gradients produced for active variables.")
@@ -446,10 +460,10 @@ def make_train_step(
                 l_final = compute_distributed_ce_loss(loss_fn, labels, final_logits, global_batch_size)
                 l_aux = compute_distributed_ce_loss(loss_fn, labels, aux_logits, global_batch_size)
                 total_loss = l_final + loss_weight_3d * l_aux
-                scaled_loss1 = loss_scale_optimizer.get_scaled_loss(total_loss)
+                scaled_loss1 = scale_loss(loss_scale_optimizer, total_loss)
 
             scaled_grads1 = tape1.gradient(scaled_loss1, active_vars)
-            grads1 = loss_scale_optimizer.get_unscaled_gradients(scaled_grads1)
+            grads1 = unscale_gradients(loss_scale_optimizer, scaled_grads1)
             valid1 = [(g, v) for g, v in zip(grads1, active_vars) if g is not None]
             if not valid1:
                 raise RuntimeError("No valid gradients produced for active variables in SAM pass 1.")
@@ -472,10 +486,10 @@ def make_train_step(
                     l_final2 = compute_distributed_ce_loss(loss_fn, labels, final_logits2, global_batch_size)
                     l_aux2 = compute_distributed_ce_loss(loss_fn, labels, aux_logits2, global_batch_size)
                     total_loss2 = l_final2 + loss_weight_3d * l_aux2
-                    scaled_loss2 = loss_scale_optimizer.get_scaled_loss(total_loss2)
+                    scaled_loss2 = scale_loss(loss_scale_optimizer, total_loss2)
 
                 scaled_grads2 = tape2.gradient(scaled_loss2, active_vars)
-                grads2 = loss_scale_optimizer.get_unscaled_gradients(scaled_grads2)
+                grads2 = unscale_gradients(loss_scale_optimizer, scaled_grads2)
 
                 for e, v in e_list:
                     v.assign_sub(e)
