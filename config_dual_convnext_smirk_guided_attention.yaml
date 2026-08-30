@@ -6,7 +6,7 @@ data:
   num_classes: 7
   image_size: 112
   batch_size: 32
-  data_path: "data/fer2013.csv"
+  data_path: "data/fer13-split"
   use_clean_filter: false
   predecode_pixels: true
 
