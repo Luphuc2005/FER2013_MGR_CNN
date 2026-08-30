@@ -1,19 +1,19 @@
 #!/bin/bash
 #SBATCH --job-name=fer_smirk_aux
-#SBATCH --output=outputs/convnext_smirk_auxiliary_%j.log
-#SBATCH --error=outputs/convnext_smirk_auxiliary_%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --gpus=1
+#SBATCH --partition=gpu-queue
+#SBATCH --account=sokhcn
+#SBATCH --qos=gpu-q
+#SBATCH --gres=gpu:v100:1
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --partition=gpu
-#SBATCH --time=12:00:00
+#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/fer_smirk_aux_%j.out
+#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/fer_smirk_aux_%j.err
 
-set -e
+set -euo pipefail
 
 ROOT="/home/ptbao/projects/FER2013_MGR_CNN"
 cd "$ROOT"
+mkdir -p logs
 
 FER_PY="$ROOT/fer2013_env/bin/python"
 CONFIG="$ROOT/config_convnext_smirk_auxiliary.yaml"
@@ -26,7 +26,7 @@ echo " FER2013 - CONVNEXT SMIRK 3D AUXILIARY SUPERVISION"
 echo "============================================================"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
-echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}"
 echo "Start: $(date)"
 echo "============================================================"
 
