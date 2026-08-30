@@ -563,8 +563,11 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 frbench_prefix = f"stages.{stage_idx}.blocks.{block_idx}"
                 tv_prefix = f"features.{stage_idx * 2 + 1}.{block_idx}.block"
                 label_prefix = f"stage{stage_idx + 1}.block{block_idx}"
+                dw_kernel = getattr(block.dwconv, "depthwise_kernel", None)
+                if dw_kernel is None:
+                    dw_kernel = getattr(block.dwconv, "kernel", block.dwconv.weights[0])
                 assign(
-                    block.dwconv.depthwise_kernel,
+                    dw_kernel,
                     [
                         f"{frbench_prefix}.dwconv.weight",
                         f"{legacy_prefix}.dwconv.weight",
