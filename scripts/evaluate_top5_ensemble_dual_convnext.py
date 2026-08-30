@@ -109,11 +109,20 @@ def main():
             kaggle_input = Path("/kaggle/input")
             if kaggle_input.exists():
                 for root, _, files in os.walk(kaggle_input):
-                    if target_name in files:
-                        npz_path = Path(root) / target_name
-                        print(f"[INFO] Auto-resolved Kaggle geometry cache for {split} -> {npz_path}", flush=True)
+                    for f in files:
+                        if f.lower() == target_name.lower():
+                            npz_path = Path(root) / f
+                            print(f"[INFO] Auto-resolved Kaggle geometry cache for {split} -> {npz_path}", flush=True)
+                            break
+                    if npz_path.exists():
                         break
         if not npz_path.exists():
+            print(f"[DEBUG] Geometry cache '{target_name}' not found. Files in /kaggle/input:", flush=True)
+            if Path("/kaggle/input").exists():
+                for root, _, files in os.walk("/kaggle/input"):
+                    for f in files:
+                        if "smirk" in f.lower() or "3d" in f.lower() or "map" in f.lower() or "geom" in f.lower():
+                            print(f"  -> {os.path.join(root, f)}", flush=True)
             raise FileNotFoundError(f"Geometry cache map '{target_name}' not found under {cache_dir} or /kaggle/input")
         return np.load(npz_path)
 
