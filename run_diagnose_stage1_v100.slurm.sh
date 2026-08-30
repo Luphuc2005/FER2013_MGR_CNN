@@ -5,7 +5,7 @@
 #SBATCH --qos=gpu-q
 #SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
+#SBATCH --mem=64G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_DIAGNOSE_STAGE1_%j.out
 #SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_DIAGNOSE_STAGE1_%j.err
 

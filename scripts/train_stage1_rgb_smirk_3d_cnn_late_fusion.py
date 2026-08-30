@@ -105,7 +105,7 @@ def load_geometry_cache(cfg: Dict, split: str, cache_dir: Path) -> Tuple[np.ndar
     if not path.exists():
         raise FileNotFoundError(f"Missing SMIRK depth+normal cache for {split}: {path}")
     cache = np.load(path, allow_pickle=False)
-    maps = cache["geometry_maps"].astype(np.float32)
+    maps = cache["geometry_maps"].astype(np.float16)
     labels = cache["labels"].astype(np.int64)
     sample_ids = cache["sample_ids"].astype(np.int64)
     if maps.ndim != 4:
