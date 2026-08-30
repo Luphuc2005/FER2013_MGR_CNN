@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
+import tensorflow as tf
 
 try:
     import pandas as pd
