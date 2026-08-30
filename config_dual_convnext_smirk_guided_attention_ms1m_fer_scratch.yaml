@@ -40,7 +40,7 @@ training:
   dry_run_batches: 3
   monitor: "val_macro_f1"
   best_checkpoint_start_epoch: 1
-  progress_interval: 1
+  progress_interval: 50
   stages:
     phase1_end_epoch: 5
     phase2_end_epoch: 20
