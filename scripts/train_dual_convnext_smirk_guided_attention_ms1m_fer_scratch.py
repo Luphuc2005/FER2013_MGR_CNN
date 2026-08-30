@@ -412,6 +412,7 @@ def make_train_step(
     global_batch_size: int,
     use_sam: bool = False,
     sam_rho: float = 0.05,
+    label_smoothing: float = 0.0,
 ):
     @tf.function
     def train_step(inputs, labels, phase: int):
