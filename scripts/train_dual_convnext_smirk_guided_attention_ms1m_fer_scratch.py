@@ -389,33 +389,40 @@ def make_train_step(
             if not valid1:
                 raise RuntimeError("No valid gradients produced for active variables in SAM pass 1.")
             valid_grads1, valid_vars1 = zip(*valid1)
-            grad_norm1 = tf.linalg.global_norm(valid_grads1) + 1e-12
+            grad_norm1 = tf.linalg.global_norm(valid_grads1)
+            is_finite = tf.math.is_finite(grad_norm1)
 
-            e_list = []
-            for g, v in zip(valid_grads1, valid_vars1):
-                e = tf.cast(sam_rho * g / grad_norm1, v.dtype)
-                v.assign_add(e)
-                e_list.append((e, v))
+            def sam_pass():
+                safe_norm = grad_norm1 + 1e-12
+                e_list = []
+                for g, v in zip(valid_grads1, valid_vars1):
+                    e = tf.cast(sam_rho * g / safe_norm, v.dtype)
+                    v.assign_add(e)
+                    e_list.append((e, v))
 
-            with tf.GradientTape() as tape2:
-                outputs2 = model(inputs, training=True)
-                final_logits2 = outputs2["final_logits"]
-                aux_logits2 = outputs2["aux_3d_logits"]
-                l_final2 = compute_distributed_ce_loss(loss_fn, labels, final_logits2, global_batch_size)
-                l_aux2 = compute_distributed_ce_loss(loss_fn, labels, aux_logits2, global_batch_size)
-                total_loss2 = l_final2 + loss_weight_3d * l_aux2
-                scaled_loss2 = loss_scale_optimizer.get_scaled_loss(total_loss2)
+                with tf.GradientTape() as tape2:
+                    outputs2 = model(inputs, training=True)
+                    final_logits2 = outputs2["final_logits"]
+                    aux_logits2 = outputs2["aux_3d_logits"]
+                    l_final2 = compute_distributed_ce_loss(loss_fn, labels, final_logits2, global_batch_size)
+                    l_aux2 = compute_distributed_ce_loss(loss_fn, labels, aux_logits2, global_batch_size)
+                    total_loss2 = l_final2 + loss_weight_3d * l_aux2
+                    scaled_loss2 = loss_scale_optimizer.get_scaled_loss(total_loss2)
 
-            scaled_grads2 = tape2.gradient(scaled_loss2, active_vars)
-            grads2 = loss_scale_optimizer.get_unscaled_gradients(scaled_grads2)
+                scaled_grads2 = tape2.gradient(scaled_loss2, active_vars)
+                grads2 = loss_scale_optimizer.get_unscaled_gradients(scaled_grads2)
 
-            for e, v in e_list:
-                v.assign_sub(e)
+                for e, v in e_list:
+                    v.assign_sub(e)
 
-            valid2 = [(g, v) for g, v in zip(grads2, active_vars) if g is not None]
-            if not valid2:
-                raise RuntimeError("No valid gradients produced for active variables in SAM pass 2.")
-            valid_grads, valid_vars = zip(*valid2)
+                v_grads2 = [g if g is not None else tf.zeros_like(v) for g, v in zip(grads2, valid_vars1)]
+                return tuple(v_grads2)
+
+            def fallback_pass():
+                return tuple(valid_grads1)
+
+            final_grads = tf.cond(is_finite, true_fn=sam_pass, false_fn=fallback_pass)
+            valid_grads, valid_vars = final_grads, valid_vars1
 
         grad_norm_before_clip = tf.linalg.global_norm(valid_grads)
         clipped_grads, _ = tf.clip_by_global_norm(valid_grads, grad_clip_norm)
