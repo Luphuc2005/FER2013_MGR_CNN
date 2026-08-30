@@ -27,7 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from datasets.fer2013 import collect_split_records
+from datasets.fer2013 import collect_split_records, _augment_pair, _random_erasing
 from models.dual_convnext_smirk_guided_attention_ms1m_fer_scratch import (
     DualConvNeXtSMIRKGuidedAttentionMS1MFERScratch,
     count_params,
