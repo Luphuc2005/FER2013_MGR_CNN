@@ -93,10 +93,11 @@ def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, 
             lbl = labels[idx]
             yield {"image": img, "geometry_maps": g_map}, lbl
 
+    geom_shape = geom_maps.shape[1:]
     output_signature = (
         {
             "image": tf.TensorSpec(shape=(112, 112, 3), dtype=tf.float32),
-            "geometry_maps": tf.TensorSpec(shape=(112, 112, 4), dtype=tf.float16),
+            "geometry_maps": tf.TensorSpec(shape=geom_shape, dtype=tf.float16),
         },
         tf.TensorSpec(shape=(), dtype=tf.int64),
     )

@@ -175,9 +175,14 @@ class DualConvNeXtSMIRKGuidedAttentionFER(tf.keras.Model):
         geometry_maps = inputs["geometry_maps"]
 
         # Extract 3-channel depth and normal images from 4-channel geometry cache
-        depth_1ch = geometry_maps[..., 0:1]
+        geom_f32 = tf.cast(geometry_maps, tf.float32)
+        target_h = tf.shape(image)[1]
+        target_w = tf.shape(image)[2]
+        geom_f32 = tf.image.resize(geom_f32, [target_h, target_w], method="bilinear")
+
+        depth_1ch = geom_f32[..., 0:1]
         depth_rgb = tf.repeat(depth_1ch, 3, axis=-1)
-        normal_rgb = geometry_maps[..., 1:4]
+        normal_rgb = geom_f32[..., 1:4]
 
         # 1. RGB Branch
         rgb_endpoints = self.rgb_baseline.backbone(image, training=training, return_endpoints=True)
