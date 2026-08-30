@@ -180,8 +180,14 @@ class Stage1RGBSMIRK3DCNNLateFusionFER(tf.keras.Model):
             feat = tf.cast(feat, tf.float32)
             logits = tf.cast(logits, tf.float32)
 
-            def grad(d_feat, d_logits):
-                return tf.zeros_like(x)
+            def grad(*args, **kwargs):
+                vars_list = kwargs.get("variables", None)
+                if vars_list is None and len(args) > 2:
+                    vars_list = args[2]
+                dx = tf.zeros_like(x)
+                if vars_list is not None:
+                    return dx, [tf.zeros_like(v) for v in vars_list]
+                return dx
 
             return (feat, logits), grad
 
