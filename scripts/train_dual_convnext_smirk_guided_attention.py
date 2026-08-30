@@ -318,7 +318,7 @@ def main() -> int:
 
     # Variables Grouping
     def get_variables():
-        geom_vars = list(model.geometry_baseline.trainable_variables)
+        geom_vars = [v for v in model.geometry_baseline.trainable_variables if "fer_classifier" not in v.name]
         head_vars = (
             list(model.geometry_fusion.trainable_variables)
             + list(model.channel_attention_mlp.trainable_variables)
@@ -341,18 +341,23 @@ def main() -> int:
             l_aux = loss_fn(y_batch, a_logits)
             total_loss = l_final + loss_weight_3d * l_aux
 
-            scaled_loss = loss_scale_head.get_scaled_loss(total_loss)
+            scaled_loss_head = loss_scale_head.get_scaled_loss(total_loss)
+            scaled_loss_geom = loss_scale_geom.get_scaled_loss(total_loss)
 
         geom_vars, head_vars = get_variables()
 
-        scaled_grads_head = tape.gradient(scaled_loss, head_vars)
+        scaled_grads_head = tape.gradient(scaled_loss_head, head_vars)
         grads_head = loss_scale_head.get_unscaled_gradients(scaled_grads_head)
-        loss_scale_head.apply_gradients(zip(grads_head, head_vars))
+        valid_head_grads_and_vars = [(g, v) for g, v in zip(grads_head, head_vars) if g is not None]
+        if valid_head_grads_and_vars:
+            loss_scale_head.apply_gradients(valid_head_grads_and_vars)
 
         if geom_vars:
-            scaled_grads_geom = tape.gradient(scaled_loss, geom_vars)
+            scaled_grads_geom = tape.gradient(scaled_loss_geom, geom_vars)
             grads_geom = loss_scale_geom.get_unscaled_gradients(scaled_grads_geom)
-            loss_scale_geom.apply_gradients(zip(grads_geom, geom_vars))
+            valid_geom_grads_and_vars = [(g, v) for g, v in zip(grads_geom, geom_vars) if g is not None]
+            if valid_geom_grads_and_vars:
+                loss_scale_geom.apply_gradients(valid_geom_grads_and_vars)
 
         del tape
 
