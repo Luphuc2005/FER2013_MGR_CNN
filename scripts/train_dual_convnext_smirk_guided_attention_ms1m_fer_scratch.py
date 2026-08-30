@@ -539,7 +539,7 @@ def make_train_step(
 
 
 def make_distributed_train_step(strategy, step_fn):
-    @tf.function
+    @tf.function(autograph=False)
     def dist_step(dist_batch):
         def replica_step(inputs, labels):
             return step_fn(inputs, labels)
@@ -690,7 +690,7 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
     if strategy.num_replicas_in_sync > 1:
         dist_step_fn = make_distributed_train_step(strategy, step_fn)
     else:
-        dist_step_fn = tf.function(step_fn)
+        dist_step_fn = tf.function(step_fn, autograph=False)
 
     dry_batches = int(cfg["training"].get("dry_run_batches", 3))
     train_iter = strategy.experimental_distribute_dataset(train_ds)
@@ -858,7 +858,7 @@ def main() -> int:
             if strategy.num_replicas_in_sync > 1:
                 dist_step_fn = make_distributed_train_step(strategy, step_fn)
             else:
-                dist_step_fn = tf.function(step_fn)
+                dist_step_fn = tf.function(step_fn, autograph=False)
 
         start = time.time()
         progress_interval = int(cfg["training"].get("progress_interval", 20))
