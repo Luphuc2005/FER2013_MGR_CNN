@@ -1,0 +1,56 @@
+# RGB ConvNeXt-Base MS1M + SMIRK Geometry 3D-Guided Residual Channel Attention.
+# Both ConvNeXt backbones load MS1M-ArcFace only. No FER checkpoint is restored.
+
+seed: 42
+
+data:
+  num_classes: 7
+  image_size: 112
+  batch_size: 32
+  data_path: "data/fer13-split"
+  use_clean_filter: false
+  predecode_pixels: true
+
+rgb_backbone:
+  name: "convnext_base_ms1m_arcface"
+  convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
+  convnext_base_require_pretrained: true
+  classifier_dropout1: 0.35
+  ablation: "cnn_only"
+
+geometry_cache:
+  feature_dir: "outputs/stage1_rgb_smirk_3d_cnn_late_fusion/geometry_maps"
+  map_file_pattern: "{split}_smirk_depth_normal_maps.npz"
+  dtype: "float16"
+
+model:
+  name: "dual_convnext_smirk_guided_attention_ms1m_fer_scratch"
+  feature_dim: 1024
+  attention_hidden_dim: 256
+  alpha_max: 0.2
+
+training:
+  epochs: 60
+  patience: 15
+  loss_weight_3d: 0.1
+  label_smoothing: 0.0
+  optimizer: "adamw"
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  dry_run_batches: 3
+  monitor: "val_macro_f1"
+  best_checkpoint_start_epoch: 1
+  progress_interval: 100
+  stages:
+    phase1_end_epoch: 5
+    phase2_end_epoch: 20
+  learning_rates:
+    head: 0.0001
+    alpha_raw: 0.0001
+    rgb_stage4: 0.00001
+    geometry_stage4: 0.00001
+    rgb_stage3: 0.000005
+    geometry_stage3: 0.000005
+
+paths:
+  output_dir: "outputs/dual_convnext_smirk_guided_attention_ms1m_fer_scratch"
