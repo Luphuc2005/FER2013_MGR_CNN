@@ -136,7 +136,10 @@ def run_contract_smoke_test(model: DualConvNeXtSMIRKGuidedAttentionFER, baseline
     print(" CONTRACT SMOKE TEST: VERIFYING BASELINE EQUIVALENCE (alpha = 0)", flush=True)
     print("=" * 65, flush=True)
 
-    inputs, labels = sample_batch
+    if isinstance(sample_batch, tuple):
+        inputs, labels = sample_batch
+    else:
+        inputs = sample_batch
     images = inputs["image"]
 
     # 1. Restore baseline checkpoint into RGB branch
