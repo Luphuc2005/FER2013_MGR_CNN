@@ -3,8 +3,8 @@
 #SBATCH --partition=gpu-queue
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
-#SBATCH --gres=gpu:v100:1
-#SBATCH --cpus-per-task=4
+#SBATCH --gres=gpu:v100:2
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_STAGE1_3D_FUSION_%j.out
 #SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_STAGE1_3D_FUSION_%j.err
