@@ -278,24 +278,35 @@ def ce_loss(labels: tf.Tensor, logits: tf.Tensor, num_classes: int, label_smooth
     return tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True))
 
 
+def get_strategy(cfg: Dict) -> tf.distribute.Strategy:
+    gpus = tf.config.list_logical_devices("GPU")
+    if len(gpus) > 1:
+        strategy = tf.distribute.MirroredStrategy(devices=[f"/GPU:{i}" for i in range(len(gpus))])
+        print(f"[INFO] MirroredStrategy initialized across {strategy.num_replicas_in_sync} GPUs", flush=True)
+        return strategy
+    print("[INFO] Single device execution strategy", flush=True)
+    return tf.distribute.get_strategy()
+
+
 @tf.function
-def train_step(model, optimizer, features, labels, loss_weight_3d: float, label_smoothing: float):
+def train_step(model, optimizer, features, labels, loss_weight_3d: float, label_smoothing: float, loss_scale: float = 1.0):
     with tf.GradientTape() as tape:
         outputs = model(features, training=True)
         fusion_loss = ce_loss(labels, outputs["fusion_logits"], model.num_classes, label_smoothing)
         geometry_loss = ce_loss(labels, outputs["geometry_logits"], model.num_classes, label_smoothing)
-        total_loss = fusion_loss + tf.cast(loss_weight_3d, tf.float32) * geometry_loss
+        raw_loss = fusion_loss + tf.cast(loss_weight_3d, tf.float32) * geometry_loss
         if model.losses:
-            total_loss = total_loss + tf.add_n([tf.cast(item, tf.float32) for item in model.losses])
+            raw_loss = raw_loss + tf.add_n([tf.cast(item, tf.float32) for item in model.losses])
+        scaled_loss = raw_loss * tf.cast(loss_scale, tf.float32)
     variables = model.trainable_variables
-    grads = tape.gradient(total_loss, variables)
+    grads = tape.gradient(scaled_loss, variables)
     optimizer.apply_gradients([(g, v) for g, v in zip(grads, variables) if g is not None])
     fused_pred = tf.argmax(outputs["fusion_logits"], axis=-1, output_type=tf.int32)
     geom_pred = tf.argmax(outputs["geometry_logits"], axis=-1, output_type=tf.int32)
     rgb_pred = tf.argmax(outputs["rgb_logits"], axis=-1, output_type=tf.int32)
     batch_total = tf.shape(labels)[0]
     return (
-        total_loss,
+        raw_loss,
         fusion_loss,
         geometry_loss,
         tf.reduce_sum(tf.cast(fused_pred == labels, tf.int32)),
@@ -321,7 +332,14 @@ def eval_step(model, features, labels, loss_weight_3d: float, label_smoothing: f
     )
 
 
-def train_one_epoch(model, optimizer, ds: tf.data.Dataset, loss_weight_3d: float, label_smoothing: float) -> Dict[str, float]:
+def train_one_epoch(
+    model,
+    optimizer,
+    ds: tf.data.Dataset,
+    loss_weight_3d: float,
+    label_smoothing: float,
+    strategy: Optional[tf.distribute.Strategy] = None,
+) -> Dict[str, float]:
     losses = []
     fusion_losses = []
     geometry_losses = []
@@ -329,22 +347,51 @@ def train_one_epoch(model, optimizer, ds: tf.data.Dataset, loss_weight_3d: float
     geom_correct = 0
     rgb_correct = 0
     total = 0
-    for features, labels in ds:
-        loss, f_loss, g_loss, f_ok, g_ok, r_ok, batch_total = train_step(
-            model,
-            optimizer,
-            features,
-            labels,
-            loss_weight_3d=loss_weight_3d,
-            label_smoothing=label_smoothing,
-        )
-        losses.append(float(loss.numpy()))
-        fusion_losses.append(float(f_loss.numpy()))
-        geometry_losses.append(float(g_loss.numpy()))
-        fused_correct += int(f_ok.numpy())
-        geom_correct += int(g_ok.numpy())
-        rgb_correct += int(r_ok.numpy())
-        total += int(batch_total.numpy())
+
+    use_dist = strategy is not None and strategy.num_replicas_in_sync > 1
+    loss_scale = 1.0 / float(strategy.num_replicas_in_sync) if use_dist else 1.0
+
+    if use_dist:
+        dist_ds = strategy.experimental_distribute_dataset(ds)
+        for batch_features, batch_labels in dist_ds:
+            per_loss, per_f_loss, per_g_loss, per_f_ok, per_g_ok, per_r_ok, per_total = strategy.run(
+                train_step,
+                args=(model, optimizer, batch_features, batch_labels, loss_weight_3d, label_smoothing, loss_scale),
+            )
+            loss_v = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, per_loss, axis=None).numpy())
+            f_loss_v = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, per_f_loss, axis=None).numpy())
+            g_loss_v = float(strategy.reduce(tf.distribute.ReduceOp.MEAN, per_g_loss, axis=None).numpy())
+            f_ok_v = int(strategy.reduce(tf.distribute.ReduceOp.SUM, per_f_ok, axis=None).numpy())
+            g_ok_v = int(strategy.reduce(tf.distribute.ReduceOp.SUM, per_g_ok, axis=None).numpy())
+            r_ok_v = int(strategy.reduce(tf.distribute.ReduceOp.SUM, per_r_ok, axis=None).numpy())
+            tot_v = int(strategy.reduce(tf.distribute.ReduceOp.SUM, per_total, axis=None).numpy())
+
+            losses.append(loss_v)
+            fusion_losses.append(f_loss_v)
+            geometry_losses.append(g_loss_v)
+            fused_correct += f_ok_v
+            geom_correct += g_ok_v
+            rgb_correct += r_ok_v
+            total += tot_v
+    else:
+        for features, labels in ds:
+            loss, f_loss, g_loss, f_ok, g_ok, r_ok, batch_total = train_step(
+                model,
+                optimizer,
+                features,
+                labels,
+                loss_weight_3d=loss_weight_3d,
+                label_smoothing=label_smoothing,
+                loss_scale=1.0,
+            )
+            losses.append(float(loss.numpy()))
+            fusion_losses.append(float(f_loss.numpy()))
+            geometry_losses.append(float(g_loss.numpy()))
+            fused_correct += int(f_ok.numpy())
+            geom_correct += int(g_ok.numpy())
+            rgb_correct += int(r_ok.numpy())
+            total += int(batch_total.numpy())
+
     return {
         "loss": float(np.mean(losses)) if losses else float("nan"),
         "fusion_loss": float(np.mean(fusion_losses)) if fusion_losses else float("nan"),
@@ -355,7 +402,13 @@ def train_one_epoch(model, optimizer, ds: tf.data.Dataset, loss_weight_3d: float
     }
 
 
-def evaluate(model, ds: tf.data.Dataset, loss_weight_3d: float, label_smoothing: float) -> Dict:
+def evaluate(
+    model,
+    ds: tf.data.Dataset,
+    loss_weight_3d: float,
+    label_smoothing: float,
+    strategy: Optional[tf.distribute.Strategy] = None,
+) -> Dict:
     losses = []
     fusion_losses = []
     geometry_losses = []
@@ -364,25 +417,60 @@ def evaluate(model, ds: tf.data.Dataset, loss_weight_3d: float, label_smoothing:
     y_geometry = []
     y_fused = []
     confidence = []
-    for features, labels in ds:
-        loss, f_loss, g_loss, rgb_probs, geometry_probs, fused_probs = eval_step(
-            model,
-            features,
-            labels,
-            loss_weight_3d=loss_weight_3d,
-            label_smoothing=label_smoothing,
-        )
-        rgb_np = rgb_probs.numpy()
-        geom_np = geometry_probs.numpy()
-        fused_np = fused_probs.numpy()
-        losses.append(float(loss.numpy()))
-        fusion_losses.append(float(f_loss.numpy()))
-        geometry_losses.append(float(g_loss.numpy()))
-        y_true.extend(labels.numpy().astype(int).tolist())
-        y_rgb.extend(rgb_np.argmax(axis=1).astype(int).tolist())
-        y_geometry.extend(geom_np.argmax(axis=1).astype(int).tolist())
-        y_fused.extend(fused_np.argmax(axis=1).astype(int).tolist())
-        confidence.extend(fused_np.max(axis=1).astype(float).tolist())
+
+    use_dist = strategy is not None and strategy.num_replicas_in_sync > 1
+    if use_dist:
+        dist_ds = strategy.experimental_distribute_dataset(ds)
+        for batch_features, batch_labels in dist_ds:
+            per_loss, per_f_loss, per_g_loss, per_rgb_probs, per_geom_probs, per_fused_probs = strategy.run(
+                eval_step,
+                args=(model, batch_features, batch_labels, loss_weight_3d, label_smoothing),
+            )
+            loc_losses = strategy.experimental_local_results(per_loss)
+            loc_f_losses = strategy.experimental_local_results(per_f_loss)
+            loc_g_losses = strategy.experimental_local_results(per_g_loss)
+            loc_rgb_p = strategy.experimental_local_results(per_rgb_probs)
+            loc_geom_p = strategy.experimental_local_results(per_geom_probs)
+            loc_fused_p = strategy.experimental_local_results(per_fused_probs)
+            loc_labels = strategy.experimental_local_results(batch_labels)
+
+            for l_tot, l_f, l_g, r_p, g_p, f_p, lbl in zip(
+                loc_losses, loc_f_losses, loc_g_losses, loc_rgb_p, loc_geom_p, loc_fused_p, loc_labels
+            ):
+                if tf.shape(lbl)[0] == 0:
+                    continue
+                losses.append(float(l_tot.numpy()))
+                fusion_losses.append(float(l_f.numpy()))
+                geometry_losses.append(float(l_g.numpy()))
+                rgb_np = r_p.numpy()
+                geom_np = g_p.numpy()
+                fused_np = f_p.numpy()
+                lbl_np = lbl.numpy().astype(int)
+                y_true.extend(lbl_np.tolist())
+                y_rgb.extend(rgb_np.argmax(axis=1).astype(int).tolist())
+                y_geometry.extend(geom_np.argmax(axis=1).astype(int).tolist())
+                y_fused.extend(fused_np.argmax(axis=1).astype(int).tolist())
+                confidence.extend(fused_np.max(axis=1).astype(float).tolist())
+    else:
+        for features, labels in ds:
+            loss, f_loss, g_loss, rgb_probs, geometry_probs, fused_probs = eval_step(
+                model,
+                features,
+                labels,
+                loss_weight_3d=loss_weight_3d,
+                label_smoothing=label_smoothing,
+            )
+            rgb_np = rgb_probs.numpy()
+            geom_np = geometry_probs.numpy()
+            fused_np = fused_probs.numpy()
+            losses.append(float(loss.numpy()))
+            fusion_losses.append(float(f_loss.numpy()))
+            geometry_losses.append(float(g_loss.numpy()))
+            y_true.extend(labels.numpy().astype(int).tolist())
+            y_rgb.extend(rgb_np.argmax(axis=1).astype(int).tolist())
+            y_geometry.extend(geom_np.argmax(axis=1).astype(int).tolist())
+            y_fused.extend(fused_np.argmax(axis=1).astype(int).tolist())
+            confidence.extend(fused_np.max(axis=1).astype(float).tolist())
 
     y_true_arr = np.asarray(y_true, dtype=int)
     y_rgb_arr = np.asarray(y_rgb, dtype=int)
@@ -526,7 +614,10 @@ def main() -> int:
     output_dir = resolve_path(cfg["paths"]["output_dir"]) or PROJECT_ROOT / "outputs" / "stage1_rgb_smirk_3d_cnn_late_fusion"
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = resolve_path(args.geometry_cache_dir) or resolve_path(cfg.get("geometry_cache", {}).get("feature_dir")) or (output_dir / "geometry_maps")
-    batch_size = int(args.batch_size or cfg["runtime"].get("batch_size_per_gpu", 32))
+    strategy = get_strategy(cfg)
+    bs_per_gpu = int(args.batch_size or cfg["runtime"].get("batch_size_per_gpu", 16))
+    batch_size = bs_per_gpu * strategy.num_replicas_in_sync
+    print(f"[INFO] Strategy replicas: {strategy.num_replicas_in_sync}, per-GPU BS: {bs_per_gpu}, Global BS: {batch_size}", flush=True)
 
     split_data = {}
     cache_meta = {}
@@ -542,11 +633,12 @@ def main() -> int:
     train_loop_ds = maybe_take(train_ds, args.max_train_batches)
     val_loop_ds = maybe_take(val_ds, args.max_eval_batches)
 
-    model = Stage1RGBSMIRK3DCNNLateFusionFER(cfg)
-    first_features, _ = next(iter(train_ds.take(1)))
-    _ = model(first_features, training=False)
-    restored_checkpoint = restore_rgb_baseline_checkpoint(model, cfg, args)
-    optimizer = build_optimizer(cfg)
+    with strategy.scope():
+        model = Stage1RGBSMIRK3DCNNLateFusionFER(cfg)
+        first_features, _ = next(iter(train_ds.take(1)))
+        _ = model(first_features, training=False)
+        restored_checkpoint = restore_rgb_baseline_checkpoint(model, cfg, args)
+        optimizer = build_optimizer(cfg)
 
     run_contract_smoke_test(
         model,
@@ -587,8 +679,8 @@ def main() -> int:
 
     for epoch in range(int(args.epochs or cfg["training"].get("epochs", 60))):
         start = time.time()
-        train_metrics = train_one_epoch(model, optimizer, train_loop_ds, loss_weight_3d, label_smoothing)
-        val_metrics = evaluate(model, val_loop_ds, loss_weight_3d, label_smoothing)
+        train_metrics = train_one_epoch(model, optimizer, train_loop_ds, loss_weight_3d, label_smoothing, strategy=strategy)
+        val_metrics = evaluate(model, val_loop_ds, loss_weight_3d, label_smoothing, strategy=strategy)
         fused_acc = float(val_metrics["fused_accuracy"])
         net_gain = int(val_metrics["net_gain"])
         improved = (fused_acc > best_fused_acc) or (abs(fused_acc - best_fused_acc) < 1e-12 and net_gain > best_net_gain)
@@ -645,8 +737,8 @@ def main() -> int:
         checkpoint.restore(best_manager.latest_checkpoint).expect_partial()
         print(f"[INFO] Restored best fused checkpoint for final test: {best_manager.latest_checkpoint}", flush=True)
 
-    full_val_metrics = evaluate(model, val_ds, loss_weight_3d, label_smoothing)
-    full_test_metrics = evaluate(model, test_ds, loss_weight_3d, label_smoothing)
+    full_val_metrics = evaluate(model, val_ds, loss_weight_3d, label_smoothing, strategy=strategy)
+    full_test_metrics = evaluate(model, test_ds, loss_weight_3d, label_smoothing, strategy=strategy)
     save_json(output_dir / "val_metrics_best_fused.json", strip_prediction_arrays(full_val_metrics))
     save_json(output_dir / "test_metrics_no_tta.json", strip_prediction_arrays(full_test_metrics))
     save_json(output_dir / "test_metrics.json", strip_prediction_arrays(full_test_metrics))

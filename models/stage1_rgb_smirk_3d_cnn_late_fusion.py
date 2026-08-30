@@ -161,24 +161,32 @@ class Stage1RGBSMIRK3DCNNLateFusionFER(tf.keras.Model):
                 pass
 
     def _rgb_forward(self, image):
-        endpoints = self.rgb_baseline.backbone(
-            image,
-            training=False,
-            return_endpoints=True,
-            stage3_adapter=getattr(self.rgb_baseline, "stage3_adapter", None),
-        )
-        stage4 = endpoints["stage4"]
-        if getattr(self.rgb_baseline, "use_eca", False) and self.rgb_baseline.stage4_eca is not None:
-            stage4 = self.rgb_baseline.stage4_eca(stage4, training=False)
-            endpoints["stage4_eca"] = stage4
-        rgb_feature = self.rgb_baseline.gap(stage4)
-        dropped = self.rgb_baseline.head_dropout(rgb_feature, training=False)
-        rgb_logits = self.rgb_baseline.classifier(dropped)
-        return (
-            tf.stop_gradient(tf.cast(rgb_feature, tf.float32)),
-            tf.stop_gradient(tf.cast(rgb_logits, tf.float32)),
-            {k: tf.stop_gradient(v) if isinstance(v, tf.Tensor) else v for k, v in endpoints.items()},
-        )
+        @tf.custom_gradient
+        def _custom_rgb_pass(x):
+            endpoints = self.rgb_baseline.backbone(
+                x,
+                training=False,
+                return_endpoints=True,
+                stage3_adapter=getattr(self.rgb_baseline, "stage3_adapter", None),
+            )
+            stage4 = endpoints["stage4"]
+            if getattr(self.rgb_baseline, "use_eca", False) and self.rgb_baseline.stage4_eca is not None:
+                stage4 = self.rgb_baseline.stage4_eca(stage4, training=False)
+                endpoints["stage4_eca"] = stage4
+            feat = self.rgb_baseline.gap(stage4)
+            dropped = self.rgb_baseline.head_dropout(feat, training=False)
+            logits = self.rgb_baseline.classifier(dropped)
+            
+            feat = tf.cast(feat, tf.float32)
+            logits = tf.cast(logits, tf.float32)
+
+            def grad(d_feat, d_logits):
+                return tf.zeros_like(x)
+
+            return (feat, logits), grad
+
+        rgb_feature, rgb_logits = _custom_rgb_pass(image)
+        return rgb_feature, rgb_logits, {}
 
     def trainable_branch_variables(self) -> Tuple[list, list, list]:
         return (
