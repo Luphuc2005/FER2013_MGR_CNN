@@ -68,16 +68,13 @@ def configure_runtime(cfg: Dict) -> None:
     if not gpus:
         print("[WARNING] TensorFlow sees no GPU. Running on CPU.", flush=True)
         return
-    gpu_ids = list(runtime.get("gpu_ids", [0]))
-    visible = [gpus[i] for i in gpu_ids if i < len(gpus)] or [gpus[0]]
-    tf.config.set_visible_devices(visible, "GPU")
     if bool(runtime.get("memory_growth", True)):
-        for gpu in visible:
+        for gpu in gpus:
             try:
                 tf.config.experimental.set_memory_growth(gpu, True)
             except Exception:
                 pass
-    print(f"[INFO] TensorFlow visible GPU(s): {[gpu.name for gpu in visible]}", flush=True)
+    print(f"[INFO] TensorFlow visible GPU(s): {[gpu.name for gpu in gpus]}", flush=True)
 
 
 def load_3d_targets_for_split(aux_dir: Path, split: str, ablation: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
