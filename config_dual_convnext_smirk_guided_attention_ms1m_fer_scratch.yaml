@@ -32,6 +32,8 @@ model:
 training:
   epochs: 60
   patience: 15
+  use_sam: true
+  sam_rho: 0.05
   loss_weight_3d: 0.1
   label_smoothing: 0.0
   optimizer: "adamw"

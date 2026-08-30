@@ -339,7 +339,16 @@ def compute_distributed_ce_loss(loss_fn, labels, logits, global_batch_size: int)
     per_example_loss = loss_fn(labels, logits)
     return tf.nn.compute_average_loss(per_example_loss, global_batch_size=global_batch_size)
 
-def make_train_step(model, optimizers, loss_fn, loss_weight_3d: float, grad_clip_norm: float, global_batch_size: int):
+def make_train_step(
+    model,
+    optimizers,
+    loss_fn,
+    loss_weight_3d: float,
+    grad_clip_norm: float,
+    global_batch_size: int,
+    use_sam: bool = False,
+    sam_rho: float = 0.05,
+):
     @tf.function
     def train_step(inputs, labels, phase: int):
         groups = trainable_group_vars_for_phase(model, phase)
@@ -348,22 +357,66 @@ def make_train_step(model, optimizers, loss_fn, loss_weight_3d: float, grad_clip
             raise RuntimeError("No active variables for train_step.")
         loss_scale_optimizer = next(opt for name, opt in optimizers.items() if groups.get(name))
 
-        with tf.GradientTape() as tape:
-            outputs = model(inputs, training=True)
-            final_logits = outputs["final_logits"]
-            aux_logits = outputs["aux_3d_logits"]
-            l_final = compute_distributed_ce_loss(loss_fn, labels, final_logits, global_batch_size)
-            l_aux = compute_distributed_ce_loss(loss_fn, labels, aux_logits, global_batch_size)
-            total_loss = l_final + loss_weight_3d * l_aux
-            scaled_loss = loss_scale_optimizer.get_scaled_loss(total_loss)
+        if not use_sam:
+            with tf.GradientTape() as tape:
+                outputs = model(inputs, training=True)
+                final_logits = outputs["final_logits"]
+                aux_logits = outputs["aux_3d_logits"]
+                l_final = compute_distributed_ce_loss(loss_fn, labels, final_logits, global_batch_size)
+                l_aux = compute_distributed_ce_loss(loss_fn, labels, aux_logits, global_batch_size)
+                total_loss = l_final + loss_weight_3d * l_aux
+                scaled_loss = loss_scale_optimizer.get_scaled_loss(total_loss)
 
-        scaled_grads = tape.gradient(scaled_loss, active_vars)
-        grads = loss_scale_optimizer.get_unscaled_gradients(scaled_grads)
-        valid = [(g, v) for g, v in zip(grads, active_vars) if g is not None]
-        if not valid:
-            raise RuntimeError("No valid gradients produced for active variables.")
+            scaled_grads = tape.gradient(scaled_loss, active_vars)
+            grads = loss_scale_optimizer.get_unscaled_gradients(scaled_grads)
+            valid = [(g, v) for g, v in zip(grads, active_vars) if g is not None]
+            if not valid:
+                raise RuntimeError("No valid gradients produced for active variables.")
+            valid_grads, valid_vars = zip(*valid)
+        else:
+            with tf.GradientTape() as tape1:
+                outputs = model(inputs, training=True)
+                final_logits = outputs["final_logits"]
+                aux_logits = outputs["aux_3d_logits"]
+                l_final = compute_distributed_ce_loss(loss_fn, labels, final_logits, global_batch_size)
+                l_aux = compute_distributed_ce_loss(loss_fn, labels, aux_logits, global_batch_size)
+                total_loss = l_final + loss_weight_3d * l_aux
+                scaled_loss1 = loss_scale_optimizer.get_scaled_loss(total_loss)
 
-        valid_grads, valid_vars = zip(*valid)
+            scaled_grads1 = tape1.gradient(scaled_loss1, active_vars)
+            grads1 = loss_scale_optimizer.get_unscaled_gradients(scaled_grads1)
+            valid1 = [(g, v) for g, v in zip(grads1, active_vars) if g is not None]
+            if not valid1:
+                raise RuntimeError("No valid gradients produced for active variables in SAM pass 1.")
+            valid_grads1, valid_vars1 = zip(*valid1)
+            grad_norm1 = tf.linalg.global_norm(valid_grads1) + 1e-12
+
+            e_list = []
+            for g, v in zip(valid_grads1, valid_vars1):
+                e = tf.cast(sam_rho * g / grad_norm1, v.dtype)
+                v.assign_add(e)
+                e_list.append((e, v))
+
+            with tf.GradientTape() as tape2:
+                outputs2 = model(inputs, training=True)
+                final_logits2 = outputs2["final_logits"]
+                aux_logits2 = outputs2["aux_3d_logits"]
+                l_final2 = compute_distributed_ce_loss(loss_fn, labels, final_logits2, global_batch_size)
+                l_aux2 = compute_distributed_ce_loss(loss_fn, labels, aux_logits2, global_batch_size)
+                total_loss2 = l_final2 + loss_weight_3d * l_aux2
+                scaled_loss2 = loss_scale_optimizer.get_scaled_loss(total_loss2)
+
+            scaled_grads2 = tape2.gradient(scaled_loss2, active_vars)
+            grads2 = loss_scale_optimizer.get_unscaled_gradients(scaled_grads2)
+
+            for e, v in e_list:
+                v.assign_sub(e)
+
+            valid2 = [(g, v) for g, v in zip(grads2, active_vars) if g is not None]
+            if not valid2:
+                raise RuntimeError("No valid gradients produced for active variables in SAM pass 2.")
+            valid_grads, valid_vars = zip(*valid2)
+
         grad_norm_before_clip = tf.linalg.global_norm(valid_grads)
         clipped_grads, _ = tf.clip_by_global_norm(valid_grads, grad_clip_norm)
         clipped_by_var = {id(var): grad for grad, var in zip(clipped_grads, valid_vars)}
@@ -379,8 +432,8 @@ def make_train_step(model, optimizers, loss_fn, loss_weight_3d: float, grad_clip
             grad_norms[name] = tf.cast(tf.linalg.global_norm(group_raw_grads), tf.float32)
             optimizers[name].apply_gradients(group_pairs)
 
-        preds = tf.argmax(final_logits, axis=1, output_type=labels.dtype)
-        aux_preds = tf.argmax(aux_logits, axis=1, output_type=labels.dtype)
+        preds = tf.argmax(outputs["final_logits"], axis=1, output_type=labels.dtype)
+        aux_preds = tf.argmax(outputs["aux_3d_logits"], axis=1, output_type=labels.dtype)
         acc = tf.reduce_mean(tf.cast(tf.equal(preds, labels), tf.float32))
         aux_acc = tf.reduce_mean(tf.cast(tf.equal(aux_preds, labels), tf.float32))
         return {
@@ -510,7 +563,18 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
         raise RuntimeError("grad_clip_norm must be > 0 and is required for this experiment.")
     print(f"GRAD_CLIP_ENABLED global_norm={grad_clip_norm}", flush=True)
 
-    step_fn = make_train_step(model, optimizers, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
+    use_sam = bool(cfg["training"].get("use_sam", False))
+    sam_rho = float(cfg["training"].get("sam_rho", 0.05))
+    step_fn = make_train_step(
+        model,
+        optimizers,
+        loss_fn,
+        loss_weight_3d,
+        grad_clip_norm,
+        int(cfg["data"]["batch_size"]),
+        use_sam=use_sam,
+        sam_rho=sam_rho,
+    )
 
     rgb_backbone_vars = stem_vars(model.rgb_baseline) + stage_vars(model.rgb_baseline, 1) + stage_vars(model.rgb_baseline, 2) + stage_vars(model.rgb_baseline, 3) + stage_vars(model.rgb_baseline, 4)
     rgb_before = [v.numpy().copy() for v in rgb_backbone_vars]
@@ -656,7 +720,20 @@ def main() -> int:
         optimizers = build_optimizers(cfg)
 
         build_all_optimizer_slots(model, optimizers)
-        step_fn = make_train_step(model, optimizers, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
+        use_sam = bool(cfg["training"].get("use_sam", False))
+        sam_rho = float(cfg["training"].get("sam_rho", 0.05))
+        if use_sam:
+            print(f"SAM_OPTIMIZER_ENABLED rho={sam_rho}", flush=True)
+        step_fn = make_train_step(
+            model,
+            optimizers,
+            loss_fn,
+            loss_weight_3d,
+            grad_clip_norm,
+            int(cfg["data"]["batch_size"]),
+            use_sam=use_sam,
+            sam_rho=sam_rho,
+        )
     dist_train_ds = strategy.experimental_distribute_dataset(train_ds)
 
     best_val_acc = -1.0
