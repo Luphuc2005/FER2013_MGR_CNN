@@ -354,7 +354,7 @@ def make_adamw(lr: float, weight_decay: float):
         raise RuntimeError("AdamW optimizer is required for this experiment.")
     try:
         return adamw(learning_rate=lr, weight_decay=weight_decay, jit_compile=False)
-    except TypeError:
+    except (TypeError, ValueError):
         return adamw(learning_rate=lr, weight_decay=weight_decay)
 
 
