@@ -3,6 +3,7 @@
 #SBATCH --partition=gpu-queue
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
+#SBATCH --nodelist=gpunode1
 #SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
