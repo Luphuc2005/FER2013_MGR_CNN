@@ -522,16 +522,20 @@ def make_train_step(
         aux_preds = tf.argmax(outputs["aux_3d_logits"], axis=1, output_type=labels.dtype)
         acc = tf.reduce_mean(tf.cast(tf.equal(preds, labels), tf.float32))
         aux_acc = tf.reduce_mean(tf.cast(tf.equal(aux_preds, labels), tf.float32))
+        alpha_val = tf.cast(outputs.get("alpha_raw", outputs.get("alpha", 0.0)), tf.float32)
+        gate_mean = tf.cast(outputs.get("mean_abs_channel_gate", 0.0), tf.float32)
+        mod_min = tf.cast(outputs.get("modulation_factor_min", 1.0), tf.float32)
+        mod_max = tf.cast(outputs.get("modulation_factor_max", 1.0), tf.float32)
         return {
             "loss": total_loss,
             "accuracy": acc,
             "aux_accuracy": aux_acc,
             "grad_norm": tf.cast(grad_norm_before_clip, tf.float32),
-            "alpha_raw": tf.cast(outputs["alpha_raw"], tf.float32),
-            "effective_alpha": tf.cast(outputs["effective_alpha"], tf.float32),
-            "mean_abs_channel_gate": tf.cast(outputs["mean_abs_channel_gate"], tf.float32),
-            "modulation_factor_min": tf.cast(outputs["modulation_factor_min"], tf.float32),
-            "modulation_factor_max": tf.cast(outputs["modulation_factor_max"], tf.float32),
+            "alpha_raw": alpha_val,
+            "effective_alpha": alpha_val,
+            "mean_abs_channel_gate": gate_mean,
+            "modulation_factor_min": mod_min,
+            "modulation_factor_max": mod_max,
             "group_grad_norms": grad_norms,
         }
 

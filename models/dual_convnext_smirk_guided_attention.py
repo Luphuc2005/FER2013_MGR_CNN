@@ -143,6 +143,12 @@ class DualConvNeXtSMIRKGuidedAttentionFER(tf.keras.Model):
         attn_params = count_params(self.channel_attention_mlp.variables)
         aux_params = count_params(self.aux_3d_head.variables)
 
+        try:
+            alpha_val = float(self.alpha.numpy())
+            alpha_str = f"{alpha_val:.6f}"
+        except Exception:
+            alpha_str = "0.0 (symbolic)"
+
         print("=" * 65, flush=True)
         print("[DUAL_CONVNEXT_CONTRACT] Parameter Breakdown:", flush=True)
         print(f"  RGB ConvNeXt (Total: {rgb_total:,} | Trainable: {rgb_trainable:,})", flush=True)
@@ -150,7 +156,7 @@ class DualConvNeXtSMIRKGuidedAttentionFER(tf.keras.Model):
         print(f"  Geometry Fusion Conv1x1: {fusion_params:,}", flush=True)
         print(f"  3D-Guided Attention MLP: {attn_params:,}", flush=True)
         print(f"  Auxiliary 3D Head: {aux_params:,}", flush=True)
-        print(f"  Modulation Alpha (scalar): 1 (value={float(self.alpha.numpy()):.6f})", flush=True)
+        print(f"  Modulation Alpha (scalar): 1 (value={alpha_str})", flush=True)
         print(f"  Total Model Trainable Params: {count_params(self.trainable_variables):,}", flush=True)
         print("=" * 65, flush=True)
 
@@ -235,12 +241,22 @@ class DualConvNeXtSMIRKGuidedAttentionFER(tf.keras.Model):
             aux_3d_logits,
         )
 
+        mean_abs_gate = tf.reduce_mean(tf.abs(gate))
+        mod_factor = 1.0 + alpha_f32 * gate_4d
+        mod_min = tf.reduce_min(mod_factor)
+        mod_max = tf.reduce_max(mod_factor)
+
         return {
             "logits": final_logits,
             "final_logits": final_logits,
             "aux_3d_logits": aux_3d_logits,
             "channel_gate": gate,
             "alpha": self.alpha,
+            "alpha_raw": alpha_f32,
+            "effective_alpha": alpha_f32,
+            "mean_abs_channel_gate": mean_abs_gate,
+            "modulation_factor_min": mod_min,
+            "modulation_factor_max": mod_max,
             "F_rgb": F_rgb,
             "F_3d": F_3d,
             "F_guided": F_guided,
