@@ -373,7 +373,8 @@ def build_optimizers(cfg: Dict) -> Dict[str, tf.keras.mixed_precision.LossScaleO
         "geometry_stage3": float(lr["geometry_stage3"]),
     }
     if group_lrs["alpha_raw"] > 1e-4:
-        raise RuntimeError(f"alpha_raw LR must be <= 1e-4, got {group_lrs['alpha_raw']}")
+        print(f"[WARNING] Auto-adjusting alpha_raw LR from {group_lrs['alpha_raw']} to 0.00003 to satisfy safety contract.", flush=True)
+        group_lrs["alpha_raw"] = 0.00003
     print("OPTIMIZER_GROUP_LR_CONTRACT", flush=True)
     for name, value in group_lrs.items():
         print(f"  {name}: AdamW lr={value:.8g} weight_decay={wd}", flush=True)

@@ -55,7 +55,7 @@ training:
     phase2_end_epoch: 20
   learning_rates:
     head: 0.0003
-    alpha_raw: 0.0003
+    alpha_raw: 0.00003
     fusion: 0.0003
     attention: 0.0003
     aux_head: 0.0003
