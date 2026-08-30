@@ -39,8 +39,8 @@ model:
 training:
   epochs: 100
   patience: 25
-  use_sam: true
-  sam_rho: 0.03
+  use_sam: false
+  sam_rho: 0.0
   loss_weight_3d: 0.1
   label_smoothing: 0.10
   top_k_checkpoints: 5
@@ -92,4 +92,4 @@ augmentation:
   random_erasing_value: "random"
 
 paths:
-  output_dir: "outputs/dual_convnext_smirk_guided_attention_ms1m_fer_scratch"
+  output_dir: "outputs/dual_convnext_smirk_guided_attention_ms1m_fer_scratch_adamw"

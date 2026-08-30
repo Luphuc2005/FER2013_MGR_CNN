@@ -358,9 +358,10 @@ def make_adamw(lr: float, weight_decay: float):
         return adamw(learning_rate=lr, weight_decay=weight_decay)
 
 
-def build_optimizers(cfg: Dict) -> Dict[str, tf.keras.mixed_precision.LossScaleOptimizer]:
+def build_optimizers(cfg: Dict) -> Dict[str, tf.keras.optimizers.Optimizer]:
     lr = cfg["training"]["learning_rates"]
     wd = float(cfg["training"].get("weight_decay", 0.01))
+    use_loss_scale = bool(cfg.get("runtime", {}).get("use_loss_scale_optimizer", False))
     group_lrs = {
         "fer_head": float(lr["head"]),
         "fusion": float(lr["head"]),
@@ -376,12 +377,13 @@ def build_optimizers(cfg: Dict) -> Dict[str, tf.keras.mixed_precision.LossScaleO
         print(f"[WARNING] Auto-adjusting alpha_raw LR from {group_lrs['alpha_raw']} to 0.00003 to satisfy safety contract.", flush=True)
         group_lrs["alpha_raw"] = 0.00003
     print("OPTIMIZER_GROUP_LR_CONTRACT", flush=True)
+    print(f"LOSS_SCALE_OPTIMIZER_ENABLED={use_loss_scale}", flush=True)
+    optimizers = {}
     for name, value in group_lrs.items():
         print(f"  {name}: AdamW lr={value:.8g} weight_decay={wd}", flush=True)
-    return {
-        name: tf.keras.mixed_precision.LossScaleOptimizer(make_adamw(value, wd))
-        for name, value in group_lrs.items()
-    }
+        base_optimizer = make_adamw(value, wd)
+        optimizers[name] = tf.keras.mixed_precision.LossScaleOptimizer(base_optimizer) if use_loss_scale else base_optimizer
+    return optimizers
 
 
 def group_learning_rates(cfg: Dict) -> Dict[str, float]:
@@ -403,7 +405,13 @@ def compute_distributed_ce_loss(loss_fn, labels, logits, global_batch_size: int)
     per_example_loss = loss_fn(labels, logits)
     return tf.nn.compute_average_loss(per_example_loss, global_batch_size=global_batch_size)
 
+def is_loss_scale_optimizer(opt) -> bool:
+    return opt.__class__.__name__ == "LossScaleOptimizer" or hasattr(opt, "get_scaled_loss") or hasattr(opt, "get_unscaled_gradients")
+
+
 def scale_loss(opt, loss):
+    if not is_loss_scale_optimizer(opt):
+        return loss
     if hasattr(opt, "get_scaled_loss"):
         return opt.get_scaled_loss(loss)
     elif hasattr(opt, "scale_loss"):
