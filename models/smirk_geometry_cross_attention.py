@@ -10,13 +10,17 @@ from .convnext_base_face_baseline import ConvNeXtBaseFaceFERBaseline
 
 
 class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
-    """ConvNeXt-Base Baseline-Preserving Residual Cross-Attention FER.
+    """ConvNeXt-Base FER with Confidence-Aware Sample-Wise Dynamic Gating.
 
     The ConvNeXt-Base MS1M-ArcFace baseline backbone & classifier head remain
     completely frozen. Cross-attention on SMIRK geometry tokens produces a 7-dim
-    residual correction (geometry_delta) scaled by a learnable beta gate:
+    residual correction (geometry_delta).
 
-        final_logits = baseline_logits + beta * geometry_delta
+    A sample-wise dynamic gate g_i in (0, 1) is computed based on:
+        [baseline_confidence_i, baseline_entropy_i, RGB_feature_i, geometry_feature_i]
+
+    Final Logits:
+        final_logits_i = baseline_logits_i + g_i * geometry_delta_i
     """
 
     def __init__(self, cfg: Dict):
@@ -31,6 +35,7 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
         self.num_heads = int(model_cfg.get("num_heads", 8))
         self.ffn_dim = int(model_cfg.get("ffn_dim", 1024))
         self.dropout_rate = float(model_cfg.get("dropout", 0.20))
+        self.force_zero_gate = False
         self._shape_logged = False
 
         # Build baseline ConvNeXt and freeze completely (backbone + classifier)
@@ -73,13 +78,22 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
             name="geometry_correction_mlp",
         )
 
-        # Learnable Residual Gate Beta (initialized at 0.05 by default)
-        beta_init = float(model_cfg.get("beta_init", 0.05))
-        self.beta = self.add_weight(
-            name="geometry_residual_beta",
-            shape=(),
-            initializer=tf.keras.initializers.Constant(beta_init),
-            trainable=True,
+        # Confidence-Aware Sample-Wise Dynamic Gate MLP
+        # Inputs: [baseline_confidence (1), baseline_entropy (1), rgb_feat (512), geometry_feat (512)] -> 1026
+        init_bias = float(np.log(float(model_cfg.get("beta_init", 0.05)) / (1.0 - float(model_cfg.get("beta_init", 0.05)))))
+        self.gate_mlp = tf.keras.Sequential(
+            [
+                tf.keras.layers.LayerNormalization(epsilon=1e-6, name="gate_ln"),
+                tf.keras.layers.Dense(128, activation=tf.nn.gelu, name="gate_dense_1"),
+                tf.keras.layers.Dropout(self.dropout_rate, name="gate_drop"),
+                tf.keras.layers.Dense(
+                    1,
+                    activation="sigmoid",
+                    name="gate_dense_2",
+                    bias_initializer=tf.keras.initializers.Constant(init_bias),
+                ),
+            ],
+            name="confidence_aware_dynamic_gate_mlp",
         )
 
     @staticmethod
@@ -107,7 +121,13 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
 
         # 1. Baseline forwarding (always training=False for frozen baseline)
         baseline_outputs = self.rgb_baseline(image, training=False)
-        baseline_logits = baseline_outputs["logits"]
+        baseline_logits = tf.cast(baseline_outputs["logits"], tf.float32)
+
+        # Baseline confidence & normalized entropy
+        baseline_probs = tf.nn.softmax(baseline_logits, axis=-1)
+        baseline_confidence = tf.reduce_max(baseline_probs, axis=-1, keepdims=True)
+        entropy_raw = -tf.reduce_sum(baseline_probs * tf.math.log(baseline_probs + 1e-7), axis=-1, keepdims=True)
+        baseline_entropy = entropy_raw / 1.9459101490553132 # log(7)
 
         # 2. Extract stage4 RGB tokens for Cross-Attention Query
         endpoints = self.rgb_baseline.backbone(
@@ -137,16 +157,21 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
 
         # 4. Geometry Delta Correction via MLP(GAP(cross_tokens))
         gap = tf.reduce_mean(cross_tokens, axis=1)
+        rgb_feat = tf.reduce_mean(rgb_proj, axis=1)
         geometry_delta = tf.cast(self.correction_mlp(gap, training=training), tf.float32)
-        baseline_logits = tf.cast(baseline_logits, tf.float32)
 
-        # 5. Baseline-Preserving Residual Fusion: final_logits = baseline_logits + beta * geometry_delta
-        beta_cast = tf.cast(self.beta, tf.float32)
-        final_logits = baseline_logits + beta_cast * geometry_delta
+        # 5. Confidence-Aware Sample-Wise Dynamic Gate
+        gate_inputs = tf.concat([baseline_confidence, baseline_entropy, rgb_feat, gap], axis=-1)
+        gate = tf.cast(self.gate_mlp(gate_inputs, training=training), tf.float32)
+
+        if getattr(self, "force_zero_gate", False):
+            gate = tf.zeros_like(gate)
+
+        final_logits = baseline_logits + gate * geometry_delta
 
         if not self._shape_logged:
             self._shape_logged = True
-            print("[SMIRKGeometryCrossAttention (Baseline-Preserving)] Shape trace:", flush=True)
+            print("[SMIRKGeometryCrossAttention (Sample-Wise Dynamic Gate)] Shape trace:", flush=True)
             print(f"  image: {image.shape}", flush=True)
             print(f"  convnext_stage4: {stage4.shape}", flush=True)
             print(f"  rgb_tokens_Q_raw: {rgb_tokens.shape}", flush=True)
@@ -157,14 +182,16 @@ class SMIRKGeometryCrossAttentionFER(tf.keras.Model):
             print(f"  gap: {gap.shape}", flush=True)
             print(f"  geometry_delta: {geometry_delta.shape}", flush=True)
             print(f"  baseline_logits: {baseline_logits.shape}", flush=True)
-            print(f"  beta: {float(self.beta.numpy()) if tf.executing_eagerly() else self.beta}", flush=True)
+            print(f"  gate_sample_wise: {gate.shape}", flush=True)
             print(f"  final_logits: {final_logits.shape}", flush=True)
 
         result = {
             "logits": tf.cast(final_logits, tf.float32),
             "baseline_logits": tf.cast(baseline_logits, tf.float32),
             "geometry_delta": tf.cast(geometry_delta, tf.float32),
-            "beta": self.beta,
+            "gate": tf.cast(gate, tf.float32),
+            "baseline_confidence": baseline_confidence,
+            "baseline_entropy": baseline_entropy,
             "rgb_tokens": rgb_tokens,
             "geometry_tokens": geometry_tokens,
             "cross_tokens": cross_tokens,

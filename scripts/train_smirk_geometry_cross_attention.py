@@ -20,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train SMIRK Geometry Baseline-Preserving Residual Cross-Attention FER")
+    parser = argparse.ArgumentParser(description="Train SMIRK Geometry FER with Confidence-Aware Dynamic Gating")
     parser.add_argument("--config", type=str, default="config_smirk_geometry_cross_attention.yaml")
     parser.add_argument("--baseline-checkpoint", type=str, default=None)
     parser.add_argument("--feature-dir", type=str, default=None)
@@ -236,19 +236,37 @@ def ce_loss(labels: tf.Tensor, logits: tf.Tensor) -> tf.Tensor:
 def train_step(model, optimizer, features, labels):
     with tf.GradientTape() as tape:
         outputs = model(features, training=True)
-        logits = tf.cast(outputs["logits"], tf.float32)
-        loss = ce_loss(labels, logits)
+        final_logits = tf.cast(outputs["logits"], tf.float32)
+        baseline_logits = tf.cast(outputs["baseline_logits"], tf.float32)
+        gate = tf.cast(outputs["gate"], tf.float32) # [B, 1]
+        baseline_confidence = outputs["baseline_confidence"] # [B, 1]
+
+        # 1. Primary Classification Loss
+        l_ce = ce_loss(labels, final_logits)
+
+        # 2. Preserve Loss: Penalize changing logits if baseline is correct & confident (>0.6)
+        baseline_preds = tf.argmax(baseline_logits, axis=-1, output_type=tf.int32)
+        baseline_correct = tf.cast(baseline_preds == labels, tf.float32)
+        high_conf = tf.cast(baseline_confidence[:, 0] > 0.6, tf.float32)
+        preserve_mask = baseline_correct * high_conf # [B]
+        logit_diff_sq = tf.reduce_sum(tf.square(final_logits - baseline_logits), axis=-1) # [B]
+        preserve_loss = 0.05 * tf.reduce_mean(preserve_mask * logit_diff_sq)
+
+        # 3. Gate Regularization Loss: Prevent gate from opening too wide everywhere
+        gate_reg_loss = 0.01 * tf.reduce_mean(gate)
+
+        total_loss = l_ce + preserve_loss + gate_reg_loss
         if model.losses:
-            loss = loss + tf.add_n([tf.cast(item, tf.float32) for item in model.losses])
+            total_loss = total_loss + tf.add_n([tf.cast(item, tf.float32) for item in model.losses])
 
     variables = model.trainable_variables
-    grads = tape.gradient(loss, variables)
+    grads = tape.gradient(total_loss, variables)
     optimizer.apply_gradients([(g, v) for g, v in zip(grads, variables) if g is not None])
 
-    preds = tf.argmax(logits, axis=-1, output_type=tf.int32)
+    preds = tf.argmax(final_logits, axis=-1, output_type=tf.int32)
     correct = tf.reduce_sum(tf.cast(preds == labels, tf.int32))
     batch_size = tf.shape(labels)[0]
-    return loss, correct, batch_size
+    return total_loss, correct, batch_size
 
 
 @tf.function
@@ -256,10 +274,11 @@ def eval_step(model, features, labels):
     outputs = model(features, training=False)
     final_logits = tf.cast(outputs["logits"], tf.float32)
     baseline_logits = tf.cast(outputs["baseline_logits"], tf.float32)
+    gate = tf.cast(outputs["gate"], tf.float32)
     loss = ce_loss(labels, final_logits)
     final_probs = tf.nn.softmax(final_logits, axis=-1)
     baseline_probs = tf.nn.softmax(baseline_logits, axis=-1)
-    return loss, final_probs, baseline_probs
+    return loss, final_probs, baseline_probs, gate
 
 
 def train_one_epoch(model, optimizer, ds: tf.data.Dataset) -> Dict[str, float]:
@@ -279,20 +298,25 @@ def evaluate(model, ds: tf.data.Dataset) -> Dict:
     y_true = []
     y_baseline = []
     y_fused = []
+    all_gates = []
     confidences = []
     for features, labels in ds:
-        loss, fused_probs_tensor, baseline_probs_tensor = eval_step(model, features, labels)
+        loss, fused_probs_tensor, baseline_probs_tensor, gate_tensor = eval_step(model, features, labels)
         fused_probs = fused_probs_tensor.numpy()
         baseline_probs = baseline_probs_tensor.numpy()
+        gates = gate_tensor.numpy()[:, 0]
+
         losses.append(float(loss.numpy()))
         y_true.extend(labels.numpy().astype(int).tolist())
         y_baseline.extend(baseline_probs.argmax(axis=1).astype(int).tolist())
         y_fused.extend(fused_probs.argmax(axis=1).astype(int).tolist())
+        all_gates.extend(gates.astype(float).tolist())
         confidences.extend(fused_probs.max(axis=1).astype(float).tolist())
 
     y_true_arr = np.asarray(y_true, dtype=int)
     y_base_arr = np.asarray(y_baseline, dtype=int)
     y_fused_arr = np.asarray(y_fused, dtype=int)
+    gates_arr = np.asarray(all_gates, dtype=float)
 
     base_correct = (y_base_arr == y_true_arr)
     fused_correct = (y_fused_arr == y_true_arr)
@@ -303,6 +327,9 @@ def evaluate(model, ds: tf.data.Dataset) -> Dict:
 
     baseline_acc = float(base_correct.mean()) if len(base_correct) > 0 else 0.0
     fused_acc = float(fused_correct.mean()) if len(fused_correct) > 0 else 0.0
+    mean_gate = float(gates_arr.mean()) if len(gates_arr) > 0 else 0.0
+    gate_correct_baseline = float(gates_arr[base_correct].mean()) if base_correct.any() else 0.0
+    gate_wrong_baseline = float(gates_arr[~base_correct].mean()) if (~base_correct).any() else 0.0
 
     ids = list(range(len(EMOTION_NAMES)))
     cm = confusion_matrix(y_true, y_fused, labels=ids)
@@ -318,7 +345,9 @@ def evaluate(model, ds: tf.data.Dataset) -> Dict:
         "rescue_count": rescue_count,
         "harmed_count": harmed_count,
         "net_gain": net_gain,
-        "beta": float(model.beta.numpy()),
+        "mean_gate": mean_gate,
+        "gate_correct_baseline": gate_correct_baseline,
+        "gate_wrong_baseline": gate_wrong_baseline,
         "macro_f1": float(f1_score(y_true, y_fused, labels=ids, average="macro", zero_division=0)),
         "per_class_accuracy": per_class,
         "confusion_matrix": cm.tolist(),
@@ -346,30 +375,29 @@ def save_predictions(path: Path, sample_ids: np.ndarray, metrics: Dict) -> None:
 
 def run_baseline_preservation_smoke_test(model: SMIRKGeometryCrossAttentionFER, ds: tf.data.Dataset) -> None:
     features, labels = next(iter(ds.take(1)))
-    orig_beta = float(model.beta.numpy())
 
-    # 1. Forward pass with initial beta (e.g. 0.05)
+    # 1. Forward pass with dynamic gate
     outputs = model(features, training=False, return_attention=True)
     loss = ce_loss(labels, outputs["logits"])
     if not np.isfinite(float(loss.numpy())):
         raise FloatingPointError("Smoke-test loss is not finite.")
 
-    # 2. Strict baseline preservation test: set beta = 0.0
-    model.beta.assign(0.0)
+    # 2. Strict baseline preservation test: force_zero_gate = True
+    model.force_zero_gate = True
     zero_outputs = model(features, training=False)
     final_logits = zero_outputs["logits"].numpy()
     baseline_logits = zero_outputs["baseline_logits"].numpy()
     max_diff = float(np.max(np.abs(final_logits - baseline_logits)))
-    if max_diff > 1e-4:
-        raise ValueError(f"Baseline preservation smoke test failed: beta=0 max logit difference = {max_diff:.6f} > 1e-4")
+    model.force_zero_gate = False
 
-    # Restore original beta
-    model.beta.assign(orig_beta)
+    if max_diff > 1e-4:
+        raise ValueError(f"Baseline preservation smoke test failed: gate=0 max logit difference = {max_diff:.6f} > 1e-4")
 
     print("============================================================", flush=True)
-    print("[SMOKE TEST PASSED] Baseline-Preserving Residual Fusion Verified", flush=True)
-    print(f"  beta=0 max logit diff: {max_diff:.8f} (< 0.0001)", flush=True)
-    print(f"  initial_beta: {orig_beta:.5f}", flush=True)
+    print("[SMOKE TEST PASSED] Confidence-Aware Sample-Wise Dynamic Gate Verified", flush=True)
+    print(f"  gate=0 max logit diff: {max_diff:.8f} (< 0.0001)", flush=True)
+    print(f"  sample_gate_shape: {outputs['gate'].shape}", flush=True)
+    print(f"  mean_sample_gate: {float(tf.reduce_mean(outputs['gate']).numpy()):.5f}", flush=True)
     print(f"  image_batch: {features['image'].shape}", flush=True)
     print(f"  geometry_tokens_batch: {features['geometry_tokens'].shape}", flush=True)
     print(f"  baseline_logits: {outputs['baseline_logits'].shape}", flush=True)
@@ -419,6 +447,7 @@ def main() -> int:
     best_manager = tf.train.CheckpointManager(checkpoint, str(output_dir / "checkpoints" / "best_val_accuracy"), max_to_keep=1)
     last_manager = tf.train.CheckpointManager(checkpoint, str(output_dir / "checkpoints" / "last"), max_to_keep=1)
     best_score = -1.0
+    best_net_gain = -999999
     best_epoch = -1
     patience = int(cfg["training"].get("patience", 15))
     history = []
@@ -427,12 +456,17 @@ def main() -> int:
         start = time.time()
         train_metrics = train_one_epoch(model, optimizer, train_loop_ds)
         val_metrics = evaluate(model, val_loop_ds)
-        improved = float(val_metrics["accuracy"]) > best_score
+
+        fused_acc = float(val_metrics["accuracy"])
+        net_gain = int(val_metrics["net_gain"])
+        improved = (fused_acc > best_score) or (abs(fused_acc - best_score) < 1e-6 and net_gain > best_net_gain)
+
         if improved:
-            best_score = float(val_metrics["accuracy"])
+            best_score = fused_acc
+            best_net_gain = net_gain
             best_epoch = epoch + 1
             best_manager.save(checkpoint_number=epoch + 1)
-            print(f"[INFO] Save best_val_accuracy at epoch {epoch+1}: {best_score:.6f}", flush=True)
+            print(f"[INFO] Save best_val_accuracy at epoch {epoch+1}: fused_acc={best_score:.6f} net_gain={best_net_gain}", flush=True)
         last_manager.save(checkpoint_number=epoch + 1)
 
         row = {
@@ -445,7 +479,9 @@ def main() -> int:
             "rescue_count": val_metrics["rescue_count"],
             "harmed_count": val_metrics["harmed_count"],
             "net_gain": val_metrics["net_gain"],
-            "beta": val_metrics["beta"],
+            "mean_gate": val_metrics["mean_gate"],
+            "gate_correct_baseline": val_metrics["gate_correct_baseline"],
+            "gate_wrong_baseline": val_metrics["gate_wrong_baseline"],
             "val_macro_f1": val_metrics["macro_f1"],
             "best_epoch": best_epoch,
             "best_val_accuracy": best_score,
@@ -456,7 +492,8 @@ def main() -> int:
             f"Epoch {epoch+1:02d}: loss={row['train_loss']:.4f} acc={row['train_accuracy']:.4f} "
             f"val_loss={row['val_loss']:.4f} baseline_acc={row['baseline_acc']:.4f} fused_acc={row['fused_acc']:.4f} "
             f"rescue={row['rescue_count']} harmed={row['harmed_count']} net_gain={row['net_gain']} "
-            f"beta={row['beta']:.5f} val_f1={row['val_macro_f1']:.4f}",
+            f"mean_gate={row['mean_gate']:.5f} gate_correct={row['gate_correct_baseline']:.5f} "
+            f"gate_wrong={row['gate_wrong_baseline']:.5f} val_f1={row['val_macro_f1']:.4f}",
             flush=True,
         )
         if best_epoch > 0 and (epoch + 1 - best_epoch) >= patience:
@@ -483,7 +520,7 @@ def main() -> int:
     print(f"  baseline_accuracy={full_test_metrics['baseline_accuracy']:.6f}", flush=True)
     print(f"  fused_accuracy={full_test_metrics['accuracy']:.6f}", flush=True)
     print(f"  rescue_count={full_test_metrics['rescue_count']} harmed_count={full_test_metrics['harmed_count']} net_gain={full_test_metrics['net_gain']}", flush=True)
-    print(f"  beta={full_test_metrics['beta']:.5f}", flush=True)
+    print(f"  mean_gate={full_test_metrics['mean_gate']:.5f} gate_correct={full_test_metrics['gate_correct_baseline']:.5f} gate_wrong={full_test_metrics['gate_wrong_baseline']:.5f}", flush=True)
     print(f"  macro_f1={full_test_metrics['macro_f1']:.6f}", flush=True)
     print(f"  predictions={output_dir / 'predictions_smirk_geometry_test.csv'}", flush=True)
     return 0
