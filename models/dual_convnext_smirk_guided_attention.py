@@ -20,7 +20,7 @@ Architecture:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Iterable, Tuple
 
 import numpy as np
 import tensorflow as tf

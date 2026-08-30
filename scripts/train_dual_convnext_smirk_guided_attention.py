@@ -301,7 +301,7 @@ def main() -> int:
         return geom_vars, head_vars
 
     @tf.function
-    def train_step(x_batch, y_batch):
+    def train_step(x_batch, y_batch, is_unfrozen: bool = False):
         with tf.GradientTape(persistent=True) as tape:
             outputs = model(x_batch, training=True)
             f_logits = outputs["final_logits"]
@@ -347,13 +347,14 @@ def main() -> int:
             print(f"\n[EPOCH {epoch:02d}] Unfreezing Stage 4 of RGB ConvNeXt backbone for joint fine-tuning...", flush=True)
             model.unfreeze_rgb_stage4()
 
+        is_unfrozen = epoch >= unfreeze_epoch
         start_time = time.time()
         train_loss = 0.0
         train_acc = 0.0
         num_batches = 0
 
         for x_b, y_b in train_ds:
-            loss_v, acc_v, alpha_v = train_step(x_b, y_b)
+            loss_v, acc_v, alpha_v = train_step(x_b, y_b, is_unfrozen=is_unfrozen)
             train_loss += float(loss_v.numpy())
             train_acc += float(acc_v.numpy())
             num_batches += 1
