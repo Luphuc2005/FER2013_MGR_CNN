@@ -332,7 +332,11 @@ def group_learning_rates(cfg: Dict) -> Dict[str, float]:
     }
 
 
-def train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d: float, grad_clip_norm: float):
+def compute_distributed_ce_loss(loss_fn, labels, logits, global_batch_size: int) -> tf.Tensor:
+    per_example_loss = loss_fn(labels, logits)
+    return tf.nn.compute_average_loss(per_example_loss, global_batch_size=global_batch_size)
+
+def train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d: float, grad_clip_norm: float, global_batch_size: int):
     active_vars = unique_vars([var for vars_ in groups.values() for var in vars_])
     if not active_vars:
         raise RuntimeError("No active variables for train_step.")
@@ -342,8 +346,8 @@ def train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3
         outputs = model(inputs, training=True)
         final_logits = outputs["final_logits"]
         aux_logits = outputs["aux_3d_logits"]
-        l_final = loss_fn(labels, final_logits)
-        l_aux = loss_fn(labels, aux_logits)
+        l_final = compute_distributed_ce_loss(loss_fn, labels, final_logits, global_batch_size)
+        l_aux = compute_distributed_ce_loss(loss_fn, labels, aux_logits, global_batch_size)
         total_loss = l_final + loss_weight_3d * l_aux
         scaled_loss = loss_scale_optimizer.get_scaled_loss(total_loss)
 
@@ -387,9 +391,9 @@ def train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3
     }
 
 
-def distributed_train_step(strategy, model, optimizers, groups, dist_batch, loss_fn, loss_weight_3d: float, grad_clip_norm: float):
+def distributed_train_step(strategy, model, optimizers, groups, dist_batch, loss_fn, loss_weight_3d: float, grad_clip_norm: float, global_batch_size: int):
     def replica_step(inputs, labels):
-        return train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm)
+        return train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm, global_batch_size)
 
     per_replica = strategy.run(replica_step, args=dist_batch)
     reduced = {}
@@ -399,6 +403,8 @@ def distributed_train_step(strategy, model, optimizers, groups, dist_batch, loss
                 name: strategy.reduce(tf.distribute.ReduceOp.MEAN, group_value, axis=None)
                 for name, group_value in value.items()
             }
+        elif key == "loss":
+            reduced[key] = strategy.reduce(tf.distribute.ReduceOp.SUM, value, axis=None)
         else:
             reduced[key] = strategy.reduce(tf.distribute.ReduceOp.MEAN, value, axis=None)
     return reduced
@@ -488,7 +494,7 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
     groups = trainable_group_vars_for_phase(model, phase=1)
     assert_group_contract(model, groups, phase=1)
     optimizers = build_optimizers(cfg)
-    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
     loss_weight_3d = float(cfg["training"].get("loss_weight_3d", 0.1))
     grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 1.0))
     if grad_clip_norm <= 0.0:
@@ -507,10 +513,10 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
         if batch_idx > dry_batches:
             break
         if strategy.num_replicas_in_sync > 1:
-            metrics = distributed_train_step(strategy, model, optimizers, groups, batch, loss_fn, loss_weight_3d, grad_clip_norm)
+            metrics = distributed_train_step(strategy, model, optimizers, groups, batch, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
         else:
             inputs, labels = batch
-            metrics = train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm)
+            metrics = train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
         print(
             f"DRY_RUN_BATCH {batch_idx} "
             f"loss={float(metrics['loss'].numpy()):.6f} "
@@ -619,7 +625,7 @@ def main() -> int:
         patience = int(cfg["training"]["patience"])
         loss_weight_3d = float(cfg["training"].get("loss_weight_3d", 0.1))
         grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 1.0))
-        loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+        loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.NONE)
         optimizers = build_optimizers(cfg)
 
     dist_train_ds = strategy.experimental_distribute_dataset(train_ds)
@@ -649,10 +655,10 @@ def main() -> int:
         gate_means, mod_mins, mod_maxs = [], [], []
         for batch in dist_train_ds:
             if strategy.num_replicas_in_sync > 1:
-                metrics = distributed_train_step(strategy, model, optimizers, groups, batch, loss_fn, loss_weight_3d, grad_clip_norm)
+                metrics = distributed_train_step(strategy, model, optimizers, groups, batch, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
             else:
                 inputs, labels = batch
-                metrics = train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm)
+                metrics = train_step(model, optimizers, groups, inputs, labels, loss_fn, loss_weight_3d, grad_clip_norm, int(cfg["data"]["batch_size"]))
             losses.append(float(metrics["loss"].numpy()))
             accs.append(float(metrics["accuracy"].numpy()))
             aux_accs.append(float(metrics["aux_accuracy"].numpy()))
