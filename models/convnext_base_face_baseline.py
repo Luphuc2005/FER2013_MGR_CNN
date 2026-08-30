@@ -425,6 +425,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         except Exception as exc:
             return 0, f"assign_error: {label} key={key} error={exc}"
 
+    def load_pytorch_pretrained(self, weight_path: str, require: bool = False) -> str:
+        return self._load_pytorch_pretrained(weight_path, require=require)
+
     def _load_pytorch_pretrained(self, weight_path: str, require: bool = False) -> str:
         resolved = self._resolve_weight_path(weight_path)
         if not resolved.exists():

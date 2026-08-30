@@ -123,13 +123,15 @@ class DualConvNeXtSMIRKGuidedAttentionFER(tf.keras.Model):
         """Load PyTorch MS1M-ArcFace pretrained weights into BOTH RGB and Geometry backbones."""
         req = bool(cfg.get("rgb_backbone", {}).get("convnext_base_require_pretrained", False))
         ckpt_path = cfg.get("rgb_backbone", {}).get("convnext_base_pretrained_path") or "pretrained/convnext_base_ms1m_arcface.pth"
-        
+
         print("[DualConvNeXt] Loading MS1M-ArcFace pretrained weights for RGB ConvNeXt...", flush=True)
-        status_rgb = self.rgb_baseline.load_pytorch_pretrained(ckpt_path, require=req)
-        
+        loader_rgb = getattr(self.rgb_baseline, "load_pytorch_pretrained", getattr(self.rgb_baseline, "_load_pytorch_pretrained", None))
+        status_rgb = loader_rgb(ckpt_path, require=req) if loader_rgb else "skipped"
+
         print("[DualConvNeXt] Loading MS1M-ArcFace pretrained weights for Shared Geometry ConvNeXt...", flush=True)
-        status_geom = self.geometry_baseline.load_pytorch_pretrained(ckpt_path, require=req)
-        
+        loader_geom = getattr(self.geometry_baseline, "load_pytorch_pretrained", getattr(self.geometry_baseline, "_load_pytorch_pretrained", None))
+        status_geom = loader_geom(ckpt_path, require=req) if loader_geom else "skipped"
+
         return status_rgb, status_geom
 
     def print_contract_summary(self) -> None:
