@@ -149,7 +149,7 @@ def run_contract_smoke_test(model: DualConvNeXtSMIRKGuidedAttentionFER, baseline
         return True
 
     print(f"[SMOKE_TEST] Restoring baseline weights from: {resolved_ckpt}", flush=True)
-    model.rgb_baseline.load_weights(resolved_ckpt).expect_partial()
+    tf.train.Checkpoint(model=model.rgb_baseline).restore(resolved_ckpt).expect_partial()
 
     # 2. Force alpha = 0.0
     model.alpha.assign(0.0)
@@ -306,7 +306,7 @@ def main() -> int:
     resolved_ckpt = tf.train.latest_checkpoint(baseline_ckpt_path) if Path(baseline_ckpt_path).is_dir() else baseline_ckpt_path
     if resolved_ckpt and (Path(resolved_ckpt + ".index").exists() or Path(resolved_ckpt).exists()):
         print(f"[INFO] Restoring baseline FER classifier weights into RGB branch: {resolved_ckpt}", flush=True)
-        model.rgb_baseline.load_weights(resolved_ckpt).expect_partial()
+        tf.train.Checkpoint(model=model.rgb_baseline).restore(resolved_ckpt).expect_partial()
 
     # 4. Setup Optimizers
     loss_weight_3d = float(cfg.get("training", {}).get("loss_weight_3d", 0.1))
