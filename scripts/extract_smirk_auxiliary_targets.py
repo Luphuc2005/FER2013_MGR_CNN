@@ -7,12 +7,21 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-import cv2
 import numpy as np
 import torch
 import yaml
-from skimage.transform import estimate_transform
+from PIL import Image
 from tqdm import tqdm
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+try:
+    from skimage.transform import estimate_transform
+except ImportError:
+    estimate_transform = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -96,6 +105,8 @@ def load_frozen_smirk_encoder(smirk_encoder_module, checkpoint_path: Path, devic
 
 
 def crop_face_transform(landmarks: np.ndarray, scale: float = 1.4, image_size: int = 224):
+    if estimate_transform is None:
+        return None
     left, right = np.min(landmarks[:, 0]), np.max(landmarks[:, 0])
     top, bottom = np.min(landmarks[:, 1]), np.max(landmarks[:, 1])
     old_size = (right - left + bottom - top) / 2
@@ -113,26 +124,37 @@ def crop_face_transform(landmarks: np.ndarray, scale: float = 1.4, image_size: i
 
 
 def preprocess_image_for_smirk(image: np.ndarray, landmarks: Optional[np.ndarray], run_mediapipe_fn, image_size: int = 224) -> torch.Tensor:
-    if image.ndim == 2:
-        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    elif image.ndim == 3 and image.shape[-1] == 1:
-        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if cv2 is not None:
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.ndim == 3 and image.shape[-1] == 1:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
-    if landmarks is None and run_mediapipe_fn is not None:
-        try:
-            mp_res = run_mediapipe_fn(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-            if mp_res is not None and len(mp_res) > 0:
-                landmarks = mp_res[0]
-        except Exception:
-            landmarks = None
+        if landmarks is None and run_mediapipe_fn is not None:
+            try:
+                mp_res = run_mediapipe_fn(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                if mp_res is not None and len(mp_res) > 0:
+                    landmarks = mp_res[0]
+            except Exception:
+                landmarks = None
 
-    if landmarks is not None:
-        tform = crop_face_transform(landmarks, scale=1.4, image_size=image_size)
-        cropped = cv2.warpAffine(image, tform.params[:2], (image_size, image_size))
+        if landmarks is not None and estimate_transform is not None:
+            tform = crop_face_transform(landmarks, scale=1.4, image_size=image_size)
+            if tform is not None:
+                cropped = cv2.warpAffine(image, tform.params[:2], (image_size, image_size))
+            else:
+                cropped = cv2.resize(image, (image_size, image_size))
+        else:
+            cropped = cv2.resize(image, (image_size, image_size))
+
+        cropped_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
     else:
-        cropped = cv2.resize(image, (image_size, image_size))
+        # PIL fallback when OpenCV is not installed
+        if image.ndim == 3 and image.shape[-1] == 1:
+            image = image[:, :, 0]
+        pil_img = Image.fromarray(image).convert("RGB")
+        cropped_rgb = np.array(pil_img.resize((image_size, image_size), Image.BILINEAR))
 
-    cropped_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
     tensor = torch.from_numpy(cropped_rgb.transpose(2, 0, 1)).float() / 255.0
     return tensor
 
@@ -204,7 +226,7 @@ def extract_split_targets(
         jaw_params = np.concatenate(jaw_list, axis=0)
         head_pose_params = np.concatenate(head_pose_list, axis=0)
     else:
-        print(f"[WARNING] SMIRK encoder not available. Generating target shape trace fallback.", flush=True)
+        print(f"[WARNING] SMIRK PyTorch encoder not available in environment. Generating target shape trace fallback.", flush=True)
         expression_params = np.random.randn(num_samples, 50).astype(np.float32) * 0.1
         jaw_params = np.random.randn(num_samples, 3).astype(np.float32) * 0.05
         head_pose_params = np.random.randn(num_samples, 3).astype(np.float32) * 0.05
