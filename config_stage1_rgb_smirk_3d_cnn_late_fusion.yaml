@@ -100,7 +100,7 @@ training:
   loss_weight_3d: 0.3
   label_smoothing: 0.0
   optimizer: "adamw"
-  lr: 0.0001
+  lr: 0.0005
   weight_decay: 0.01
   grad_clip_norm: 1.0
   monitor: "val_fused_accuracy"

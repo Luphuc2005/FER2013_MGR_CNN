@@ -123,6 +123,7 @@ class Stage1RGBSMIRK3DCNNLateFusionFER(tf.keras.Model):
         self.rgb_baseline.trainable = False
 
         self.geometry_cnn = SmallDepthNormalCNN(cfg, name="geometry_cnn")
+        self.geometry_ln = tf.keras.layers.LayerNormalization(name="geometry_ln")
         self.geometry_head = tf.keras.layers.Dense(self.num_classes, name="geometry_head")
         self.fusion_mlp = tf.keras.Sequential(
             [
@@ -181,7 +182,7 @@ class Stage1RGBSMIRK3DCNNLateFusionFER(tf.keras.Model):
 
     def trainable_branch_variables(self) -> Tuple[list, list, list]:
         return (
-            list(self.geometry_cnn.trainable_variables),
+            list(self.geometry_cnn.trainable_variables) + list(self.geometry_ln.trainable_variables),
             list(self.geometry_head.trainable_variables),
             list(self.fusion_mlp.trainable_variables),
         )
@@ -227,7 +228,8 @@ class Stage1RGBSMIRK3DCNNLateFusionFER(tf.keras.Model):
         image = inputs["image"]
         geometry_maps = inputs["geometry_maps"]
         rgb_feature, rgb_logits, endpoints = self._rgb_forward(image)
-        geometry_feature = tf.cast(self.geometry_cnn(geometry_maps, training=training), tf.float32)
+        geometry_feature_raw = tf.cast(self.geometry_cnn(geometry_maps, training=training), tf.float32)
+        geometry_feature = self.geometry_ln(geometry_feature_raw)
         geometry_logits = tf.cast(self.geometry_head(geometry_feature), tf.float32)
         fusion_input = tf.concat([rgb_feature, geometry_feature], axis=-1)
         fusion_logits = tf.cast(self.fusion_mlp(fusion_input, training=training), tf.float32)
