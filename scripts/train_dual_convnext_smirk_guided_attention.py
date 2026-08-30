@@ -345,7 +345,7 @@ def main() -> int:
         return geom_vars, head_vars
 
     @tf.function
-    def train_step_standard(x_batch, y_batch):
+    def train_step_standard(x_batch, y_batch, is_unfrozen: bool = False):
         with tf.GradientTape(persistent=True) as tape:
             outputs = model(x_batch, training=True)
             f_logits = outputs["final_logits"]
@@ -380,7 +380,7 @@ def main() -> int:
         return total_loss, acc, outputs["alpha"]
 
     @tf.function
-    def train_step_sam(x_batch, y_batch):
+    def train_step_sam(x_batch, y_batch, is_unfrozen: bool = False):
         geom_vars, head_vars = get_variables()
 
         with tf.GradientTape(persistent=True) as tape:
