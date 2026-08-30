@@ -265,9 +265,24 @@ def main() -> int:
     args = parse_args()
     cfg = load_yaml(args.config)
 
+    # Enable Memory Growth for all GPUs
+    gpus = tf.config.list_physical_devices("GPU")
+    if gpus:
+        for gpu in gpus:
+            try:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            except Exception as e:
+                print(f"[WARNING] Could not set memory growth for {gpu}: {e}", flush=True)
+
     # Enable Mixed Precision
     tf.keras.mixed_precision.set_global_policy("mixed_float16")
     print(f"[INFO] Mixed precision policy set to: {tf.keras.mixed_precision.global_policy().name}", flush=True)
+
+    if args.multi_gpu and len(gpus) > 1:
+        strategy = tf.distribute.MirroredStrategy()
+        print(f"[INFO] MirroredStrategy initialized with {strategy.num_replicas_in_sync} GPUs", flush=True)
+    else:
+        strategy = tf.distribute.get_strategy()
 
     output_dir = resolve_path(cfg["paths"]["output_dir"])
     ckpt_dir = output_dir / "checkpoints" / "best"

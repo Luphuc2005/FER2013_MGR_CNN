@@ -55,7 +55,8 @@ echo "============================================================"
     --config "$CONFIG" \
     --skip-baseline-checkpoint \
     --skip-smoke-test \
-    --use-sam
+    --use-sam \
+    --multi-gpu
 
 echo
 echo "============================================================"
