@@ -32,13 +32,13 @@ training:
   epochs: 60
   patience: 15
   loss_weight_3d: 0.1
-  label_smoothing: 0.0
+  label_smoothing: 0.10
   optimizer: "adamw"
   lr_head: 0.0005
   lr_geom_backbone: 0.00005
   lr_rgb_unfreeze: 0.00001
   unfreeze_rgb_stage4_epoch: 999
-  weight_decay: 0.01
+  weight_decay: 0.035
   grad_clip_norm: 1.0
   monitor: "val_accuracy"
   best_checkpoint_start_epoch: 1

@@ -53,7 +53,7 @@ echo "============================================================"
 
 "$FER_PY" -u scripts/train_dual_convnext_smirk_guided_attention.py \
     --config "$CONFIG" \
-    --use-sam --sam-rho 0.02
+    --use-sam --sam-rho 0.03
 
 echo
 echo "============================================================"

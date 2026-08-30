@@ -193,6 +193,7 @@ def run_contract_smoke_test(model: DualConvNeXtSMIRKGuidedAttentionFER, baseline
 def build_optimizers(cfg: Dict):
     lr_head = float(cfg.get("training", {}).get("lr_head", 0.0005))
     lr_geom = float(cfg.get("training", {}).get("lr_geom_backbone", 0.00005))
+    weight_decay = float(cfg.get("training", {}).get("weight_decay", 0.035))
 
     adamw = getattr(tf.keras.optimizers, "AdamW", None)
     if adamw is None:
@@ -200,11 +201,11 @@ def build_optimizers(cfg: Dict):
 
     if adamw is not None:
         try:
-            opt_head = adamw(learning_rate=lr_head, weight_decay=0.01, jit_compile=False)
-            opt_geom = adamw(learning_rate=lr_geom, weight_decay=0.01, jit_compile=False)
+            opt_head = adamw(learning_rate=lr_head, weight_decay=weight_decay, jit_compile=False)
+            opt_geom = adamw(learning_rate=lr_geom, weight_decay=weight_decay, jit_compile=False)
         except TypeError:
-            opt_head = adamw(learning_rate=lr_head, weight_decay=0.01)
-            opt_geom = adamw(learning_rate=lr_geom, weight_decay=0.01)
+            opt_head = adamw(learning_rate=lr_head, weight_decay=weight_decay)
+            opt_geom = adamw(learning_rate=lr_geom, weight_decay=weight_decay)
     else:
         opt_head = tf.keras.optimizers.Adam(learning_rate=lr_head)
         opt_geom = tf.keras.optimizers.Adam(learning_rate=lr_geom)
@@ -335,7 +336,14 @@ def main() -> int:
     # 4. Setup Optimizers
     loss_weight_3d = float(cfg.get("training", {}).get("loss_weight_3d", 0.1))
     opt_head, opt_geom = build_optimizers(cfg)
-    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+    
+    label_smoothing = float(cfg.get("training", {}).get("label_smoothing", 0.0))
+    if label_smoothing > 0.0:
+        cce = tf.keras.losses.CategoricalCrossentropy(from_logits=True, label_smoothing=label_smoothing)
+        def loss_fn(y_true, y_pred):
+            return cce(tf.one_hot(y_true, 7), y_pred)
+    else:
+        loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
     loss_scale_head = tf.keras.mixed_precision.LossScaleOptimizer(opt_head)
     loss_scale_geom = tf.keras.mixed_precision.LossScaleOptimizer(opt_geom)
