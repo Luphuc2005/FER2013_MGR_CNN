@@ -1,0 +1,81 @@
+# Dual ConvNeXt-Base MS1M + SMIRK Geometry 3D-Guided Attention for FER2013 on Kaggle 2x GPUs.
+
+seed: 42
+
+data:
+  num_classes: 7
+  image_size: 112
+  batch_size: 32
+  data_path: "/kaggle/input/datasets/doduyquynii/fer13-split"
+  use_clean_filter: false
+  predecode_pixels: true
+
+rgb_backbone:
+  name: "convnext_base_ms1m_arcface"
+  convnext_base_pretrained_path: "/kaggle/input/models/lhngphc/ms1m-pretrained/tensorflow2/default/1/convnext_base_ms1m_arcface.pth"
+  convnext_base_require_pretrained: true
+  classifier_dropout1: 0.35
+  ablation: "cnn_only"
+
+geometry_cache:
+  feature_dir: "/kaggle/input/3d-smirk"
+  map_file_pattern: "{split}_smirk_depth_normal_maps.npz"
+  dtype: "float16"
+
+model:
+  name: "dual_convnext_smirk_guided_attention_ms1m_fer_scratch"
+  feature_dim: 1024
+  attention_hidden_dim: 256
+  alpha_max: 0.2
+
+training:
+  epochs: 100
+  patience: 25
+  use_sam: true
+  sam_rho: 0.03
+  loss_weight_3d: 0.1
+  label_smoothing: 0.10
+  top_k_checkpoints: 5
+  optimizer: "adamw"
+  weight_decay: 0.035
+  grad_clip_norm: 1.0
+  dry_run_batches: 3
+  monitor: "val_accuracy"
+  best_checkpoint_start_epoch: 1
+  progress_interval: 50
+  stages:
+    phase1_end_epoch: 5
+    phase2_end_epoch: 20
+  learning_rates:
+    head: 0.0003
+    alpha_raw: 0.0003
+    fusion: 0.0003
+    attention: 0.0003
+    aux_head: 0.0003
+    rgb_stage4: 0.00003
+    geometry_stage4: 0.00003
+    rgb_stage3: 0.00003
+    geometry_stage3: 0.00003
+
+tta:
+  enabled: true
+  hflip: true
+  original_weight: 0.5
+  flip_weight: 0.5
+
+augmentation:
+  horizontal_flip: true
+  rotation_degrees: 15.0
+  brightness_delta: 0.15
+  contrast_lower: 0.85
+  contrast_upper: 1.15
+  gamma_prob: 0.5
+  gamma_min: 0.5
+  gamma_max: 2.0
+  random_erasing_prob: 0.40
+  random_erasing_area_min: 0.02
+  random_erasing_area_max: 0.15
+  random_erasing_value: "random"
+
+paths:
+  output_dir: "outputs/dual_convnext_smirk_guided_attention_ms1m_fer_scratch"
