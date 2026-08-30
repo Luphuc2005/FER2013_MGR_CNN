@@ -428,7 +428,6 @@ def make_train_step(
     sam_rho: float = 0.05,
     label_smoothing: float = 0.0,
 ):
-    @tf.function
     def train_step(inputs, labels, phase: int):
         groups = trainable_group_vars_for_phase(model, phase)
         active_vars = unique_vars([var for vars_ in groups.values() for var in vars_])
@@ -538,23 +537,27 @@ def make_train_step(
     return train_step
 
 
-def distributed_train_step(strategy, step_fn, dist_batch, phase: int):
-    def replica_step(inputs, labels):
-        return step_fn(inputs, labels, phase)
+def make_distributed_train_step(strategy, step_fn):
+    @tf.function
+    def dist_step(dist_batch, phase: int):
+        def replica_step(inputs, labels):
+            return step_fn(inputs, labels, phase)
 
-    per_replica = strategy.run(replica_step, args=dist_batch)
-    reduced = {}
-    for key, value in per_replica.items():
-        if key == "group_grad_norms":
-            reduced[key] = {
-                name: strategy.reduce(tf.distribute.ReduceOp.MEAN, group_value, axis=None)
-                for name, group_value in value.items()
-            }
-        elif key == "loss":
-            reduced[key] = strategy.reduce(tf.distribute.ReduceOp.SUM, value, axis=None)
-        else:
-            reduced[key] = strategy.reduce(tf.distribute.ReduceOp.MEAN, value, axis=None)
-    return reduced
+        per_replica = strategy.run(replica_step, args=dist_batch)
+        reduced = {}
+        for key, value in per_replica.items():
+            if key == "group_grad_norms":
+                reduced[key] = {
+                    name: strategy.reduce(tf.distribute.ReduceOp.MEAN, group_value, axis=None)
+                    for name, group_value in value.items()
+                }
+            elif key == "loss":
+                reduced[key] = strategy.reduce(tf.distribute.ReduceOp.SUM, value, axis=None)
+            else:
+                reduced[key] = strategy.reduce(tf.distribute.ReduceOp.MEAN, value, axis=None)
+        return reduced
+
+    return dist_step
 
 
 def evaluate_model(model, dataset: tf.data.Dataset, loss_weight_3d: float, use_tta: bool = True) -> Dict:
@@ -682,16 +685,21 @@ def run_dry_run(model, cfg: Dict, train_ds: tf.data.Dataset, strategy) -> None:
     geom_frozen_before = [v.numpy().copy() for v in geom_frozen_vars]
     fer_head_before = [v.numpy().copy() for v in groups["fer_head"]]
 
+    if strategy.num_replicas_in_sync > 1:
+        dist_step_fn = make_distributed_train_step(strategy, step_fn)
+    else:
+        dist_step_fn = tf.function(step_fn)
+
     dry_batches = int(cfg["training"].get("dry_run_batches", 3))
     train_iter = strategy.experimental_distribute_dataset(train_ds)
     for idx, batch in enumerate(train_iter):
         if idx >= dry_batches:
             break
         if strategy.num_replicas_in_sync > 1:
-            step_metrics = distributed_train_step(strategy, step_fn, batch, phase=1)
+            step_metrics = dist_step_fn(batch, phase=1)
         else:
             inputs, labels = batch
-            step_metrics = step_fn(inputs, labels, phase=1)
+            step_metrics = dist_step_fn(inputs, labels, phase=1)
         print(f"DRY_RUN_BATCH idx={idx+1} loss={step_metrics['loss']:.6f} acc={step_metrics['accuracy']:.6f}", flush=True)
 
     diff_rgb = max_abs_diff(rgb_before, rgb_backbone_vars)
@@ -823,6 +831,11 @@ def main() -> int:
             sam_rho=sam_rho,
             label_smoothing=label_smoothing,
         )
+        if strategy.num_replicas_in_sync > 1:
+            dist_step_fn = make_distributed_train_step(strategy, step_fn)
+        else:
+            dist_step_fn = tf.function(step_fn)
+
     dist_train_ds = strategy.experimental_distribute_dataset(train_ds)
 
     best_val_acc = -1.0
@@ -856,10 +869,10 @@ def main() -> int:
         gate_means, mod_mins, mod_maxs = [], [], []
         for batch_idx, batch in enumerate(dist_train_ds, start=1):
             if strategy.num_replicas_in_sync > 1:
-                metrics = distributed_train_step(strategy, step_fn, batch, phase=phase)
+                metrics = dist_step_fn(batch, phase=phase)
             else:
                 inputs, labels = batch
-                metrics = step_fn(inputs, labels, phase=phase)
+                metrics = dist_step_fn(inputs, labels, phase=phase)
             losses.append(float(metrics["loss"].numpy()))
             accs.append(float(metrics["accuracy"].numpy()))
             aux_accs.append(float(metrics["aux_accuracy"].numpy()))
