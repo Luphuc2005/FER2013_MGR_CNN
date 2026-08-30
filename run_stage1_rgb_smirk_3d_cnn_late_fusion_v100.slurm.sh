@@ -5,7 +5,7 @@
 #SBATCH --qos=gpu-q
 #SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=64G
+#SBATCH --mem=96G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_STAGE1_3D_FUSION_%j.out
 #SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_STAGE1_3D_FUSION_%j.err
 
@@ -99,7 +99,7 @@ except ImportError as e:
 print("SMIRK_HOST_ENV_VERIFICATION_SUCCESS")
 PY
 
-SKIP_EXTRACTION="${SKIP_EXTRACTION:-0}"
+SKIP_EXTRACTION="${SKIP_EXTRACTION:-1}"
 
 if [ "$SKIP_EXTRACTION" -ne 1 ]; then
     echo
