@@ -176,13 +176,9 @@ def create_dataset(records, cache_dict: Dict, cfg: Dict, batch_size: int, is_tra
         tf.TensorSpec(shape=(), dtype=tf.int64),
     )
     ds = tf.data.Dataset.from_generator(generator, output_signature=output_signature)
-    if is_training:
-        ds = ds.shuffle(buffer_size=min(num_samples, 2048), reshuffle_each_iteration=True)
-    ds = ds.batch(batch_size, drop_remainder=is_training)
-
     aug_cfg = cfg.get("augmentation", {})
 
-    def batch_mapper(item, label):
+    def sample_mapper(item, label):
         img = preprocess_batch_images(item["image"], target_size=112)
         geom = item["geometry_maps"]
 
@@ -198,7 +194,13 @@ def create_dataset(records, cache_dict: Dict, cfg: Dict, batch_size: int, is_tra
 
         return {"image": img, "geometry_maps": geom}, label
 
-    ds = ds.map(batch_mapper, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
+    if is_training:
+        ds = ds.shuffle(buffer_size=min(num_samples, 4096), reshuffle_each_iteration=True)
+
+    ds = ds.map(sample_mapper, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.batch(batch_size, drop_remainder=is_training)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+
     options = tf.data.Options()
     options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.DATA
     return ds.with_options(options)
