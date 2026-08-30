@@ -74,7 +74,15 @@ def assert_no_fer_checkpoint_restore_config(cfg: Dict) -> None:
 
 
 def load_geometry_cache(cache_dir: Path, pattern: str, split: str) -> Dict[str, np.ndarray]:
-    npz_path = cache_dir / pattern.format(split=split)
+    target_name = pattern.format(split=split)
+    npz_path = cache_dir / target_name
+    if not npz_path.exists():
+        kaggle_input = Path("/kaggle/input")
+        if kaggle_input.exists():
+            matches = list(kaggle_input.glob(f"**/{target_name}"))
+            if matches:
+                npz_path = matches[0]
+                print(f"[INFO] Auto-resolved Kaggle geometry cache for {split} -> {npz_path}", flush=True)
     if not npz_path.exists():
         raise FileNotFoundError(f"Geometry cache map not found: {npz_path}")
     data = np.load(npz_path)

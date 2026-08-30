@@ -93,6 +93,20 @@ def main():
     cfg = load_config(args.config)
     output_dir = resolve_path(cfg["paths"]["output_dir"])
 
+    def load_geometry_cache(cache_dir: Path, pattern: str, split: str) -> Dict[str, np.ndarray]:
+        target_name = pattern.format(split=split)
+        npz_path = cache_dir / target_name
+        if not npz_path.exists():
+            kaggle_input = Path("/kaggle/input")
+            if kaggle_input.exists():
+                matches = list(kaggle_input.glob(f"**/{target_name}"))
+                if matches:
+                    npz_path = matches[0]
+                    print(f"[INFO] Auto-resolved Kaggle geometry cache for {split} -> {npz_path}", flush=True)
+        if not npz_path.exists():
+            raise FileNotFoundError(f"Geometry cache map not found: {npz_path}")
+        return np.load(npz_path)
+
     json_path = Path(args.top_k_json) if args.top_k_json else output_dir / "top_k_checkpoints.json"
     if not json_path.exists():
         print(f"[ERROR] Top-K JSON file not found at: {json_path}")
