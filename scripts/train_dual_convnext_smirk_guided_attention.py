@@ -73,6 +73,25 @@ def load_geometry_cache(cache_dir: Path, pattern: str, split: str) -> Dict[str, 
     }
 
 
+import cv2
+
+
+def preprocess_fer_image(raw_img: np.ndarray, target_size: int = 112) -> np.ndarray:
+    if raw_img.ndim == 2:
+        img_3ch = cv2.cvtColor(raw_img, cv2.COLOR_GRAY2RGB)
+    elif raw_img.ndim == 3 and raw_img.shape[-1] == 1:
+        img_3ch = cv2.cvtColor(raw_img.squeeze(-1), cv2.COLOR_GRAY2RGB)
+    elif raw_img.ndim == 3 and raw_img.shape[-1] == 3:
+        img_3ch = raw_img
+    else:
+        raise ValueError(f"Unexpected image shape: {raw_img.shape}")
+
+    if img_3ch.shape[0] != target_size or img_3ch.shape[1] != target_size:
+        img_3ch = cv2.resize(img_3ch, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+
+    return img_3ch.astype(np.float32) / 255.0
+
+
 def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, is_training: bool = True) -> tf.data.Dataset:
     images = records.images
     labels = records.labels
@@ -88,7 +107,7 @@ def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, 
         if is_training:
             np.random.shuffle(indices)
         for idx in indices:
-            img = images[idx].astype(np.float32) / 255.0
+            img = preprocess_fer_image(images[idx], target_size=112)
             g_map = geom_maps[idx]
             lbl = labels[idx]
             yield {"image": img, "geometry_maps": g_map}, lbl
