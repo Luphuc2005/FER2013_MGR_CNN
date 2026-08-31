@@ -673,12 +673,17 @@ def main() -> int:
 
     print("[INFO] Final test evaluation: no TTA", flush=True)
     test_no_tta = evaluate_dataset(model, test_ds, cfg, use_tta_hflip=False)
+    print(f"[INFO] Test (no TTA): accuracy={test_no_tta['accuracy']:.4f}, macro_f1={test_no_tta['macro_f1']:.4f}, loss={test_no_tta['loss']:.4f}", flush=True)
     save_metrics(test_no_tta, run_dir / "test_metrics_no_tta.json")
+
+    final_test = test_no_tta
     if bool(cfg.get("tta", {}).get("enabled", False)) and bool(cfg.get("tta", {}).get("hflip", False)):
         print("[INFO] Final test evaluation: hflip TTA", flush=True)
         test_tta = evaluate_dataset(model, test_ds, cfg, use_tta_hflip=True)
+        print(f"[INFO] Test (hflip TTA): accuracy={test_tta['accuracy']:.4f}, macro_f1={test_tta['macro_f1']:.4f}, loss={test_tta['loss']:.4f}", flush=True)
         save_metrics(test_tta, run_dir / "test_metrics_tta_hflip.json")
         save_metrics(test_tta, run_dir / "test_metrics.json")
+        final_test = test_tta
     else:
         save_metrics(test_no_tta, run_dir / "test_metrics.json")
 
@@ -687,6 +692,8 @@ def main() -> int:
     print(f"  Best epoch: {best_epoch}", flush=True)
     print(f"  Best val accuracy: {best_acc:.4f}", flush=True)
     print(f"  Best val macro-F1: {best_macro:.4f}", flush=True)
+    print(f"  Final test accuracy: {final_test['accuracy']:.4f}", flush=True)
+    print(f"  Final test macro-F1: {final_test['macro_f1']:.4f}", flush=True)
     print(f"  Output: {run_dir}", flush=True)
     print("=" * 72, flush=True)
     return 0

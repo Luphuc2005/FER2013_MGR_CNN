@@ -783,6 +783,9 @@ def main() -> int:
     print(f"  Best epoch: {best_epoch}", flush=True)
     print(f"  Best val HFlip-TTA accuracy: {best_acc:.4f}", flush=True)
     print(f"  Best val macro-F1: {best_macro:.4f}", flush=True)
+    print(f"  Final test accuracy (No TTA): {float(test_no_tta['accuracy']):.4f}", flush=True)
+    print(f"  Final test accuracy (HFlip TTA): {float(test_tta['accuracy']):.4f}", flush=True)
+    print(f"  Final test macro-F1: {float(test_tta['macro_f1']):.4f}", flush=True)
     print(f"  Output: {run_dir}", flush=True)
     print("=" * 72, flush=True)
     return 0
