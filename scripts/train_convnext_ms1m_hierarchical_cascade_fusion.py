@@ -32,11 +32,15 @@ os.environ["TF_DISABLE_XLA_COMPILATION"] = "1"
 os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from datasets.fer2013 import build_datasets
 from models.convnext_ms1m_hierarchical_cascade_fusion import (
     ConvNeXtMS1MHierarchicalCascadeFusionFER,
     count_params,
 )
-from utils.dataset_factory import build_fer_datasets
 
 
 def parse_args():
@@ -306,7 +310,7 @@ def main() -> int:
     output_dir = Path(cfg["paths"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_ds, val_ds, test_ds = build_fer_datasets(cfg)
+    train_ds, val_ds, test_ds = build_datasets(cfg)
     steps_per_epoch = len(train_ds)
     print(f"[DATA] Train steps/epoch: {steps_per_epoch}, Val steps: {len(val_ds)}, Test steps: {len(test_ds)}", flush=True)
 
