@@ -310,7 +310,7 @@ def main() -> int:
     output_dir = Path(cfg["paths"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_ds, val_ds, test_ds = build_datasets(cfg)
+    train_ds, val_ds, test_ds = build_datasets(cfg, replicas=1)
     steps_per_epoch = len(train_ds)
     print(f"[DATA] Train steps/epoch: {steps_per_epoch}, Val steps: {len(val_ds)}, Test steps: {len(test_ds)}", flush=True)
 
