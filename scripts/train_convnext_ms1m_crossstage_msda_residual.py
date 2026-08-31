@@ -1,8 +1,8 @@
 """Train ConvNeXt-B MS1M Cross-Stage MSDA Residual for FER2013.
 
 New experiment only. It initializes from the MS1M/ArcFace ConvNeXt-B checkpoint,
-does not restore any FER checkpoint for the main run, uses AdamW without SAM, and
-writes only to outputs/tf_runs/convnext_ms1m_crossstage_msda_residual by default.
+does not restore any FER checkpoint for the main run, supports AdamW-only and
+separate SAM configs, and writes to experiment-specific output directories.
 """
 
 from __future__ import annotations
@@ -312,6 +312,108 @@ def make_train_step(model: ConvNeXtMS1MCrossStageMSDAResidualFER, cfg: Dict, opt
     return train_step
 
 
+def make_sam_train_step(model: ConvNeXtMS1MCrossStageMSDAResidualFER, cfg: Dict, optimizer_module, optimizer_backbone, train_backbone: bool):
+    module_vars = model.head_variables()
+    backbone_vars = model.backbone_variables() if train_backbone else []
+    grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 1.0))
+    sam_rho = float(cfg["training"].get("sam_rho", 0.03))
+    module_ids = {id(v) for v in module_vars}
+
+    def _split_pairs(clipped_all, vars_all):
+        module_pairs = []
+        backbone_pairs = []
+        for grad, var in zip(clipped_all, vars_all):
+            if id(var) in module_ids:
+                module_pairs.append((grad, var))
+            else:
+                backbone_pairs.append((grad, var))
+        return module_pairs, backbone_pairs
+
+    @tf.function(reduce_retracing=True, jit_compile=False)
+    def train_step(inputs, labels):
+        with tf.GradientTape(persistent=True) as tape:
+            outputs = model(inputs, training=True)
+            loss = cross_entropy_loss(labels, outputs["logits"], cfg)
+            scaled_module_loss = maybe_scaled_loss(optimizer_module, loss)
+            scaled_backbone_loss = maybe_scaled_loss(optimizer_backbone, loss) if backbone_vars else None
+        module_grads = maybe_unscaled_gradients(optimizer_module, tape.gradient(scaled_module_loss, module_vars))
+        if backbone_vars:
+            backbone_grads = maybe_unscaled_gradients(optimizer_backbone, tape.gradient(scaled_backbone_loss, backbone_vars))
+        else:
+            backbone_grads = []
+        del tape
+
+        valid = non_none_grads_and_vars(module_grads, module_vars) + non_none_grads_and_vars(backbone_grads, backbone_vars)
+        if not valid:
+            raise RuntimeError("No valid gradients in SAM first step.")
+        grads_all = [g for g, _ in valid]
+        vars_all = [v for _, v in valid]
+        finite_grads_or_raise("sam-first", grads_all)
+        clipped_all, grad_norm = tf.clip_by_global_norm(grads_all, grad_clip_norm)
+        finite_grads_or_raise("sam-first-clipped", clipped_all)
+
+        eps_list = []
+        scale = tf.cast(sam_rho, tf.float32) / (tf.cast(grad_norm, tf.float32) + 1e-12)
+        for grad, var in zip(clipped_all, vars_all):
+            eps = tf.cast(tf.cast(grad, tf.float32) * scale, var.dtype)
+            var.assign_add(eps)
+            eps_list.append((var, eps))
+
+        with tf.GradientTape(persistent=True) as tape2:
+            outputs2 = model(inputs, training=True)
+            loss2 = cross_entropy_loss(labels, outputs2["logits"], cfg)
+            scaled_module_loss2 = maybe_scaled_loss(optimizer_module, loss2)
+            scaled_backbone_loss2 = maybe_scaled_loss(optimizer_backbone, loss2) if backbone_vars else None
+        module_grads2 = maybe_unscaled_gradients(optimizer_module, tape2.gradient(scaled_module_loss2, module_vars))
+        if backbone_vars:
+            backbone_grads2 = maybe_unscaled_gradients(optimizer_backbone, tape2.gradient(scaled_backbone_loss2, backbone_vars))
+        else:
+            backbone_grads2 = []
+        del tape2
+
+        for var, eps in eps_list:
+            var.assign_sub(eps)
+
+        valid2 = non_none_grads_and_vars(module_grads2, module_vars) + non_none_grads_and_vars(backbone_grads2, backbone_vars)
+        if not valid2:
+            raise RuntimeError("No valid gradients in SAM second step.")
+        grads_all2 = [g for g, _ in valid2]
+        vars_all2 = [v for _, v in valid2]
+        finite_grads_or_raise("sam-second", grads_all2)
+        clipped_all2, grad_norm2 = tf.clip_by_global_norm(grads_all2, grad_clip_norm)
+        finite_grads_or_raise("sam-second-clipped", clipped_all2)
+        module_pairs, backbone_pairs = _split_pairs(clipped_all2, vars_all2)
+        if module_pairs:
+            optimizer_module.apply_gradients(module_pairs)
+        if backbone_pairs:
+            optimizer_backbone.apply_gradients(backbone_pairs)
+
+        preds = tf.argmax(outputs["logits"], axis=-1, output_type=tf.int32)
+        labels_i32 = tf.cast(labels, tf.int32)
+        correct = tf.reduce_sum(tf.cast(tf.equal(preds, labels_i32), tf.int32))
+        count = tf.shape(labels_i32)[0]
+        return {
+            "loss": tf.cast(loss, tf.float32),
+            "correct": correct,
+            "count": count,
+            "grad_norm": tf.cast(grad_norm2, tf.float32),
+            "alpha": tf.cast(outputs["alpha_mean"], tf.float32),
+            "s4_norm": tf.cast(outputs["s4_norm"], tf.float32),
+            "delta_raw_norm": tf.cast(outputs["delta_raw_norm"], tf.float32),
+            "delta_norm_norm": tf.cast(outputs["delta_norm_norm"], tf.float32),
+            "residual_norm": tf.cast(outputs["residual_norm"], tf.float32),
+            "residual_ratio": tf.cast(outputs["residual_ratio"], tf.float32),
+            "channel_attention_mean": tf.cast(outputs["channel_attention_mean"], tf.float32),
+            "channel_attention_std": tf.cast(outputs["channel_attention_std"], tf.float32),
+            "spatial_attention_mean": tf.cast(outputs["spatial_attention_mean"], tf.float32),
+            "spatial_attention_std": tf.cast(outputs["spatial_attention_std"], tf.float32),
+            "fusion_weight_channel": tf.cast(outputs["fusion_weight_channel"], tf.float32),
+            "fusion_weight_spatial": tf.cast(outputs["fusion_weight_spatial"], tf.float32),
+        }
+
+    return train_step
+
+
 def evaluate_dataset(model: ConvNeXtMS1MCrossStageMSDAResidualFER, dataset: tf.data.Dataset, cfg: Dict, use_tta_hflip: bool) -> Dict[str, object]:
     y_true: List[int] = []
     y_pred: List[int] = []
@@ -417,8 +519,7 @@ def main() -> int:
     Path(cfg["paths"]["logs_dir"]).mkdir(parents=True, exist_ok=True)
     save_config_snapshot(cfg, run_dir)
 
-    if str(cfg["training"].get("optimizer", "")).lower() == "sam":
-        raise RuntimeError("This first MSDA residual experiment must use AdamW without SAM.")
+    use_sam = str(cfg["training"].get("optimizer", "")).lower() == "sam"
     if cfg["model"].get("checkpoint_path"):
         raise RuntimeError("Main run must not restore a FER checkpoint; model.checkpoint_path must stay null.")
 
@@ -495,12 +596,13 @@ def main() -> int:
     best_macro = float(ckpt_best_macro.numpy())
     best_epoch = start_epoch if best_acc >= 0.0 else -1
     history: List[Dict[str, object]] = []
-    train_step_head = make_train_step(model, cfg, optimizer_module, optimizer_backbone, train_backbone=False)
-    train_step_full = make_train_step(model, cfg, optimizer_module, optimizer_backbone, train_backbone=True)
+    step_factory = make_sam_train_step if use_sam else make_train_step
+    train_step_head = step_factory(model, cfg, optimizer_module, optimizer_backbone, train_backbone=False)
+    train_step_full = step_factory(model, cfg, optimizer_module, optimizer_backbone, train_backbone=True)
 
     print("=" * 72, flush=True)
     print("STARTING TRAINING: ConvNeXt-B MS1M Cross-Stage MSDA Residual", flush=True)
-    print("optimizer=AdamW | SAM=disabled | mixed_precision=mixed_float16 | XLA=false", flush=True)
+    print(f"optimizer={'SAM+AdamW' if use_sam else 'AdamW'} | sam_rho={float(cfg['training'].get('sam_rho', 0.0)):.4f} | mixed_precision=mixed_float16 | XLA=false", flush=True)
     print(f"freeze_backbone_epochs={freeze_epochs} | output_dir={run_dir}", flush=True)
     print("=" * 72, flush=True)
 
