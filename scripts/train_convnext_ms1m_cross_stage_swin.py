@@ -57,6 +57,16 @@ def set_lso_lr(optimizer, lr_value: float) -> None:
     set_optimizer_lr(unwrap_optimizer(optimizer), float(lr_value))
 
 
+def maybe_scaled_loss(optimizer, loss: tf.Tensor) -> tf.Tensor:
+    getter = getattr(optimizer, "get_scaled_loss", None)
+    return getter(loss) if callable(getter) else loss
+
+
+def maybe_unscaled_gradients(optimizer, grads):
+    getter = getattr(optimizer, "get_unscaled_gradients", None)
+    return getter(grads) if callable(getter) else grads
+
+
 def cross_entropy_loss(labels: tf.Tensor, logits: tf.Tensor, cfg: Dict) -> tf.Tensor:
     logits = tf.cast(logits, tf.float32)
     labels = tf.cast(labels, tf.int32)
@@ -213,10 +223,10 @@ def make_train_step(model: ConvNeXtMS1MCrossStageSwinFER, cfg: Dict, optimizer_h
 
     def _compute_unscaled_grads(tape, scaled_head_loss, scaled_backbone_loss):
         scaled_grads_head = tape.gradient(scaled_head_loss, head_vars)
-        grads_head = optimizer_head.get_unscaled_gradients(scaled_grads_head)
+        grads_head = maybe_unscaled_gradients(optimizer_head, scaled_grads_head)
         if backbone_vars:
             scaled_grads_backbone = tape.gradient(scaled_backbone_loss, backbone_vars)
-            grads_backbone = optimizer_backbone.get_unscaled_gradients(scaled_grads_backbone)
+            grads_backbone = maybe_unscaled_gradients(optimizer_backbone, scaled_grads_backbone)
         else:
             grads_backbone = []
         return grads_head, grads_backbone
@@ -247,8 +257,8 @@ def make_train_step(model: ConvNeXtMS1MCrossStageSwinFER, cfg: Dict, optimizer_h
         with tf.GradientTape(persistent=True) as tape:
             outputs = model(inputs, training=True)
             loss = cross_entropy_loss(labels, outputs["logits"], cfg)
-            scaled_head_loss = optimizer_head.get_scaled_loss(loss)
-            scaled_backbone_loss = optimizer_backbone.get_scaled_loss(loss) if backbone_vars else None
+            scaled_head_loss = maybe_scaled_loss(optimizer_head, loss)
+            scaled_backbone_loss = maybe_scaled_loss(optimizer_backbone, loss) if backbone_vars else None
         grads_head, grads_backbone = _compute_unscaled_grads(tape, scaled_head_loss, scaled_backbone_loss)
         del tape
         clipped_head_pairs, clipped_backbone_pairs, grad_norm = _clip_all(grads_head, grads_backbone)
@@ -264,8 +274,8 @@ def make_train_step(model: ConvNeXtMS1MCrossStageSwinFER, cfg: Dict, optimizer_h
         with tf.GradientTape(persistent=True) as tape2:
             outputs2 = model(inputs, training=True)
             loss2 = cross_entropy_loss(labels, outputs2["logits"], cfg)
-            scaled_head_loss2 = optimizer_head.get_scaled_loss(loss2)
-            scaled_backbone_loss2 = optimizer_backbone.get_scaled_loss(loss2) if backbone_vars else None
+            scaled_head_loss2 = maybe_scaled_loss(optimizer_head, loss2)
+            scaled_backbone_loss2 = maybe_scaled_loss(optimizer_backbone, loss2) if backbone_vars else None
         grads_head2, grads_backbone2 = _compute_unscaled_grads(tape2, scaled_head_loss2, scaled_backbone_loss2)
         del tape2
 
@@ -433,10 +443,27 @@ def main() -> int:
                 print("[INFO] --smoke-test-only requested. Stop before training.", flush=True)
                 return 0
 
-        optimizer_head = tf.keras.mixed_precision.LossScaleOptimizer(build_optimizer(cfg, float(cfg["training"]["lr"])))
-        optimizer_backbone = tf.keras.mixed_precision.LossScaleOptimizer(
-            build_optimizer(cfg, float(cfg["training"].get("visual_extractor_lr", cfg["training"]["lr"])))
+        optimizer_head = build_optimizer(cfg, float(cfg["training"]["lr"]))
+        optimizer_backbone = build_optimizer(cfg, float(cfg["training"].get("visual_extractor_lr", cfg["training"]["lr"])))
+        use_loss_scale_optimizer = bool(
+            cfg.get("runtime", {}).get("use_loss_scale_optimizer", False)
+            or cfg.get("training", {}).get("use_loss_scale_optimizer", False)
         )
+        if use_loss_scale_optimizer:
+            initial_scale = float(cfg.get("training", {}).get("loss_scale_initial", 128.0))
+            optimizer_head = tf.keras.mixed_precision.LossScaleOptimizer(
+                optimizer_head,
+                dynamic=True,
+                initial_scale=initial_scale,
+            )
+            optimizer_backbone = tf.keras.mixed_precision.LossScaleOptimizer(
+                optimizer_backbone,
+                dynamic=True,
+                initial_scale=initial_scale,
+            )
+            print(f"[INFO] LossScaleOptimizer enabled for SAM with initial_scale={initial_scale}", flush=True)
+        else:
+            print("[INFO] LossScaleOptimizer disabled for custom SAM; gradients are computed directly under mixed_float16.", flush=True)
         ckpt_epoch = tf.Variable(0, dtype=tf.int64, trainable=False)
         ckpt_best_acc = tf.Variable(-1.0, dtype=tf.float32, trainable=False)
         ckpt_best_macro = tf.Variable(-1.0, dtype=tf.float32, trainable=False)
