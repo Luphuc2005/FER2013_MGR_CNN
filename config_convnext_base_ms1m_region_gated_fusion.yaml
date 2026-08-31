@@ -65,6 +65,9 @@ model:
   checkpoint_strict: false
 
   # Multi-Scale Region Gated Fusion Architecture Settings
+  multi_scale_mgr: true
+  stage3_token_grid_size: 14
+  stage4_token_grid_size: 7
   num_regions: 6
   embed_dim: 256
   num_heads: 4

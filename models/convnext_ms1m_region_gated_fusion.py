@@ -269,12 +269,23 @@ class ConvNeXtMS1MRegionGatedFusionFER(tf.keras.Model):
         return [v for v in self.trainable_variables if id(v) not in backbone_ids]
 
     def _process_masks(self, mask: tf.Tensor, grid_size: int) -> tf.Tensor:
-        # mask: [B, 6, 112, 112]
+        # mask can be [B, H, W, 6] (channel-last from TF dataset) or [B, 6, H, W] (channel-first)
         mask_f32 = tf.cast(mask, tf.float32)
         batch_size = tf.shape(mask_f32)[0]
+
+        # Determine format: if last dim is 6 (or num_regions), it's already [B, H, W, 6]
+        if mask_f32.shape[-1] == self.num_regions:
+            mask_hwc = mask_f32
+        elif mask_f32.shape[1] == self.num_regions:
+            mask_hwc = tf.transpose(mask_f32, [0, 2, 3, 1])
+        else:
+            mask_hwc = tf.cond(
+                tf.equal(tf.shape(mask_f32)[-1], self.num_regions),
+                lambda: mask_f32,
+                lambda: tf.transpose(mask_f32, [0, 2, 3, 1]),
+            )
+
         # Resize to grid_size x grid_size (e.g. 14x14 or 7x7) using area method
-        # First transpose to [B, H, W, 6] for image.resize
-        mask_hwc = tf.transpose(mask_f32, [0, 2, 3, 1])
         mask_resized = tf.image.resize(mask_hwc, [grid_size, grid_size], method="area")
         # Transpose back to [B, 6, grid_size, grid_size]
         mask_chw = tf.transpose(mask_resized, [0, 3, 1, 2])
