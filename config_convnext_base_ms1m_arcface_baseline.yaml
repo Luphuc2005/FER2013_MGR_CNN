@@ -1,4 +1,4 @@
-seed:
+﻿seed:
   random_seed: 42
 
 source:
@@ -114,5 +114,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/tf_runs/convnext_base_ms1m_arcface_baseline"
+  output_dir: "outputs/tf_runs/convnext_base_ms1m"
   logs_dir: "logs"
