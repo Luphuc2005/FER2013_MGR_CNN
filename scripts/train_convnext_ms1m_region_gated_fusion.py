@@ -203,6 +203,9 @@ def make_train_step(model: ConvNeXtMS1MRegionGatedFusionFER, cfg: Dict, optimize
                 vars_backbone.append(var)
         return (list(zip(clipped_head, vars_head)), list(zip(clipped_backbone, vars_backbone)), tf.cast(grad_norm, tf.float32))
 
+    use_sam = str(cfg.get("training", {}).get("optimizer", "")).lower() == "sam"
+    sam_rho = float(cfg.get("training", {}).get("sam_rho", 0.03))
+
     @tf.function(reduce_retracing=True, jit_compile=False)
     def train_step(inputs, labels):
         with tf.GradientTape(persistent=True) as tape:
@@ -214,6 +217,29 @@ def make_train_step(model: ConvNeXtMS1MRegionGatedFusionFER, cfg: Dict, optimize
         grads_head, grads_backbone = _compute_unscaled_grads(tape, scaled_head_loss, scaled_backbone_loss)
         del tape
         clipped_head_pairs, clipped_backbone_pairs, grad_norm = _clip_all(grads_head, grads_backbone)
+
+        if use_sam:
+            eps_list = []
+            all_pairs = clipped_head_pairs + clipped_backbone_pairs
+            for grad, var in all_pairs:
+                scale = sam_rho / (grad_norm + 1e-12)
+                eps = tf.cast(grad, var.dtype) * scale
+                eps_list.append((eps, var))
+                var.assign_add(eps)
+
+            with tf.GradientTape(persistent=True) as tape2:
+                outputs2 = model(inputs, training=True)
+                loss2 = cross_entropy_loss(labels, outputs2["logits"], cfg)
+                scaled_head_loss2 = maybe_scaled_loss(optimizer_head, loss2)
+                scaled_backbone_loss2 = maybe_scaled_loss(optimizer_backbone, loss2) if backbone_vars else None
+
+            grads_head2, grads_backbone2 = _compute_unscaled_grads(tape2, scaled_head_loss2, scaled_backbone_loss2)
+            del tape2
+
+            for eps, var in eps_list:
+                var.assign_sub(eps)
+
+            clipped_head_pairs, clipped_backbone_pairs, grad_norm = _clip_all(grads_head2, grads_backbone2)
 
         if clipped_head_pairs:
             optimizer_head.apply_gradients(clipped_head_pairs)
