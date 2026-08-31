@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG="configs/kaggle/config_convnext_base_ms1m_arcface_baseline_kaggle_speedcheck_adamw.yaml"
+CONFIG="configs/kaggle/config_convnext_base_ms1m_arcface_baseline_2gpu.yaml"
 LOG_DIR="outputs/kaggle_speedcheck_logs"
 mkdir -p "$LOG_DIR"
 
