@@ -29,7 +29,7 @@ tta:
   flip_weight: 0.5
 
 data:
-  data_path: "dataset/fer13-split"
+  data_path: "data/fer13-split"
   mask_dir: null
   num_classes: 7
   image_size: 112
