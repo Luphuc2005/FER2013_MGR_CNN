@@ -2,7 +2,7 @@ seed:
   random_seed: 42
 
 source:
-  note: "ConvNeXt-B MS1M Multi-Scale Region Gated Fusion for FER2013."
+  note: "ConvNeXt-B MS1M Region Gated Fusion with Global Residual whole-face branch for FER2013."
 
 runtime:
   gpu_ids: [0]
@@ -53,8 +53,8 @@ augmentation:
   random_erasing_value: "random"
 
 model:
-  name: "convnext_base_ms1m_region_gated_fusion"
-  arch: "convnext_base_ms1m_arcface"
+  name: "convnext_base_ms1m_region_gated_global_residual_fusion"
+  arch: "convnext_base_ms1m_region_gated_global_residual"
   pretrained: true
   convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
   convnext_base_require_pretrained: false
@@ -74,6 +74,7 @@ model:
   num_encoder_layers: 1
   transformer_dropout: 0.10
   classifier_dropout: 0.20
+  global_aux_loss_weight: 0.20
   mask_attention_alpha: 0.3
   mask_floor: 0.05
 
@@ -106,5 +107,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/tf_runs/convnext_base_ms1m_region_gated_fusion"
+  output_dir: "outputs/tf_runs/convnext_base_ms1m_region_gated_global_residual_fusion"
   logs_dir: "logs"
