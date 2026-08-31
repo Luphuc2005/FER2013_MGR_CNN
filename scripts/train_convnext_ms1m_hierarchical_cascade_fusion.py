@@ -296,6 +296,28 @@ def evaluate_dataset(model: ConvNeXtMS1MHierarchicalCascadeFusionFER, dataset: t
     }
 
 
+def build_adamw_optimizer(learning_rate: float, weight_decay: float = 0.035):
+    adamw = getattr(tf.keras.optimizers, "AdamW", None)
+    if adamw is None:
+        adamw = getattr(getattr(tf.keras.optimizers, "experimental", object()), "AdamW", None)
+    if adamw is not None:
+        try:
+            return adamw(learning_rate=learning_rate, weight_decay=weight_decay, jit_compile=False)
+        except (TypeError, ValueError):
+            return adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+    return tf.keras.optimizers.Adam(learning_rate=learning_rate)
+
+
+def set_opt_lr(opt, lr_val: float):
+    if opt is None:
+        return
+    base = getattr(opt, "inner_optimizer", opt)
+    if hasattr(base, "learning_rate"):
+        base.learning_rate.assign(lr_val)
+    elif hasattr(base, "lr"):
+        base.lr.assign(lr_val)
+
+
 def main() -> int:
     args = parse_args()
     cfg = load_config(args.config)
@@ -337,10 +359,10 @@ def main() -> int:
     freeze_epochs = int(cfg.get("model", {}).get("freeze_backbone_epochs", 4))
 
     optimizer_head = tf.keras.mixed_precision.LossScaleOptimizer(
-        tf.keras.optimizers.AdamW(learning_rate=lr_head_base, weight_decay=weight_decay)
+        build_adamw_optimizer(lr_head_base, weight_decay)
     )
     optimizer_backbone = tf.keras.mixed_precision.LossScaleOptimizer(
-        tf.keras.optimizers.AdamW(learning_rate=lr_backbone_base, weight_decay=weight_decay)
+        build_adamw_optimizer(lr_backbone_base, weight_decay)
     )
 
     lr_fn_head = build_cosine_schedule(lr_head_base, warmup_epochs, total_epochs, steps_per_epoch)
@@ -379,9 +401,9 @@ def main() -> int:
             current_head_lr = lr_fn_head(step_idx)
             current_backbone_lr = 0.0 if is_backbone_frozen else lr_fn_backbone(step_idx)
 
-            optimizer_head.inner_optimizer.learning_rate.assign(current_head_lr)
+            set_opt_lr(optimizer_head, current_head_lr)
             if not is_backbone_frozen:
-                optimizer_backbone.inner_optimizer.learning_rate.assign(current_backbone_lr)
+                set_opt_lr(optimizer_backbone, current_backbone_lr)
 
             step_metrics = active_step_fn(inputs, labels)
 
