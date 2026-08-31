@@ -125,10 +125,8 @@ def maybe_scaled_loss(optimizer, loss: tf.Tensor) -> tf.Tensor:
 def finite_grads_or_raise(context_name: str, grads: List[tf.Tensor]) -> None:
     for i, g in enumerate(grads):
         if g is not None:
-            if tf.reduce_any(tf.math.is_isnan(g)):
-                raise ValueError(f"NaN detected in gradients ({context_name}) at index {i}")
-            if tf.reduce_any(tf.math.is_is_inf(g)):
-                raise ValueError(f"Inf detected in gradients ({context_name}) at index {i}")
+            if not tf.reduce_all(tf.math.is_finite(g)):
+                raise ValueError(f"Non-finite gradient (NaN/Inf) detected in ({context_name}) at index {i}")
 
 
 def make_train_step(
