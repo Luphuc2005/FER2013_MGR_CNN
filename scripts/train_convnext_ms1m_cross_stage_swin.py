@@ -211,12 +211,12 @@ def make_train_step(model: ConvNeXtMS1MCrossStageSwinFER, cfg: Dict, optimizer_h
     grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 1.0))
     train_vars = head_vars + backbone_vars
 
-    def _compute_scaled_grads(loss, tape):
-        scaled_head = optimizer_head.get_scaled_loss(loss)
-        grads_head = optimizer_head.get_unscaled_gradients(tape.gradient(scaled_head, head_vars))
+    def _compute_unscaled_grads(tape, scaled_head_loss, scaled_backbone_loss):
+        scaled_grads_head = tape.gradient(scaled_head_loss, head_vars)
+        grads_head = optimizer_head.get_unscaled_gradients(scaled_grads_head)
         if backbone_vars:
-            scaled_backbone = optimizer_backbone.get_scaled_loss(loss)
-            grads_backbone = optimizer_backbone.get_unscaled_gradients(tape.gradient(scaled_backbone, backbone_vars))
+            scaled_grads_backbone = tape.gradient(scaled_backbone_loss, backbone_vars)
+            grads_backbone = optimizer_backbone.get_unscaled_gradients(scaled_grads_backbone)
         else:
             grads_backbone = []
         return grads_head, grads_backbone
@@ -224,12 +224,11 @@ def make_train_step(model: ConvNeXtMS1MCrossStageSwinFER, cfg: Dict, optimizer_h
     def _clip_all(grads_head, grads_backbone):
         valid = non_none_grads_and_vars(grads_head, head_vars) + non_none_grads_and_vars(grads_backbone, backbone_vars)
         if not valid:
-            return [], [], tf.constant(0.0, dtype=tf.float32)
+            raise RuntimeError("No valid gradients in train_step; check LossScaleOptimizer/GradientTape path.")
         grads_all = [g for g, _ in valid]
         vars_all = [v for _, v in valid]
         finite_grads_or_raise("train", grads_all)
         clipped_all, grad_norm = tf.clip_by_global_norm(grads_all, grad_clip_norm)
-        head_count = len([1 for _, v in valid if id(v) in {id(h) for h in head_vars}])
         clipped_head = []
         vars_head = []
         clipped_backbone = []
@@ -248,7 +247,9 @@ def make_train_step(model: ConvNeXtMS1MCrossStageSwinFER, cfg: Dict, optimizer_h
         with tf.GradientTape(persistent=True) as tape:
             outputs = model(inputs, training=True)
             loss = cross_entropy_loss(labels, outputs["logits"], cfg)
-        grads_head, grads_backbone = _compute_scaled_grads(loss, tape)
+            scaled_head_loss = optimizer_head.get_scaled_loss(loss)
+            scaled_backbone_loss = optimizer_backbone.get_scaled_loss(loss) if backbone_vars else None
+        grads_head, grads_backbone = _compute_unscaled_grads(tape, scaled_head_loss, scaled_backbone_loss)
         del tape
         clipped_head_pairs, clipped_backbone_pairs, grad_norm = _clip_all(grads_head, grads_backbone)
 
@@ -263,7 +264,9 @@ def make_train_step(model: ConvNeXtMS1MCrossStageSwinFER, cfg: Dict, optimizer_h
         with tf.GradientTape(persistent=True) as tape2:
             outputs2 = model(inputs, training=True)
             loss2 = cross_entropy_loss(labels, outputs2["logits"], cfg)
-        grads_head2, grads_backbone2 = _compute_scaled_grads(loss2, tape2)
+            scaled_head_loss2 = optimizer_head.get_scaled_loss(loss2)
+            scaled_backbone_loss2 = optimizer_backbone.get_scaled_loss(loss2) if backbone_vars else None
+        grads_head2, grads_backbone2 = _compute_unscaled_grads(tape2, scaled_head_loss2, scaled_backbone_loss2)
         del tape2
 
         for var, eps in eps_list:
