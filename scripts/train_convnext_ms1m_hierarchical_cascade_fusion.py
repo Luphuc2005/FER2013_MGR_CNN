@@ -505,7 +505,8 @@ def main() -> int:
             best_val_acc = val_acc
             best_epoch = epoch
             no_improve_count = 0
-            model.save_weights(str(output_dir / "best_model.h5"))
+            best_ckpt_path = output_dir / "best_model.ckpt"
+            model.save_weights(str(best_ckpt_path))
             print(f"  --> Saved new best model checkpoint (Val Acc: {val_acc:.4f})", flush=True)
         else:
             no_improve_count += 1
@@ -517,8 +518,13 @@ def main() -> int:
     print(f" EVALUATION ON TEST SET (BEST CHECKPOINT)", flush=True)
     print(f"==========================================", flush=True)
 
-    if (output_dir / "best_model.h5").exists():
-        model.load_weights(str(output_dir / "best_model.h5"))
+    best_ckpt_path = output_dir / "best_model.ckpt"
+    best_h5_path = output_dir / "best_model.h5"
+    if (output_dir / "best_model.ckpt.index").exists():
+        model.load_weights(str(best_ckpt_path))
+        print(f"Loaded best weights from epoch {best_epoch} (Val Acc: {best_val_acc:.4f})", flush=True)
+    elif best_h5_path.exists():
+        model.load_weights(str(best_h5_path))
         print(f"Loaded best weights from epoch {best_epoch} (Val Acc: {best_val_acc:.4f})", flush=True)
 
     test_standard = evaluate_dataset(model, test_ds, cfg, use_tta_hflip=False)

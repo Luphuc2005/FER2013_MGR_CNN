@@ -1,22 +1,18 @@
-"""ConvNeXt-B MS1M Hierarchical Cascade Region Gated Fusion FER Model.
+"""ConvNeXt-B MS1M Region Gated + Global Residual Fusion FER Model.
 
 Architecture Contract:
   Input: Image [B, 112, 112, 3], MediaPipe soft region masks [B, 6, 112, 112]
   Backbone: ConvNeXt-Base MS1M returning Stage 3 [B, 14, 14, 512] and Stage 4 [B, 7, 7, 1024]
-  Hierarchical Cascade Bridge (Stage 3 -> Stage 4 Guidance):
-    S3 [B, 14, 14, 512] -> DepthwiseConv2D 3x3 stride 2 -> [B, 7, 7, 512]
-                        -> Conv2D 1x1 512->1024 -> LayerNorm -> GELU -> [B, 7, 7, 1024]
-    S4_refined = S4 + gamma_cascade * CascadeBridge(S3)
   Projections:
     S3: Conv2D 1x1 512->256 -> [B, 14, 14, 256] -> Flatten [B, 196, 256]
-    S4_refined: Conv2D 1x1 1024->256 -> [B, 7, 7, 256] -> Flatten [B, 49, 256]
-  Soft Region Masks:
+    S4: Conv2D 1x1 1024->256 -> [B, 7, 7, 256] -> Flatten [B, 49, 256]
+  Masks:
     S3 soft masks [B, 6, 14, 14] -> Flatten [B, 6, 196]
     S4 soft masks [B, 6, 7, 7] -> Flatten [B, 6, 49]
   Shared Region Dictionary: 6 queries, embed_dim=256
   Masked Cross-Attention (float32 softmax):
     S3: Q [B, 6, 256], V [B, 196, 256], mask [B, 6, 196] -> R3 [B, 6, 256]
-    S4_refined: Q [B, 6, 256], V [B, 49, 256], mask [B, 6, 49] -> R4 [B, 6, 256]
+    S4: Q [B, 6, 256], V [B, 49, 256], mask [B, 6, 49] -> R4 [B, 6, 256]
   Region-wise Gated Fusion:
     concat [R3, R4] -> [B, 6, 512]
     Gate MLP: Dense(256) -> GELU -> Dense(256) -> Sigmoid -> G [B, 6, 256]
@@ -28,7 +24,7 @@ Architecture Contract:
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple, Sequence
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 import tensorflow as tf
 
@@ -37,6 +33,20 @@ from .convnext_base_face_baseline import ConvNeXtBaseFRBackbone, ConvNeXtBaseFac
 
 def _norm(epsilon: float = 1e-5):
     return tf.keras.layers.LayerNormalization(epsilon=epsilon)
+
+
+class DropPath(tf.keras.layers.Layer):
+    def __init__(self, drop_prob: float = 0.0, **kwargs):
+        super().__init__(**kwargs)
+        self.drop_prob = float(drop_prob)
+
+    def call(self, x, training=False):
+        if not training or self.drop_prob <= 0.0:
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        shape = (tf.shape(x)[0],) + (1,) * (x.shape.rank - 1)
+        mask = tf.floor(keep_prob + tf.random.uniform(shape, dtype=x.dtype))
+        return tf.math.divide_no_nan(x, keep_prob) * mask
 
 
 class MaskedCrossAttention(tf.keras.layers.Layer):
@@ -63,11 +73,11 @@ class MaskedCrossAttention(tf.keras.layers.Layer):
         self.mask_alpha = float(mask_alpha)
         self.mask_floor = float(mask_floor)
 
-        self.q_proj = tf.keras.layers.Dense(self.embed_dim)
-        self.k_proj = tf.keras.layers.Dense(self.embed_dim)
-        self.v_proj = tf.keras.layers.Dense(self.embed_dim)
-        self.out_proj = tf.keras.layers.Dense(self.embed_dim)
-        self.attn_drop = tf.keras.layers.Dropout(dropout)
+        self.q_proj = tf.keras.layers.Dense(self.embed_dim, name="q_proj")
+        self.k_proj = tf.keras.layers.Dense(self.embed_dim, name="k_proj")
+        self.v_proj = tf.keras.layers.Dense(self.embed_dim, name="v_proj")
+        self.out_proj = tf.keras.layers.Dense(self.embed_dim, name="out_proj")
+        self.attn_drop = tf.keras.layers.Dropout(dropout, name="attn_drop")
 
     def _split_heads(self, x):
         batch_size = tf.shape(x)[0]
@@ -116,18 +126,18 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         super().__init__(**kwargs)
         self.embed_dim = int(embed_dim)
         self.mha = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=embed_dim // num_heads, dropout=dropout
+            num_heads=num_heads, key_dim=embed_dim // num_heads, dropout=dropout, name="mha"
         )
-        self.drop1 = tf.keras.layers.Dropout(dropout)
+        self.drop1 = tf.keras.layers.Dropout(dropout, name="drop1")
         self.norm1 = _norm(1e-5)
 
         self.ffn = tf.keras.Sequential([
             tf.keras.Input(shape=(None, embed_dim)),
-            tf.keras.layers.Dense(ffn_dim, activation=tf.nn.gelu),
-            tf.keras.layers.Dropout(dropout),
-            tf.keras.layers.Dense(embed_dim),
-        ])
-        self.drop2 = tf.keras.layers.Dropout(dropout)
+            tf.keras.layers.Dense(ffn_dim, activation=tf.nn.gelu, name="ffn_fc1"),
+            tf.keras.layers.Dropout(dropout, name="ffn_drop"),
+            tf.keras.layers.Dense(embed_dim, name="ffn_fc2"),
+        ], name="ffn")
+        self.drop2 = tf.keras.layers.Dropout(dropout, name="drop2")
         self.norm2 = _norm(1e-5)
 
     def call(self, x, training=False):
@@ -146,7 +156,7 @@ class RegionAttentionPooling(tf.keras.layers.Layer):
     """
     def __init__(self, embed_dim: int = 256, **kwargs):
         super().__init__(**kwargs)
-        self.score_proj = tf.keras.layers.Dense(1, use_bias=False)
+        self.score_proj = tf.keras.layers.Dense(1, use_bias=False, name="score_proj")
 
     def call(self, x):
         # x: [B, 6, 256]
@@ -160,36 +170,15 @@ class RegionAttentionPooling(tf.keras.layers.Layer):
         return pooled, weights_f32
 
 
-class HierarchicalCascadeBridge(tf.keras.layers.Layer):
+class ConvNeXtMS1MRegionGatedGlobalResidualFusionFER(tf.keras.Model):
     """
-    Stage 3 -> Stage 4 Hierarchical Feature Flow Cascade Bridge.
-    Downsamples S3 [B, 14, 14, 512] to [B, 7, 7, 512] via DepthwiseConv 3x3 stride 2,
-    then projects to 1024 channels + LayerNorm + GELU activation.
-    """
-    def __init__(self, in_channels: int = 512, out_channels: int = 1024, **kwargs):
-        super().__init__(**kwargs)
-        self.dw_conv = tf.keras.layers.DepthwiseConv2D(kernel_size=3, strides=2, padding="same")
-        self.pw_conv = tf.keras.layers.Conv2D(out_channels, kernel_size=1, strides=1, padding="valid")
-        self.norm = _norm(1e-5)
-
-    def call(self, feat_s3):
-        # feat_s3: [B, 14, 14, 512]
-        x = self.dw_conv(feat_s3)  # [B, 7, 7, 512]
-        x = self.pw_conv(x)        # [B, 7, 7, 1024]
-        x = self.norm(x)
-        x = tf.nn.gelu(x)
-        return x
-
-
-class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
-    """
-    ConvNeXt-B MS1M Hierarchical Cascade Region Gated Fusion Model for FER2013.
-    Injects Stage 3 fine-grained features directly into Stage 4 before Cross-Attention.
+    ConvNeXt-B MS1M Multi-Scale Region Gated + Global Residual Fusion Model for FER2013.
+    Strictly follows architectural contract.
     """
     def __init__(self, cfg: Dict):
         model_cfg = cfg.get("model", cfg) if isinstance(cfg, dict) else cfg
         data_cfg = cfg.get("data", cfg) if isinstance(cfg, dict) else cfg
-        super().__init__(name=model_cfg.get("name", "convnext_base_ms1m_hierarchical_cascade_fusion"))
+        super().__init__(name=model_cfg.get("name", "convnext_ms1m_region_gated_global_residual_fusion"))
         self.cfg = cfg
         self.num_classes = int(data_cfg.get("num_classes", 7))
         self.embed_dim = 256
@@ -203,20 +192,11 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
             name="convnext_base_fr_backbone",
         )
 
-        # 2. Hierarchical Cascade Bridge (S3 512 -> S4 1024)
-        self.cascade_bridge = HierarchicalCascadeBridge(in_channels=512, out_channels=1024, name="cascade_bridge")
-        self.gamma_cascade = self.add_weight(
-            name="gamma_cascade",
-            shape=(),
-            initializer=tf.keras.initializers.Constant(0.1),
-            trainable=True,
-        )
-
-        # 3. Multi-scale 1x1 Projections (512->256 for S3, 1024->256 for S4)
+        # 2. Multi-scale 1x1 Projections (512->256 for S3, 1024->256 for S4)
         self.proj_s3 = tf.keras.layers.Conv2D(self.embed_dim, 1, strides=1, padding="valid", name="proj_s3")
         self.proj_s4 = tf.keras.layers.Conv2D(self.embed_dim, 1, strides=1, padding="valid", name="proj_s4")
 
-        # 4. Learnable Region Dictionary Queries [1, 6, 256]
+        # 3. Learnable Region Dictionary Queries [1, 6, 256]
         self.region_queries = self.add_weight(
             name="region_queries",
             shape=(1, self.num_regions, self.embed_dim),
@@ -224,7 +204,7 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
             trainable=True,
         )
 
-        # 5. Masked Cross-Attention Branches (S3 & S4)
+        # 4. Masked Cross-Attention Branches (S3 & S4)
         self.cross_attn_s3 = MaskedCrossAttention(
             embed_dim=self.embed_dim,
             num_heads=self.num_heads,
@@ -242,14 +222,14 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
             name="cross_attn_s4",
         )
 
-        # 6. Region-wise Gated Fusion MLP: Dense(256) -> GELU -> Dense(256) -> Sigmoid
+        # 5. Region-wise Gated Fusion MLP: Dense(256) -> GELU -> Dense(256) -> Sigmoid
         self.gate_mlp = tf.keras.Sequential([
             tf.keras.Input(shape=(None, self.embed_dim * 2)),
-            tf.keras.layers.Dense(self.embed_dim, activation=tf.nn.gelu),
-            tf.keras.layers.Dense(self.embed_dim, activation="sigmoid"),
+            tf.keras.layers.Dense(self.embed_dim, activation=tf.nn.gelu, name="gate_dense1"),
+            tf.keras.layers.Dense(self.embed_dim, activation="sigmoid", name="gate_dense2"),
         ], name="gate_mlp")
 
-        # 7. Post-fusion Transformer Encoder (EXACTLY 1 Block)
+        # 6. Post-fusion Transformer Encoder (EXACTLY 1 Block)
         self.encoder_block = TransformerEncoderBlock(
             embed_dim=self.embed_dim,
             num_heads=self.num_heads,
@@ -258,10 +238,25 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
             name="encoder_block",
         )
 
-        # 8. Attention Pooling across 6 regions
+        # 7. Attention Pooling across 6 regions
         self.attn_pooling = RegionAttentionPooling(embed_dim=self.embed_dim, name="attn_pooling")
 
-        # 9. Single Classifier Head: LayerNorm -> Dropout(0.2) -> Dense(7)
+        # 8. Global residual branch keeps whole-face context beside mask-guided region tokens.
+        self.global_pool = tf.keras.layers.GlobalAveragePooling2D(name="global_pool_s4")
+        self.global_proj = tf.keras.layers.Dense(self.embed_dim, kernel_initializer="he_normal", name="global_proj")
+        self.global_norm = _norm(1e-5)
+        self.global_region_gate = tf.keras.Sequential([
+            tf.keras.Input(shape=(self.embed_dim * 2,)),
+            tf.keras.layers.Dense(self.embed_dim, activation=tf.nn.gelu, name="global_region_gate_fc1"),
+            tf.keras.layers.Dense(self.embed_dim, activation="sigmoid", name="global_region_gate_fc2"),
+        ], name="global_region_gate")
+        self.global_classifier = tf.keras.layers.Dense(
+            self.num_classes,
+            kernel_initializer="he_normal",
+            name="global_aux_classifier",
+        )
+
+        # 9. Main Classifier Head: LayerNorm -> Dropout(0.2) -> Dense(7)
         self.norm = _norm(1e-5)
         self.head_dropout = tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout", 0.2)), name="head_dropout")
         self.classifier = tf.keras.layers.Dense(self.num_classes, kernel_initializer="he_normal", name="classifier")
@@ -272,10 +267,10 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
         if pretrained_path:
             self.pretrained_load_status = self._load_backbone_pretrained(
                 pretrained_path,
-                require=bool(model_cfg.get("convnext_base_require_pretrained", False)),
+                require=bool(model_cfg.get("convnext_base_require_pretrained", True)),
             )
 
-    def _load_backbone_pretrained(self, weight_path: str, require: bool = False) -> str:
+    def _load_backbone_pretrained(self, weight_path: str, require: bool = True) -> str:
         helper = ConvNeXtBaseFaceFERBaseline(self.cfg)
         helper.backbone = self.backbone
         status = helper._load_pytorch_pretrained(weight_path, require=require)
@@ -289,9 +284,11 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
         return [v for v in self.trainable_variables if id(v) not in backbone_ids]
 
     def _process_masks(self, mask: tf.Tensor, grid_size: int) -> tf.Tensor:
+        # mask can be [B, H, W, 6] (channel-last from TF dataset) or [B, 6, H, W] (channel-first)
         mask_f32 = tf.cast(mask, tf.float32)
         batch_size = tf.shape(mask_f32)[0]
 
+        # Determine format: if last dim is 6 (or num_regions), it's already [B, H, W, 6]
         if mask_f32.shape[-1] == self.num_regions:
             mask_hwc = mask_f32
         elif mask_f32.shape[1] == self.num_regions:
@@ -303,8 +300,11 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
                 lambda: tf.transpose(mask_f32, [0, 2, 3, 1]),
             )
 
+        # Resize to grid_size x grid_size (e.g. 14x14 or 7x7) using area method
         mask_resized = tf.image.resize(mask_hwc, [grid_size, grid_size], method="area")
+        # Transpose back to [B, 6, grid_size, grid_size]
         mask_chw = tf.transpose(mask_resized, [0, 3, 1, 2])
+        # Flatten spatial grid to [B, 6, N]
         mask_flat = tf.reshape(mask_chw, [batch_size, self.num_regions, grid_size * grid_size])
         return mask_flat
 
@@ -317,7 +317,7 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
             mask = None
 
         if mask is None:
-            raise ValueError("Mask tensor is required for Hierarchical Cascade Fusion.")
+            raise ValueError("Mask tensor [B, 6, 112, 112] is required for Region Gated Fusion.")
 
         batch_size = tf.shape(image)[0]
 
@@ -326,53 +326,59 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
         feat_s3 = endpoints["stage3"]  # [B, 14, 14, 512]
         feat_s4 = endpoints["stage4"]  # [B, 7, 7, 1024]
 
-        # 2. Hierarchical Cascade Guidance: Refine S4 using S3 features
-        cascade_guidance = self.cascade_bridge(feat_s3)  # [B, 7, 7, 1024]
-        feat_s4_refined = feat_s4 + self.gamma_cascade * cascade_guidance  # [B, 7, 7, 1024]
-
-        # 3. Multi-scale 1x1 Projections to 256 channels
-        proj_s3_map = self.proj_s3(feat_s3)          # [B, 14, 14, 256]
-        proj_s4_map = self.proj_s4(feat_s4_refined)  # [B, 7, 7, 256]
+        # 2. Multi-scale 1x1 Projections to 256 channels
+        proj_s3_map = self.proj_s3(feat_s3)  # [B, 14, 14, 256]
+        proj_s4_map = self.proj_s4(feat_s4)  # [B, 7, 7, 256]
 
         # Flatten Spatial Dimensions
         tokens_s3 = tf.reshape(proj_s3_map, [batch_size, 196, self.embed_dim])  # [B, 196, 256]
         tokens_s4 = tf.reshape(proj_s4_map, [batch_size, 49, self.embed_dim])   # [B, 49, 256]
 
-        # 4. Soft Region Masks Processing
+        # 3. Soft Region Masks Processing
         mask_s3 = self._process_masks(mask, grid_size=14)  # [B, 6, 196]
         mask_s4 = self._process_masks(mask, grid_size=7)   # [B, 6, 49]
 
-        # 5. Region Queries Tile
+        # 4. Region Queries Tile
         queries = tf.tile(self.region_queries, [batch_size, 1, 1])  # [B, 6, 256]
 
-        # 6. Masked Cross-Attention Branches
+        # 5. Masked Cross-Attention Branches
         r3, attn_weights_s3 = self.cross_attn_s3(queries, tokens_s3, mask=mask_s3, training=training)  # R3: [B, 6, 256]
         r4, attn_weights_s4 = self.cross_attn_s4(queries, tokens_s4, mask=mask_s4, training=training)  # R4: [B, 6, 256]
 
-        # 7. Region-wise Gated Fusion
+        # 6. Region-wise Gated Fusion
         concat_r = tf.concat([r3, r4], axis=-1)  # [B, 6, 512]
         gate = self.gate_mlp(concat_r, training=training)  # G: [B, 6, 256]
         fused_regions = gate * r3 + (1.0 - gate) * r4       # R: [B, 6, 256]
 
-        # 8. Post-fusion Transformer Encoder Block (Exactly 1 Block)
+        # 7. Post-fusion Transformer Encoder Block (Exactly 1 Block)
         encoded_regions = self.encoder_block(fused_regions, training=training)  # [B, 6, 256]
 
-        # 9. Region Attention Pooling
+        # 8. Region Attention Pooling
         pooled_feat, region_weights = self.attn_pooling(encoded_regions)  # [B, 256]
 
-        # 10. Single Classifier Head
-        x = self.norm(pooled_feat)
+        # 9. Global residual fusion from ConvNeXt Stage 4
+        global_feat = self.global_pool(feat_s4)  # [B, 1024]
+        global_token = self.global_norm(self.global_proj(global_feat))  # [B, 256]
+        global_region_gate = self.global_region_gate(
+            tf.concat([pooled_feat, global_token], axis=-1),
+            training=training,
+        )  # [B, 256]
+        fused_feature = global_region_gate * pooled_feat + (1.0 - global_region_gate) * global_token
+        global_logits = self.global_classifier(global_token)  # [B, 7]
+
+        # 10. Classifier Head
+        x = self.norm(fused_feature)
         x = self.head_dropout(x, training=training)
         logits = self.classifier(x)  # [B, 7]
 
+        # Numerical Sanity Check
         tf.debugging.assert_all_finite(logits, "NaN/Inf detected in output logits")
+        tf.debugging.assert_all_finite(global_logits, "NaN/Inf detected in global auxiliary logits")
 
         return {
             "logits": tf.cast(logits, tf.float32),
             "S3": feat_s3,
             "S4": feat_s4,
-            "S4_refined": feat_s4_refined,
-            "gamma_cascade": self.gamma_cascade,
             "projected_S3": proj_s3_map,
             "projected_S4": proj_s4_map,
             "R3": r3,
@@ -381,6 +387,10 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
             "fused_regions": fused_regions,
             "encoded_regions": encoded_regions,
             "pooled_feature": pooled_feat,
+            "global_feature": global_token,
+            "global_region_gate": global_region_gate,
+            "fused_feature": fused_feature,
+            "global_logits": tf.cast(global_logits, tf.float32),
             "region_weights": region_weights,
         }
 
