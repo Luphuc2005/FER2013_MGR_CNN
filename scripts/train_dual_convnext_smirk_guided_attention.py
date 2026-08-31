@@ -1,56 +1,54 @@
 """
-Training Script for Dual ConvNeXt MS1M RGB + SMIRK Geometry with 3D-Guided Channel Attention.
+Train frozen RGB ConvNeXt-B MS1M + FER ckpt-43 anchor with a small SMIRK
+geometry encoder that only produces 3D-guided channel attention.
 
-Includes:
-1. Contract Smoke Test: Verifies max_abs_diff(baseline_logits, new_model_logits) < 1e-5 when alpha = 0.0.
-2. Differential Learning Rates:
-   - Geometry ConvNeXt backbone: lr_geom_backbone (5e-5)
-   - Fusion + Attention MLP + Classifier heads: lr_head (5e-4)
-   - RGB ConvNeXt backbone: Frozen in Phase 1 (unfreeze Stage 4 at epoch 15 with 1e-5)
-3. Mixed Precision (float16) support with LossScaleOptimizer.
+Stage 1 contract:
+- RGB backbone, GAP/dropout, and classifier are frozen after ckpt-43 restore.
+- Geometry ConvNeXt is not used; geometry is encoded by a small CNN.
+- Train only geometry encoder + channel attention + alpha_raw.
+- SAM is disabled for Stage 1.
+- Mixed precision is enabled and gradients are clipped by global norm=1.0.
+- Fail immediately on NaN/Inf.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
-import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 import tensorflow as tf
-import logging
+import yaml
+from sklearn.metrics import classification_report, confusion_matrix
 
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 tf.get_logger().setLevel("ERROR")
-
-import yaml
-from sklearn.metrics import classification_report, confusion_matrix
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from datasets.fer2013 import collect_split_records
-from models.convnext_base_face_baseline import ConvNeXtBaseFaceFERBaseline
 from models.dual_convnext_smirk_guided_attention import DualConvNeXtSMIRKGuidedAttentionFER
 
 EMOTION_NAMES = ["Angry", "Disgust", "Fear", "Happy", "Sad", "Surprise", "Neutral"]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train Dual ConvNeXt MS1M RGB + SMIRK Geometry with 3D-Guided Attention.")
+    parser = argparse.ArgumentParser(description="Train frozen RGB ckpt-43 + small SMIRK geometry guided attention.")
     parser.add_argument("--config", type=str, default="config_dual_convnext_smirk_guided_attention.yaml")
-    parser.add_argument("--skip-smoke-test", action="store_true", help="Skip contract smoke test.")
+    parser.add_argument("--skip-smoke-test", action="store_true", help="Skip baseline-equivalence smoke test.")
     parser.add_argument("--smoke-test-only", action="store_true", help="Run contract smoke test and exit.")
-    parser.add_argument("--skip-baseline-checkpoint", action="store_true", help="Skip restoring FER baseline checkpoint ckpt-43.")
-    parser.add_argument("--use-sam", action="store_true", help="Enable Sharpness-Aware Minimization (SAM) optimizer.")
-    parser.add_argument("--sam-rho", type=float, default=0.05, help="SAM neighborhood size rho (default: 0.05).")
-    parser.add_argument("--multi-gpu", action="store_true", help="Enable 2-GPU MirroredStrategy training.")
+    parser.add_argument("--skip-baseline-checkpoint", action="store_true", help="Allow running without restoring FER baseline ckpt-43.")
+    parser.add_argument("--use-sam", action="store_true", help="Ignored: SAM is disabled by the Stage 1 contract.")
+    parser.add_argument("--sam-rho", type=float, default=0.0, help="Ignored: SAM is disabled by the Stage 1 contract.")
+    parser.add_argument("--multi-gpu", action="store_true", help="Enable MirroredStrategy scope when multiple GPUs are visible.")
     return parser.parse_args()
 
 
@@ -67,6 +65,43 @@ def resolve_path(path_value: str) -> Path:
     return p if p.is_absolute() else PROJECT_ROOT / p
 
 
+def resolve_checkpoint_path(path_value: Optional[str]) -> Optional[str]:
+    if not path_value:
+        return None
+    ckpt_path = resolve_path(path_value)
+    if ckpt_path.is_dir():
+        latest = tf.train.latest_checkpoint(str(ckpt_path))
+        return latest
+    return str(ckpt_path)
+
+
+def checkpoint_exists(ckpt_prefix: Optional[str]) -> bool:
+    if not ckpt_prefix:
+        return False
+    return Path(ckpt_prefix).exists() or Path(ckpt_prefix + ".index").exists()
+
+
+def restore_rgb_baseline_checkpoint(model: DualConvNeXtSMIRKGuidedAttentionFER, checkpoint_path: Optional[str], required: bool = True) -> Optional[str]:
+    resolved_ckpt = resolve_checkpoint_path(checkpoint_path)
+    if not checkpoint_exists(resolved_ckpt):
+        message = f"Baseline ckpt-43 checkpoint not found: {checkpoint_path}"
+        if required:
+            raise FileNotFoundError(message)
+        print(f"[WARNING] {message}. RGB anchor restore skipped by request.", flush=True)
+        return None
+
+    print(f"[INFO] Restoring FER ckpt-43 into RGB anchor: {resolved_ckpt}", flush=True)
+    status = tf.train.Checkpoint(model=model.rgb_baseline).restore(resolved_ckpt)
+    status.expect_partial()
+    model.freeze_rgb_branch()
+    print(f"[INFO] RGB anchor restored and frozen from ckpt-43: {resolved_ckpt}", flush=True)
+    return resolved_ckpt
+
+
+def count_params(variables) -> int:
+    return int(sum(np.prod(v.shape.as_list()) for v in variables))
+
+
 def load_geometry_cache(cache_dir: Path, pattern: str, split: str) -> Dict[str, np.ndarray]:
     npz_path = cache_dir / pattern.format(split=split)
     if not npz_path.exists():
@@ -75,6 +110,8 @@ def load_geometry_cache(cache_dir: Path, pattern: str, split: str) -> Dict[str, 
     geom_maps = data["geometry_maps"]
     if geom_maps.dtype != np.float16:
         geom_maps = geom_maps.astype(np.float16)
+    if not np.all(np.isfinite(geom_maps)):
+        raise FloatingPointError(f"NaN/Inf in cached geometry maps: {npz_path}")
     return {
         "geometry_maps": geom_maps,
         "labels": data["labels"],
@@ -107,17 +144,12 @@ def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, 
         if is_training:
             np.random.shuffle(indices)
         for idx in indices:
-            img = images[idx]
-            g_map = geom_maps[idx]
-            lbl = labels[idx]
-            yield {"image": img, "geometry_maps": g_map}, lbl
+            yield {"image": images[idx], "geometry_maps": geom_maps[idx]}, labels[idx]
 
-    img_shape = images.shape[1:]
-    geom_shape = geom_maps.shape[1:]
     output_signature = (
         {
-            "image": tf.TensorSpec(shape=img_shape, dtype=tf.uint8),
-            "geometry_maps": tf.TensorSpec(shape=geom_shape, dtype=tf.float16),
+            "image": tf.TensorSpec(shape=images.shape[1:], dtype=tf.uint8),
+            "geometry_maps": tf.TensorSpec(shape=geom_maps.shape[1:], dtype=tf.float16),
         },
         tf.TensorSpec(shape=(), dtype=tf.int64),
     )
@@ -128,42 +160,30 @@ def create_dataset(records, cache_dict: Dict[str, np.ndarray], batch_size: int, 
     dataset = dataset.batch(batch_size, drop_remainder=False)
 
     def batch_mapper(item, lbl):
-        processed_item = {
+        return {
             "image": preprocess_batch_images(item["image"], target_size=112),
             "geometry_maps": item["geometry_maps"],
-        }
-        return processed_item, lbl
+        }, lbl
 
     dataset = dataset.map(batch_mapper, num_parallel_calls=tf.data.AUTOTUNE)
     dataset = dataset.prefetch(tf.data.AUTOTUNE)
     return dataset
 
 
-def run_contract_smoke_test(model: DualConvNeXtSMIRKGuidedAttentionFER, baseline_checkpoint: str, sample_batch) -> bool:
-    """Requirement 4: Verify max_abs_diff(F_guided, F_rgb) < 1e-5 and max_abs_diff(baseline_logits, dual_logits) < 1e-5 when alpha = 0.0."""
+def run_contract_smoke_test(model: DualConvNeXtSMIRKGuidedAttentionFER, sample_batch) -> bool:
+    """Verify dual logits match the restored ckpt-43 RGB baseline when alpha is approximately zero."""
     print("\n" + "=" * 65, flush=True)
-    print(" CONTRACT SMOKE TEST: VERIFYING BASELINE EQUIVALENCE (alpha = 0)", flush=True)
+    print(" CONTRACT SMOKE TEST: BASELINE EQUIVALENCE (alpha ~= 0)", flush=True)
     print("=" * 65, flush=True)
 
-    if isinstance(sample_batch, tuple):
-        inputs, labels = sample_batch
-    else:
-        inputs = sample_batch
+    inputs = sample_batch[0] if isinstance(sample_batch, tuple) else sample_batch
     images = inputs["image"]
 
-    # 1. Restore baseline checkpoint into RGB branch
-    resolved_ckpt = tf.train.latest_checkpoint(baseline_checkpoint) if Path(baseline_checkpoint).is_dir() else baseline_checkpoint
-    if resolved_ckpt is None or not (Path(resolved_ckpt + ".index").exists() or Path(resolved_ckpt).exists()):
-        print(f"[WARNING] Baseline checkpoint not found at {baseline_checkpoint}. Skipping exact numerical check.", flush=True)
-        return True
+    original_alpha_raw = float(model.alpha_raw.numpy())
+    # Force effective alpha to exactly 0.0 in float32 for equivalence only.
+    # This does not use the training init and is restored before training.
+    model.alpha_raw.assign(-1.0e9)
 
-    print(f"[SMOKE_TEST] Restoring baseline weights from: {resolved_ckpt}", flush=True)
-    tf.train.Checkpoint(model=model.rgb_baseline).restore(resolved_ckpt).expect_partial()
-
-    # 2. Force alpha = 0.0
-    model.alpha.assign(0.0)
-
-    # 3. Compute logits from standalone baseline and dual model
     baseline_out = model.rgb_baseline(images, training=False)
     baseline_logits = baseline_out["logits"].numpy()
 
@@ -171,29 +191,33 @@ def run_contract_smoke_test(model: DualConvNeXtSMIRKGuidedAttentionFER, baseline
     dual_logits = dual_out["final_logits"].numpy()
     F_rgb = dual_out["F_rgb"].numpy()
     F_guided = dual_out["F_guided"].numpy()
+    alpha = float(dual_out["alpha"].numpy())
+
+    model.alpha_raw.assign(original_alpha_raw)
 
     feat_diff = float(np.max(np.abs(F_guided - F_rgb)))
-    max_diff = float(np.max(np.abs(baseline_logits - dual_logits)))
+    logits_diff = float(np.max(np.abs(baseline_logits - dual_logits)))
 
+    print(f"[SMOKE_TEST] effective_alpha_for_check: {alpha:.12e}", flush=True)
     print(f"[SMOKE_TEST] Baseline logits shape: {baseline_logits.shape}", flush=True)
-    print(f"[SMOKE_TEST] Dual Model logits shape: {dual_logits.shape}", flush=True)
+    print(f"[SMOKE_TEST] Dual logits shape: {dual_logits.shape}", flush=True)
     print(f"[SMOKE_TEST] Max abs diff (F_guided - F_rgb): {feat_diff:.8e}", flush=True)
-    print(f"[SMOKE_TEST] Max abs diff (baseline_logits - dual_logits): {max_diff:.8e}", flush=True)
+    print(f"[SMOKE_TEST] Max abs diff (baseline_logits - dual_logits): {logits_diff:.8e}", flush=True)
 
-    if feat_diff < 1e-5 and max_diff < 1e-5:
-        print("  --> [PASS] CONTRACT SMOKE TEST PASSED! (F_guided == F_rgb and logits match when alpha = 0)", flush=True)
+    if feat_diff < 1e-5 and logits_diff < 1e-5:
+        print("  --> [PASS] CONTRACT SMOKE TEST PASSED", flush=True)
         print("=" * 65 + "\n", flush=True)
         return True
-    else:
-        print(f"  --> [FAIL] Contract Smoke Test FAILED! feat_diff={feat_diff:.8e}, logits_diff={max_diff:.8e}", flush=True)
-        print("=" * 65 + "\n", flush=True)
-        return False
+
+    print(f"  --> [FAIL] Contract smoke test failed: feat_diff={feat_diff:.8e}, logits_diff={logits_diff:.8e}", flush=True)
+    print("=" * 65 + "\n", flush=True)
+    return False
 
 
-def build_optimizers(cfg: Dict):
-    lr_head = float(cfg.get("training", {}).get("lr_head", 0.0005))
-    lr_geom = float(cfg.get("training", {}).get("lr_geom_backbone", 0.00005))
-    weight_decay = float(cfg.get("training", {}).get("weight_decay", 0.035))
+def build_optimizer(cfg: Dict):
+    training_cfg = cfg.get("training", {})
+    lr = float(training_cfg.get("learning_rate", training_cfg.get("lr_head", 0.0003)))
+    weight_decay = float(training_cfg.get("weight_decay", 0.035))
 
     adamw = getattr(tf.keras.optimizers, "AdamW", None)
     if adamw is None:
@@ -201,44 +225,62 @@ def build_optimizers(cfg: Dict):
 
     if adamw is not None:
         try:
-            opt_head = adamw(learning_rate=lr_head, weight_decay=weight_decay, jit_compile=False)
-            opt_geom = adamw(learning_rate=lr_geom, weight_decay=weight_decay, jit_compile=False)
+            return adamw(learning_rate=lr, weight_decay=weight_decay, jit_compile=False)
         except TypeError:
-            opt_head = adamw(learning_rate=lr_head, weight_decay=weight_decay)
-            opt_geom = adamw(learning_rate=lr_geom, weight_decay=weight_decay)
-    else:
-        opt_head = tf.keras.optimizers.Adam(learning_rate=lr_head)
-        opt_geom = tf.keras.optimizers.Adam(learning_rate=lr_geom)
-
-    return opt_head, opt_geom
+            return adamw(learning_rate=lr, weight_decay=weight_decay)
+    return tf.keras.optimizers.Adam(learning_rate=lr)
 
 
-def evaluate_model(model: DualConvNeXtSMIRKGuidedAttentionFER, dataset: tf.data.Dataset, loss_weight_3d: float = 0.1) -> Dict:
+def make_loss_fn(cfg: Dict):
+    label_smoothing = float(cfg.get("training", {}).get("label_smoothing", 0.0))
+    if label_smoothing > 0.0:
+        cce = tf.keras.losses.CategoricalCrossentropy(from_logits=True, label_smoothing=label_smoothing)
+
+        def loss_fn(y_true, y_pred):
+            return cce(tf.one_hot(y_true, 7), y_pred)
+
+        return loss_fn
+    return tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+
+
+def finite_or_raise(name: str, value: float) -> None:
+    if not math.isfinite(float(value)):
+        raise FloatingPointError(f"NaN/Inf detected in {name}: {value}")
+
+
+def evaluate_model(model: DualConvNeXtSMIRKGuidedAttentionFER, dataset: tf.data.Dataset, loss_fn) -> Dict:
     all_logits = []
     all_labels = []
     total_loss = 0.0
     total_samples = 0
-    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+    gate_means = []
+    gate_stds = []
+    gate_mins = []
+    gate_maxs = []
 
     for inputs, y_batch in dataset:
         outputs = model(inputs, training=False)
         logits = outputs["final_logits"]
-        aux_logits = outputs["aux_3d_logits"]
+        batch_loss = loss_fn(y_batch, logits)
+        tf.debugging.assert_all_finite(batch_loss, "NaN/Inf in validation loss")
 
-        l_final = loss_fn(y_batch, logits)
-        l_aux = loss_fn(y_batch, aux_logits)
-        batch_loss = l_final + loss_weight_3d * l_aux
-
-        batch_size = tf.shape(y_batch)[0]
-        total_loss += float(batch_loss.numpy()) * int(batch_size)
-        total_samples += int(batch_size)
+        batch_size = int(tf.shape(y_batch)[0])
+        total_loss += float(batch_loss.numpy()) * batch_size
+        total_samples += batch_size
 
         all_logits.append(logits.numpy())
         all_labels.append(y_batch.numpy())
+        gate_means.append(float(outputs["gate_mean"].numpy()))
+        gate_stds.append(float(outputs["gate_std"].numpy()))
+        gate_mins.append(float(outputs["gate_min"].numpy()))
+        gate_maxs.append(float(outputs["gate_max"].numpy()))
 
     avg_loss = float(total_loss / max(1, total_samples))
     all_logits_arr = np.concatenate(all_logits, axis=0)
     all_labels_arr = np.concatenate(all_labels, axis=0)
+
+    if not np.all(np.isfinite(all_logits_arr)):
+        raise FloatingPointError("NaN/Inf detected in validation logits")
 
     preds = np.argmax(all_logits_arr, axis=1)
     acc = float(np.mean(preds == all_labels_arr))
@@ -258,7 +300,12 @@ def evaluate_model(model: DualConvNeXtSMIRKGuidedAttentionFER, dataset: tf.data.
         "accuracy": acc,
         "classification_report": report,
         "confusion_matrix": conf_mat.tolist(),
-        "alpha": float(model.alpha.numpy()),
+        "alpha_raw": float(model.alpha_raw.numpy()),
+        "alpha": float(model.effective_alpha.numpy()),
+        "gate_mean": float(np.mean(gate_means)) if gate_means else 0.0,
+        "gate_std": float(np.mean(gate_stds)) if gate_stds else 0.0,
+        "gate_min": float(np.min(gate_mins)) if gate_mins else 0.0,
+        "gate_max": float(np.max(gate_maxs)) if gate_maxs else 0.0,
     }
 
 
@@ -266,16 +313,14 @@ def main() -> int:
     args = parse_args()
     cfg = load_yaml(args.config)
 
-    # Enable Memory Growth for all GPUs
     gpus = tf.config.list_physical_devices("GPU")
     if gpus:
         for gpu in gpus:
             try:
                 tf.config.experimental.set_memory_growth(gpu, True)
-            except Exception as e:
-                print(f"[WARNING] Could not set memory growth for {gpu}: {e}", flush=True)
+            except Exception as exc:
+                print(f"[WARNING] Could not set memory growth for {gpu}: {exc}", flush=True)
 
-    # Enable Mixed Precision
     tf.keras.mixed_precision.set_global_policy("mixed_float16")
     print(f"[INFO] Mixed precision policy set to: {tf.keras.mixed_precision.global_policy().name}", flush=True)
 
@@ -285,11 +330,13 @@ def main() -> int:
     else:
         strategy = tf.distribute.get_strategy()
 
+    if args.use_sam or bool(cfg.get("training", {}).get("use_sam", False)):
+        print("[WARNING] SAM requested but ignored: Stage 1 contract requires SAM disabled.", flush=True)
+
     output_dir = resolve_path(cfg["paths"]["output_dir"])
     ckpt_dir = output_dir / "checkpoints" / "best"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Load FER Records & Geometry Cache
     data_path = resolve_path(cfg["data"]["data_path"])
     cache_dir = resolve_path(cfg["geometry_cache"]["feature_dir"])
     pattern = cfg["geometry_cache"]["map_file_pattern"]
@@ -300,7 +347,7 @@ def main() -> int:
     val_records = collect_split_records(data_path, "val", predecode_pixels=True)
     test_records = collect_split_records(data_path, "test", predecode_pixels=True)
 
-    print("[INFO] Loading SMIRK geometry cache...", flush=True)
+    print("[INFO] Loading SMIRK depth+normal geometry cache...", flush=True)
     train_cache = load_geometry_cache(cache_dir, pattern, "train")
     val_cache = load_geometry_cache(cache_dir, pattern, "val")
     test_cache = load_geometry_cache(cache_dir, pattern, "test")
@@ -309,221 +356,152 @@ def main() -> int:
     val_ds = create_dataset(val_records, val_cache, batch_size, is_training=False)
     test_ds = create_dataset(test_records, test_cache, batch_size, is_training=False)
 
-    # 2. Build Dual Model & Load MS1M Pretrained Weights
-    model = DualConvNeXtSMIRKGuidedAttentionFER(cfg)
-    first_inputs, _ = next(iter(train_ds))
-    _ = model(first_inputs, training=False)
+    with strategy.scope():
+        model = DualConvNeXtSMIRKGuidedAttentionFER(cfg)
+        first_batch = next(iter(train_ds))
+        first_inputs, _ = first_batch
 
-    model.load_pretrained_weights(cfg, args)
-    model.freeze_rgb_branch()
-
-    # 3. Contract Smoke Test
-    baseline_ckpt_path = cfg["rgb_backbone"].get("baseline_checkpoint_path")
-    if not args.skip_smoke_test:
-        smoke_ok = run_contract_smoke_test(model, baseline_ckpt_path, first_inputs)
-        if not smoke_ok:
-            raise RuntimeError("[CONTRACT FAIL] Contract smoke test failed.")
-        if args.smoke_test_only:
-            print("[INFO] --smoke-test-only requested. Exiting successfully.")
-            return 0
-
-    # Restore baseline FER classifier weights into RGB branch if baseline checkpoint exists
-    resolved_ckpt = tf.train.latest_checkpoint(baseline_ckpt_path) if Path(baseline_ckpt_path).is_dir() else baseline_ckpt_path
-    if resolved_ckpt and (Path(resolved_ckpt + ".index").exists() or Path(resolved_ckpt).exists()):
-        print(f"[INFO] Restoring baseline FER classifier weights into RGB branch: {resolved_ckpt}", flush=True)
-        tf.train.Checkpoint(model=model.rgb_baseline).restore(resolved_ckpt).expect_partial()
-
-    # 4. Setup Optimizers
-    loss_weight_3d = float(cfg.get("training", {}).get("loss_weight_3d", 0.1))
-    opt_head, opt_geom = build_optimizers(cfg)
-    
-    label_smoothing = float(cfg.get("training", {}).get("label_smoothing", 0.0))
-    if label_smoothing > 0.0:
-        cce = tf.keras.losses.CategoricalCrossentropy(from_logits=True, label_smoothing=label_smoothing)
-        def loss_fn(y_true, y_pred):
-            return cce(tf.one_hot(y_true, 7), y_pred)
-    else:
-        loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-
-    loss_scale_head = tf.keras.mixed_precision.LossScaleOptimizer(opt_head)
-    loss_scale_geom = tf.keras.mixed_precision.LossScaleOptimizer(opt_geom)
-
-    use_sam = bool(args.use_sam or cfg.get("training", {}).get("use_sam", False))
-    sam_rho = float(args.sam_rho or cfg.get("training", {}).get("sam_rho", 0.05))
-    if use_sam:
-        print(f"[INFO] SAM (Sharpness-Aware Minimization) ENABLED with rho={sam_rho:.4f}", flush=True)
-
-    # Variables Grouping
-    def get_variables():
-        geom_vars = [v for v in model.geometry_baseline.trainable_variables if "fer_classifier" not in v.name]
-        head_vars = (
-            list(model.geometry_fusion.trainable_variables)
-            + list(model.channel_attention_mlp.trainable_variables)
-            + list(model.aux_3d_head.trainable_variables)
-            + list(model.rgb_baseline.classifier.trainable_variables)
-            + [model.alpha]
+        model.load_pretrained_weights(cfg, args)
+        restore_rgb_baseline_checkpoint(
+            model,
+            cfg.get("rgb_backbone", {}).get("baseline_checkpoint_path"),
+            required=not args.skip_baseline_checkpoint,
         )
-        if model.rgb_baseline.trainable:
-            head_vars += list(model.rgb_baseline.trainable_variables)
-        return geom_vars, head_vars
+        model.freeze_rgb_branch()
+        _ = model(first_inputs, training=False)
+
+        if not args.skip_smoke_test:
+            smoke_ok = run_contract_smoke_test(model, first_inputs)
+            if not smoke_ok:
+                raise RuntimeError("[CONTRACT FAIL] Contract smoke test failed.")
+            if args.smoke_test_only:
+                print("[INFO] --smoke-test-only requested. Exiting successfully.", flush=True)
+                return 0
+
+        optimizer = build_optimizer(cfg)
+        optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
+        loss_fn = make_loss_fn(cfg)
+
+    stage1_vars = (
+        list(model.geometry_encoder.trainable_variables)
+        + list(model.channel_attention_mlp.trainable_variables)
+        + [model.alpha_raw]
+    )
+    stage1_var_ids = {id(v) for v in stage1_vars}
+    leaked_rgb_vars = [v.name for v in model.rgb_baseline.trainable_variables if id(v) in stage1_var_ids]
+    if leaked_rgb_vars:
+        raise RuntimeError(f"RGB variables leaked into Stage 1 trainables: {leaked_rgb_vars[:5]}")
+
+    grad_clip_norm = float(cfg.get("training", {}).get("grad_clip_norm", 1.0))
+    print("=" * 65, flush=True)
+    print(" STARTING STAGE 1: FROZEN RGB CKPT-43 + SMALL SMIRK GEOMETRY ATTENTION", flush=True)
+    print(f" Epochs: {int(cfg['training']['epochs'])} | SAM: disabled | global_grad_clip_norm: {grad_clip_norm:.3f}", flush=True)
+    print(f" Stage 1 trainable params: {count_params(stage1_vars):,}", flush=True)
+    print(f" RGB trainable params after freeze: {count_params(model.rgb_baseline.trainable_variables):,}", flush=True)
+    print("=" * 65, flush=True)
 
     @tf.function
-    def train_step_standard(x_batch, y_batch, is_unfrozen: bool = False):
-        with tf.GradientTape(persistent=True) as tape:
+    def train_step(x_batch, y_batch):
+        with tf.GradientTape() as tape:
             outputs = model(x_batch, training=True)
-            f_logits = outputs["final_logits"]
-            a_logits = outputs["aux_3d_logits"]
+            logits = outputs["final_logits"]
+            total_loss = loss_fn(y_batch, logits)
+            tf.debugging.assert_all_finite(total_loss, "NaN/Inf in training loss")
+            scaled_loss = optimizer.get_scaled_loss(total_loss)
 
-            l_final = loss_fn(y_batch, f_logits)
-            l_aux = loss_fn(y_batch, a_logits)
-            total_loss = l_final + loss_weight_3d * l_aux
+        scaled_grads = tape.gradient(scaled_loss, stage1_vars)
+        grads = optimizer.get_unscaled_gradients(scaled_grads)
+        valid_pairs = [(g, v) for g, v in zip(grads, stage1_vars) if g is not None]
+        if valid_pairs:
+            valid_grads, valid_vars = zip(*valid_pairs)
+            for grad in valid_grads:
+                tf.debugging.assert_all_finite(grad, "NaN/Inf in gradients")
+            clipped_grads, grad_norm = tf.clip_by_global_norm(list(valid_grads), grad_clip_norm)
+            optimizer.apply_gradients(zip(clipped_grads, valid_vars))
+        else:
+            grad_norm = tf.constant(0.0, dtype=tf.float32)
 
-            scaled_loss_head = loss_scale_head.get_scaled_loss(total_loss)
-            scaled_loss_geom = loss_scale_geom.get_scaled_loss(total_loss)
-
-        geom_vars, head_vars = get_variables()
-
-        scaled_grads_head = tape.gradient(scaled_loss_head, head_vars)
-        grads_head = loss_scale_head.get_unscaled_gradients(scaled_grads_head)
-        valid_head_grads_and_vars = [(g, v) for g, v in zip(grads_head, head_vars) if g is not None]
-        if valid_head_grads_and_vars:
-            loss_scale_head.apply_gradients(valid_head_grads_and_vars)
-
-        if geom_vars:
-            scaled_grads_geom = tape.gradient(scaled_loss_geom, geom_vars)
-            grads_geom = loss_scale_geom.get_unscaled_gradients(scaled_grads_geom)
-            valid_geom_grads_and_vars = [(g, v) for g, v in zip(grads_geom, geom_vars) if g is not None]
-            if valid_geom_grads_and_vars:
-                loss_scale_geom.apply_gradients(valid_geom_grads_and_vars)
-
-        del tape
-
-        preds = tf.argmax(f_logits, axis=1)
+        preds = tf.argmax(logits, axis=1, output_type=y_batch.dtype)
         acc = tf.reduce_mean(tf.cast(tf.equal(preds, y_batch), tf.float32))
-        return total_loss, acc, outputs["alpha"]
+        return {
+            "loss": tf.cast(total_loss, tf.float32),
+            "accuracy": acc,
+            "alpha": tf.cast(outputs["alpha"], tf.float32),
+            "gate_mean": tf.cast(outputs["gate_mean"], tf.float32),
+            "gate_std": tf.cast(outputs["gate_std"], tf.float32),
+            "gate_min": tf.cast(outputs["gate_min"], tf.float32),
+            "gate_max": tf.cast(outputs["gate_max"], tf.float32),
+            "grad_norm": tf.cast(grad_norm, tf.float32),
+        }
 
-    @tf.function
-    def train_step_sam(x_batch, y_batch, is_unfrozen: bool = False):
-        geom_vars, head_vars = get_variables()
-
-        with tf.GradientTape(persistent=True) as tape:
-            outputs = model(x_batch, training=True)
-            f_logits = outputs["final_logits"]
-            a_logits = outputs["aux_3d_logits"]
-
-            l_final = loss_fn(y_batch, f_logits)
-            l_aux = loss_fn(y_batch, a_logits)
-            total_loss = l_final + loss_weight_3d * l_aux
-
-            scaled_loss_head = loss_scale_head.get_scaled_loss(total_loss)
-            scaled_loss_geom = loss_scale_geom.get_scaled_loss(total_loss)
-
-        scaled_grads_head = tape.gradient(scaled_loss_head, head_vars)
-        grads_head = loss_scale_head.get_unscaled_gradients(scaled_grads_head)
-
-        grads_geom = []
-        if geom_vars:
-            scaled_grads_geom = tape.gradient(scaled_loss_geom, geom_vars)
-            grads_geom = loss_scale_geom.get_unscaled_gradients(scaled_grads_geom)
-
-        del tape
-
-        head_e = []
-        for g, v in zip(grads_head, head_vars):
-            if g is not None:
-                norm = tf.norm(g) + 1e-12
-                e = tf.cast(sam_rho * g / norm, v.dtype)
-                v.assign_add(e)
-                head_e.append((e, v))
-
-        geom_e = []
-        for g, v in zip(grads_geom, geom_vars):
-            if g is not None:
-                norm = tf.norm(g) + 1e-12
-                e = tf.cast(sam_rho * g / norm, v.dtype)
-                v.assign_add(e)
-                geom_e.append((e, v))
-
-        with tf.GradientTape(persistent=True) as tape2:
-            outputs2 = model(x_batch, training=True)
-            f_logits2 = outputs2["final_logits"]
-            a_logits2 = outputs2["aux_3d_logits"]
-
-            l_final2 = loss_fn(y_batch, f_logits2)
-            l_aux2 = loss_fn(y_batch, a_logits2)
-            total_loss2 = l_final2 + loss_weight_3d * l_aux2
-
-            scaled_loss_head2 = loss_scale_head.get_scaled_loss(total_loss2)
-            scaled_loss_geom2 = loss_scale_geom.get_scaled_loss(total_loss2)
-
-        for e, v in head_e:
-            v.assign_sub(e)
-        for e, v in geom_e:
-            v.assign_sub(e)
-
-        scaled_grads_head2 = tape2.gradient(scaled_loss_head2, head_vars)
-        grads_head2 = loss_scale_head.get_unscaled_gradients(scaled_grads_head2)
-        valid_head_grads_and_vars = [(g, v) for g, v in zip(grads_head2, head_vars) if g is not None]
-        if valid_head_grads_and_vars:
-            loss_scale_head.apply_gradients(valid_head_grads_and_vars)
-
-        if geom_vars:
-            scaled_grads_geom2 = tape2.gradient(scaled_loss_geom2, geom_vars)
-            grads_geom2 = loss_scale_geom.get_unscaled_gradients(scaled_grads_geom2)
-            valid_geom_grads_and_vars = [(g, v) for g, v in zip(grads_geom2, geom_vars) if g is not None]
-            if valid_geom_grads_and_vars:
-                loss_scale_geom.apply_gradients(valid_geom_grads_and_vars)
-
-        del tape2
-
-        preds = tf.argmax(f_logits, axis=1)
-        acc = tf.reduce_mean(tf.cast(tf.equal(preds, y_batch), tf.float32))
-        return total_loss, acc, outputs["alpha"]
-
-    train_step = train_step_sam if use_sam else train_step_standard
-
-    # 5. Training Loop
     epochs = int(cfg["training"]["epochs"])
-    unfreeze_epoch = int(cfg["training"].get("unfreeze_rgb_stage4_epoch", 15))
     best_val_acc = -1.0
     patience = int(cfg["training"]["patience"])
     patience_counter = 0
 
-    print("=" * 65, flush=True)
-    print(" STARTING DUAL CONVNEXT MS1M RGB + SMIRK GEOMETRY TRAINING", flush=True)
-    print(f" Epochs: {epochs} | Unfreeze Stage4 Epoch: {unfreeze_epoch}", flush=True)
-    print("=" * 65, flush=True)
-
     for epoch in range(1, epochs + 1):
-        if epoch == unfreeze_epoch:
-            print(f"\n[EPOCH {epoch:02d}] Unfreezing Stage 4 of RGB ConvNeXt backbone for joint fine-tuning...", flush=True)
-            model.unfreeze_rgb_stage4()
-
-        is_unfrozen = epoch >= unfreeze_epoch
         start_time = time.time()
-        train_loss = 0.0
-        train_acc = 0.0
-        num_batches = 0
+        train_loss_sum = 0.0
+        train_acc_sum = 0.0
+        train_samples = 0
+        gate_means = []
+        gate_stds = []
+        gate_mins = []
+        gate_maxs = []
+        grad_norms = []
 
         for x_b, y_b in train_ds:
-            loss_v, acc_v, alpha_v = train_step(x_b, y_b, is_unfrozen=is_unfrozen)
-            train_loss += float(loss_v.numpy())
-            train_acc += float(acc_v.numpy())
-            num_batches += 1
+            metrics = train_step(x_b, y_b)
+            batch_size = int(tf.shape(y_b)[0])
+            loss_v = float(metrics["loss"].numpy())
+            acc_v = float(metrics["accuracy"].numpy())
+            grad_norm_v = float(metrics["grad_norm"].numpy())
+            finite_or_raise("train_loss", loss_v)
+            finite_or_raise("train_accuracy", acc_v)
+            finite_or_raise("gradient_norm", grad_norm_v)
 
-        train_loss /= max(1, num_batches)
-        train_acc /= max(1, num_batches)
+            train_loss_sum += loss_v * batch_size
+            train_acc_sum += acc_v * batch_size
+            train_samples += batch_size
+            gate_means.append(float(metrics["gate_mean"].numpy()))
+            gate_stds.append(float(metrics["gate_std"].numpy()))
+            gate_mins.append(float(metrics["gate_min"].numpy()))
+            gate_maxs.append(float(metrics["gate_max"].numpy()))
+            grad_norms.append(grad_norm_v)
 
-        val_metrics = evaluate_model(model, val_ds, loss_weight_3d=loss_weight_3d)
+        train_loss = train_loss_sum / max(1, train_samples)
+        train_acc = train_acc_sum / max(1, train_samples)
+        train_gate_mean = float(np.mean(gate_means)) if gate_means else 0.0
+        train_gate_std = float(np.mean(gate_stds)) if gate_stds else 0.0
+        train_gate_min = float(np.min(gate_mins)) if gate_mins else 0.0
+        train_gate_max = float(np.max(gate_maxs)) if gate_maxs else 0.0
+        train_grad_norm = float(np.mean(grad_norms)) if grad_norms else 0.0
+
+        val_metrics = evaluate_model(model, val_ds, loss_fn)
         val_acc = val_metrics["accuracy"]
         val_loss = val_metrics["loss"]
         current_alpha = val_metrics["alpha"]
 
+        for name, value in (
+            ("val_loss", val_loss),
+            ("val_accuracy", val_acc),
+            ("alpha", current_alpha),
+            ("val_gate_mean", val_metrics["gate_mean"]),
+            ("val_gate_std", val_metrics["gate_std"]),
+            ("val_gate_min", val_metrics["gate_min"]),
+            ("val_gate_max", val_metrics["gate_max"]),
+        ):
+            finite_or_raise(name, value)
+
         elapsed = time.time() - start_time
         print(
             f"Epoch {epoch:02d}/{epochs:02d} [{elapsed:.1f}s] - "
-            f"train_loss: {train_loss:.4f} - train_acc: {train_acc:.4f} - "
-            f"val_loss: {val_loss:.4f} - val_acc: {val_acc:.4f} - alpha: {current_alpha:.6f}",
+            f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} - "
+            f"val_loss={val_loss:.4f} val_acc={val_acc:.4f} - "
+            f"alpha={current_alpha:.10f} alpha_raw={val_metrics['alpha_raw']:.6f} - "
+            f"gate_train(mean/std/min/max)={train_gate_mean:.6f}/{train_gate_std:.6f}/{train_gate_min:.6f}/{train_gate_max:.6f} - "
+            f"gate_val(mean/std/min/max)={val_metrics['gate_mean']:.6f}/{val_metrics['gate_std']:.6f}/{val_metrics['gate_min']:.6f}/{val_metrics['gate_max']:.6f} - "
+            f"grad_norm={train_grad_norm:.6f}",
             flush=True,
         )
 
@@ -531,16 +509,16 @@ def main() -> int:
             best_val_acc = val_acc
             patience_counter = 0
             model.save_weights(str(ckpt_dir / "ckpt"))
-            print(f"  --> Saved new best checkpoint! val_acc: {val_acc:.4f}", flush=True)
+            print(f"  --> Saved new best checkpoint. val_acc={val_acc:.4f}", flush=True)
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print(f"[INFO] Early stopping triggered at epoch {epoch}.", flush=True)
                 break
 
-    print("\n[INFO] Evaluating best model on test set...", flush=True)
+    print("\n[INFO] Evaluating best Stage 1 checkpoint on test set...", flush=True)
     model.load_weights(str(ckpt_dir / "ckpt"))
-    test_metrics = evaluate_model(model, test_ds, loss_weight_3d=loss_weight_3d)
+    test_metrics = evaluate_model(model, test_ds, loss_fn)
     print(f"[TEST METRICS] Test Accuracy: {test_metrics['accuracy']:.4f} | Test Loss: {test_metrics['loss']:.4f}", flush=True)
     print("Classification Report:\n", json.dumps(test_metrics["classification_report"], indent=2))
 
@@ -549,3 +527,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

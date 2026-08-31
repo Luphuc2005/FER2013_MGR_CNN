@@ -1,6 +1,10 @@
-# Configuration for Dual ConvNeXt MS1M RGB + SMIRK Geometry with 3D-Guided Channel Attention
+# Configuration for Stage 1 frozen ConvNeXt-B MS1M + FER ckpt-43 RGB anchor
+# with small SMIRK depth+normal CNN geometry-guided channel attention.
 
 seed: 42
+
+runtime:
+  use_mixed_precision: true
 
 data:
   num_classes: 7
@@ -26,18 +30,19 @@ geometry_cache:
 model:
   name: "dual_convnext_smirk_guided_attention"
   feature_dim: 1024
+  geometry_width: 64
   attention_hidden_dim: 256
+  alpha_max: 0.2
+  alpha_raw_init: -4.6
 
 training:
   epochs: 60
   patience: 15
-  loss_weight_3d: 0.1
+  use_sam: false
+  sam_rho: 0.0
   label_smoothing: 0.10
   optimizer: "adamw"
-  lr_head: 0.0005
-  lr_geom_backbone: 0.00005
-  lr_rgb_unfreeze: 0.00001
-  unfreeze_rgb_stage4_epoch: 999
+  learning_rate: 0.0003
   weight_decay: 0.035
   grad_clip_norm: 1.0
   monitor: "val_accuracy"

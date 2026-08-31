@@ -1,26 +1,23 @@
 """
-Dual ConvNeXt MS1M RGB + SMIRK Geometry with 3D-Guided Channel Attention for FER2013.
+Dual ConvNeXt MS1M RGB anchor + small SMIRK geometry encoder with
+3D-guided channel attention for FER2013.
 
-Architecture:
-1. RGB Branch:
-   Input FER RGB [B, 112, 112, 3] -> ConvNeXt-Base MS1M-ArcFace -> Stage4 feature F_rgb [B, 7, 7, 1024].
-2. 3D Branch:
-   depth_rgb [B, 112, 112, 3] and normal_rgb [B, 112, 112, 3] -> Shared-weight Geometry ConvNeXt MS1M
-   -> F_depth [B, 7, 7, 1024] and F_normal [B, 7, 7, 1024]
-   -> Concat -> Conv1x1 Fusion MLP -> F_3d [B, 7, 7, 1024].
-3. 3D-Guided Channel Attention:
-   GAP(F_rgb) [1024] + GAP(F_3d) [1024] -> Concat [2048] -> Dense(256, GELU) -> Dense(1024, Tanh)
-   -> channel_gate [B, 1, 1, 1024]
-   Modulation: F_guided = F_rgb * (1 + alpha * channel_gate), where alpha is a trainable scalar initialized to 0.0.
-4. Classification:
-   F_guided -> GAP -> Dropout -> Dense(7) (final_logits)
-   F_3d -> GAP -> Dense(7) (aux_3d_logits)
+Contract:
+1. RGB branch is the ConvNeXt-Base MS1M + FER ckpt-43 baseline anchor.
+   Stage 1 keeps the full RGB backbone, GAP/dropout, and classifier frozen.
+2. Geometry branch is a small CNN over cached SMIRK depth+normal maps
+   [B,H,W,4], producing F_3d [B,7,7,1024]. It does not own a classifier.
+3. Geometry only guides RGB channel attention over F_rgb [B,7,7,1024].
+   gate = 2 * sigmoid(g) - 1, so gate is bounded to [-1, 1].
+4. F_guided = F_rgb * (1 + alpha * gate), where
+   alpha = 0.2 * sigmoid(alpha_raw). alpha_raw is initialized negative so
+   effective alpha starts close to zero.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import tensorflow as tf
@@ -34,54 +31,105 @@ def count_params(variables: Iterable[tf.Variable]) -> int:
     return int(sum(np.prod(v.shape.as_list()) for v in variables))
 
 
+class GeometryConvBlock(tf.keras.layers.Layer):
+    """Conv -> LayerNorm -> GELU block for NHWC geometry maps."""
+
+    def __init__(self, filters: int, stride: int = 1, name: Optional[str] = None):
+        super().__init__(name=name)
+        self.conv = tf.keras.layers.Conv2D(
+            int(filters),
+            kernel_size=3,
+            strides=int(stride),
+            padding="same",
+            kernel_initializer="he_normal",
+            name="conv",
+        )
+        self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln")
+        self.act = tf.keras.layers.Activation(tf.nn.gelu, name="gelu")
+
+    def call(self, x, training=False):
+        x = self.conv(x)
+        x = self.norm(x)
+        return self.act(x)
+
+
+class SmallSMIRKGeometryEncoder(tf.keras.Model):
+    """~8M parameter CNN encoder for depth + normal maps."""
+
+    def __init__(self, out_dim: int = 1024, width: int = 64, name: str = "small_smirk_geometry_encoder"):
+        super().__init__(name=name)
+        w = int(width)
+        self.blocks = [
+            GeometryConvBlock(w, stride=2, name="stem_56"),
+            GeometryConvBlock(w, stride=1, name="block_56"),
+            GeometryConvBlock(w * 2, stride=2, name="down_28"),
+            GeometryConvBlock(w * 2, stride=1, name="block_28_a"),
+            GeometryConvBlock(w * 2, stride=1, name="block_28_b"),
+            GeometryConvBlock(w * 4, stride=2, name="down_14"),
+            GeometryConvBlock(w * 4, stride=1, name="block_14_a"),
+            GeometryConvBlock(w * 4, stride=1, name="block_14_b"),
+            GeometryConvBlock(w * 8, stride=2, name="down_7"),
+            GeometryConvBlock(w * 8, stride=1, name="block_7_a"),
+            GeometryConvBlock(w * 8, stride=1, name="block_7_b"),
+        ]
+        self.proj = tf.keras.layers.Conv2D(
+            int(out_dim),
+            kernel_size=1,
+            padding="same",
+            kernel_initializer="he_normal",
+            name="project_to_rgb_dim",
+        )
+        self.proj_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="project_ln")
+        self.proj_act = tf.keras.layers.Activation(tf.nn.gelu, name="project_gelu")
+
+    def call(self, x, training=False):
+        x = tf.cast(x, tf.float32)
+        for block in self.blocks:
+            x = block(x, training=training)
+        x = self.proj(x)
+        x = self.proj_norm(x)
+        return self.proj_act(x)
+
+
 class DualConvNeXtSMIRKGuidedAttentionFER(tf.keras.Model):
-    """Dual ConvNeXt MS1M RGB + SMIRK Geometry with 3D-Guided Channel Attention."""
+    """Frozen RGB ConvNeXt-B anchor guided by a small SMIRK geometry encoder."""
 
     def __init__(self, cfg: Dict):
         super().__init__(name=cfg.get("model", {}).get("name", "dual_convnext_smirk_guided_attention"))
         self.cfg = cfg
+        model_cfg = cfg.get("model", {})
         self.num_classes = int(cfg.get("data", {}).get("num_classes", 7))
-        self.feature_dim = int(cfg.get("model", {}).get("feature_dim", 1024))
-        self.attention_hidden_dim = int(cfg.get("model", {}).get("attention_hidden_dim", 256))
+        self.feature_dim = int(model_cfg.get("feature_dim", 1024))
+        self.attention_hidden_dim = int(model_cfg.get("attention_hidden_dim", 256))
+        self.alpha_max = float(model_cfg.get("alpha_max", 0.2))
+        self.alpha_raw_init = float(model_cfg.get("alpha_raw_init", -4.6))
         self._shape_logged = False
 
-        # 1. RGB ConvNeXt Baseline (MS1M Pretrained)
-        rgb_cfg = self._make_backbone_cfg(cfg, name="convnext_rgb")
+        rgb_cfg = self._make_backbone_cfg(cfg, name="convnext_rgb_anchor")
         self.rgb_baseline = ConvNeXtBaseFaceFERBaseline(rgb_cfg)
 
-        # 2. Shared-Weight Geometry ConvNeXt Baseline (MS1M Pretrained)
-        geom_cfg = self._make_backbone_cfg(cfg, name="convnext_geometry")
-        self.geometry_baseline = ConvNeXtBaseFaceFERBaseline(geom_cfg)
-
-        # 3. Geometry Feature Fusion (1x1 Conv MLP)
-        self.geometry_fusion = tf.keras.Sequential(
-            [
-                tf.keras.layers.Conv2D(self.feature_dim, 1, padding="same", activation=tf.nn.gelu, name="conv1"),
-                tf.keras.layers.Conv2D(self.feature_dim, 1, padding="same", name="conv2"),
-            ],
-            name="geometry_fusion",
+        geometry_width = int(model_cfg.get("geometry_width", 64))
+        self.geometry_encoder = SmallSMIRKGeometryEncoder(
+            out_dim=self.feature_dim,
+            width=geometry_width,
+            name="small_smirk_geometry_encoder",
         )
 
-        # 4. 3D-Guided Channel Attention MLP
         self.channel_attention_mlp = tf.keras.Sequential(
             [
                 tf.keras.layers.Dense(self.attention_hidden_dim, activation=tf.nn.gelu, name="dense_hidden"),
-                tf.keras.layers.Dense(self.feature_dim, activation=tf.nn.tanh, name="dense_gate"),
+                tf.keras.layers.Dense(self.feature_dim, name="dense_gate_raw"),
             ],
             name="channel_attention_mlp",
         )
 
-        # 5. Trainable modulation scalar alpha (initialized to 0.0)
-        self.alpha = self.add_weight(
-            name="alpha",
+        self.alpha_raw = self.add_weight(
+            name="alpha_raw",
             shape=(),
-            initializer=tf.keras.initializers.Constant(0.0),
+            initializer=tf.keras.initializers.Constant(self.alpha_raw_init),
             trainable=True,
             dtype=tf.float32,
         )
-
-        # 6. Auxiliary 3D Classifier Head
-        self.aux_3d_head = tf.keras.layers.Dense(self.num_classes, name="aux_3d_head")
 
     @staticmethod
     def _make_backbone_cfg(cfg: Dict, name: str) -> Dict:
@@ -100,164 +148,123 @@ class DualConvNeXtSMIRKGuidedAttentionFER(tf.keras.Model):
         base_cfg["model"].setdefault("ablation", "cnn_only")
         return base_cfg
 
+    @property
+    def effective_alpha(self):
+        return tf.cast(self.alpha_max, tf.float32) * tf.sigmoid(tf.cast(self.alpha_raw, tf.float32))
+
     def freeze_rgb_branch(self) -> None:
         self.rgb_baseline.trainable = False
         for layer in self.rgb_baseline.layers:
             layer.trainable = False
 
     def unfreeze_rgb_stage4(self) -> None:
-        """Unfreeze Stage 4 of RGB ConvNeXt for fine-tuning."""
-        self.rgb_baseline.trainable = True
-        # Keep stem and stages 1..3 frozen, unfreeze stage 4 and head
-        for layer in self.rgb_baseline.backbone.stem_layers:
-            layer.trainable = False
-        for stage_idx, stage in enumerate(self.rgb_baseline.backbone.stages):
-            if stage_idx < 3:
-                for block in stage:
-                    block.trainable = False
-            else:
-                for block in stage:
-                    block.trainable = True
+        raise RuntimeError("Stage 1 contract keeps the entire RGB ckpt-43 anchor frozen.")
 
     def load_pretrained_weights(self, cfg: Dict, args=None) -> Tuple[str, str]:
-        """Load PyTorch MS1M-ArcFace pretrained weights into BOTH RGB and Geometry backbones."""
+        """Load MS1M-ArcFace weights for the RGB anchor only."""
+        existing_status = getattr(self.rgb_baseline, "pretrained_load_status", "not_requested")
+        if existing_status == "loaded":
+            print("[DualConvNeXt] RGB MS1M-ArcFace weights already loaded by baseline constructor.", flush=True)
+            return existing_status, "small_cnn_random_init"
+
         req = bool(cfg.get("rgb_backbone", {}).get("convnext_base_require_pretrained", False))
         ckpt_path = cfg.get("rgb_backbone", {}).get("convnext_base_pretrained_path") or "pretrained/convnext_base_ms1m_arcface.pth"
 
-        print("[DualConvNeXt] Loading MS1M-ArcFace pretrained weights for RGB ConvNeXt...", flush=True)
+        print("[DualConvNeXt] Loading MS1M-ArcFace pretrained weights for frozen RGB ConvNeXt anchor...", flush=True)
         loader_rgb = getattr(self.rgb_baseline, "load_pytorch_pretrained", getattr(self.rgb_baseline, "_load_pytorch_pretrained", None))
         status_rgb = loader_rgb(ckpt_path, require=req) if loader_rgb else "skipped"
-
-        print("[DualConvNeXt] Loading MS1M-ArcFace pretrained weights for Shared Geometry ConvNeXt...", flush=True)
-        loader_geom = getattr(self.geometry_baseline, "load_pytorch_pretrained", getattr(self.geometry_baseline, "_load_pytorch_pretrained", None))
-        status_geom = loader_geom(ckpt_path, require=req) if loader_geom else "skipped"
-
-        return status_rgb, status_geom
+        return status_rgb, "small_cnn_random_init"
 
     def print_contract_summary(self) -> None:
         rgb_total = count_params(self.rgb_baseline.variables)
         rgb_trainable = count_params(self.rgb_baseline.trainable_variables)
-        geom_total = count_params(self.geometry_baseline.variables)
-        geom_trainable = count_params(self.geometry_baseline.trainable_variables)
-        fusion_params = count_params(self.geometry_fusion.variables)
+        geom_total = count_params(self.geometry_encoder.variables)
+        geom_trainable = count_params(self.geometry_encoder.trainable_variables)
         attn_params = count_params(self.channel_attention_mlp.variables)
-        aux_params = count_params(self.aux_3d_head.variables)
 
         try:
-            alpha_val = float(self.alpha.numpy())
-            alpha_str = f"{alpha_val:.6f}"
+            alpha_raw_val = float(self.alpha_raw.numpy())
+            alpha_val = float(self.effective_alpha.numpy())
+            alpha_str = f"alpha_raw={alpha_raw_val:.6f} effective_alpha={alpha_val:.10f}"
         except Exception:
-            alpha_str = "0.0 (symbolic)"
+            alpha_str = "alpha_raw/effective_alpha symbolic"
 
         print("=" * 65, flush=True)
-        print("[DUAL_CONVNEXT_CONTRACT] Parameter Breakdown:", flush=True)
-        print(f"  RGB ConvNeXt (Total: {rgb_total:,} | Trainable: {rgb_trainable:,})", flush=True)
-        print(f"  Geometry ConvNeXt (Total: {geom_total:,} | Trainable: {geom_trainable:,})", flush=True)
-        print(f"  Geometry Fusion Conv1x1: {fusion_params:,}", flush=True)
-        print(f"  3D-Guided Attention MLP: {attn_params:,}", flush=True)
-        print(f"  Auxiliary 3D Head: {aux_params:,}", flush=True)
-        print(f"  Modulation Alpha (scalar): 1 (value={alpha_str})", flush=True)
+        print("[DUAL_CONVNEXT_STAGE1_CONTRACT] Parameter Breakdown:", flush=True)
+        print(f"  RGB ConvNeXt ckpt-43 anchor (Total: {rgb_total:,} | Trainable: {rgb_trainable:,})", flush=True)
+        print(f"  Small SMIRK geometry CNN (Total: {geom_total:,} | Trainable: {geom_trainable:,})", flush=True)
+        print(f"  3D-guided Channel Attention MLP: {attn_params:,}", flush=True)
+        print(f"  Alpha constraint: alpha = {self.alpha_max:.3f} * sigmoid(alpha_raw) ({alpha_str})", flush=True)
         print(f"  Total Model Trainable Params: {count_params(self.trainable_variables):,}", flush=True)
         print("=" * 65, flush=True)
 
-    def _log_shapes_once(self, image, depth_rgb, normal_rgb, F_rgb, F_depth, F_normal, F_3d, gate_4d, F_guided, final_logits, aux_3d_logits) -> None:
+    def _log_shapes_once(self, image, geometry_maps, F_rgb, F_3d, gate_4d, F_guided, final_logits) -> None:
         if self._shape_logged:
             return
         self._shape_logged = True
         print("[DualConvNeXtSMIRKGuidedAttention] Shape Trace:", flush=True)
         print(f"  image_rgb: {image.shape}", flush=True)
-        print(f"  depth_rgb_3ch: {depth_rgb.shape}", flush=True)
-        print(f"  normal_rgb_3ch: {normal_rgb.shape}", flush=True)
-        print(f"  F_rgb_stage4: {F_rgb.shape}", flush=True)
-        print(f"  F_depth_stage4: {F_depth.shape}", flush=True)
-        print(f"  F_normal_stage4: {F_normal.shape}", flush=True)
-        print(f"  F_3d_fused: {F_3d.shape}", flush=True)
+        print(f"  geometry_maps_depth_normal_4ch: {geometry_maps.shape}", flush=True)
+        print(f"  F_rgb_stage4_anchor: {F_rgb.shape}", flush=True)
+        print(f"  F_3d_small_cnn: {F_3d.shape}", flush=True)
         print(f"  channel_gate_4d: {gate_4d.shape}", flush=True)
         print(f"  F_guided: {F_guided.shape}", flush=True)
         print(f"  final_logits: {final_logits.shape}", flush=True)
-        print(f"  aux_3d_logits: {aux_3d_logits.shape}", flush=True)
         self.print_contract_summary()
 
     def call(self, inputs, training=False):
         image = inputs["image"]
         geometry_maps = inputs["geometry_maps"]
 
-        # Extract 3-channel depth and normal images from 4-channel geometry cache
         geom_f32 = tf.cast(geometry_maps, tf.float32)
         target_h = tf.shape(image)[1]
         target_w = tf.shape(image)[2]
         geom_f32 = tf.image.resize(geom_f32, [target_h, target_w], method="bilinear")
 
-        depth_1ch = geom_f32[..., 0:1]
-        depth_rgb = tf.repeat(depth_1ch, 3, axis=-1)
-        normal_rgb = geom_f32[..., 1:4]
+        # RGB is the frozen ckpt-43 anchor in Stage 1. Keep stochastic layers off.
+        rgb_endpoints = self.rgb_baseline.backbone(image, training=False, return_endpoints=True)
+        F_rgb = tf.stop_gradient(tf.cast(rgb_endpoints["stage4"], tf.float32))
 
-        # 1. RGB Branch
-        rgb_endpoints = self.rgb_baseline.backbone(image, training=training, return_endpoints=True)
-        F_rgb = tf.cast(rgb_endpoints["stage4"], tf.float32)  # [B, 7, 7, 1024]
+        F_3d = tf.cast(self.geometry_encoder(geom_f32, training=training), tf.float32)
 
-        # 2. 3D Branch via Shared Geometry ConvNeXt
-        depth_endpoints = self.geometry_baseline.backbone(depth_rgb, training=training, return_endpoints=True)
-        F_depth = tf.cast(depth_endpoints["stage4"], tf.float32)  # [B, 7, 7, 1024]
+        gap_rgb = tf.reduce_mean(F_rgb, axis=[1, 2])
+        gap_3d = tf.reduce_mean(F_3d, axis=[1, 2])
+        concat_gap = tf.concat([gap_rgb, gap_3d], axis=-1)
 
-        normal_endpoints = self.geometry_baseline.backbone(normal_rgb, training=training, return_endpoints=True)
-        F_normal = tf.cast(normal_endpoints["stage4"], tf.float32)  # [B, 7, 7, 1024]
+        gate_raw = tf.cast(self.channel_attention_mlp(concat_gap, training=training), tf.float32)
+        gate = 2.0 * tf.sigmoid(gate_raw) - 1.0
+        gate_4d = tf.reshape(gate, [-1, 1, 1, self.feature_dim])
 
-        concat_geom = tf.concat([F_depth, F_normal], axis=-1)  # [B, 7, 7, 2048]
-        F_3d = tf.cast(self.geometry_fusion(concat_geom, training=training), tf.float32)  # [B, 7, 7, 1024]
+        alpha = self.effective_alpha
+        F_guided = F_rgb * (1.0 + alpha * gate_4d)
 
-        # 3. 3D-Guided Channel Attention
-        gap_rgb = tf.reduce_mean(F_rgb, axis=[1, 2])  # [B, 1024]
-        gap_3d = tf.reduce_mean(F_3d, axis=[1, 2])  # [B, 1024]
-        concat_gap = tf.concat([gap_rgb, gap_3d], axis=-1)  # [B, 2048]
-
-        gate = tf.cast(self.channel_attention_mlp(concat_gap, training=training), tf.float32)  # [B, 1024]
-        gate_4d = tf.reshape(gate, [-1, 1, 1, self.feature_dim])  # [B, 1, 1, 1024]
-
-        # 4. Channel Modulation: F_guided = F_rgb * (1 + alpha * channel_gate)
-        alpha_f32 = tf.cast(self.alpha, tf.float32)
-        F_guided = F_rgb * (1.0 + alpha_f32 * gate_4d)  # [B, 7, 7, 1024]
-
-        # 5. Final Classification Head
         pooled_guided = self.rgb_baseline.gap(F_guided)
-        dropped_guided = self.rgb_baseline.head_dropout(pooled_guided, training=training)
+        dropped_guided = self.rgb_baseline.head_dropout(pooled_guided, training=False)
         final_logits = tf.cast(self.rgb_baseline.classifier(dropped_guided), tf.float32)
 
-        # 6. Auxiliary 3D Head
-        pooled_3d = tf.reduce_mean(F_3d, axis=[1, 2])
-        aux_3d_logits = tf.cast(self.aux_3d_head(pooled_3d), tf.float32)
+        self._log_shapes_once(image, geom_f32, F_rgb, F_3d, gate_4d, F_guided, final_logits)
 
-        self._log_shapes_once(
-            image,
-            depth_rgb,
-            normal_rgb,
-            F_rgb,
-            F_depth,
-            F_normal,
-            F_3d,
-            gate_4d,
-            F_guided,
-            final_logits,
-            aux_3d_logits,
-        )
+        tf.debugging.assert_all_finite(F_3d, "NaN/Inf in F_3d geometry features")
+        tf.debugging.assert_all_finite(gate, "NaN/Inf in 3D-guided channel gate")
+        tf.debugging.assert_all_finite(final_logits, "NaN/Inf in final logits")
 
-        mean_abs_gate = tf.reduce_mean(tf.abs(gate))
-        mod_factor = 1.0 + alpha_f32 * gate_4d
-        mod_min = tf.reduce_min(mod_factor)
-        mod_max = tf.reduce_max(mod_factor)
+        mod_factor = 1.0 + alpha * gate_4d
 
         return {
             "logits": final_logits,
             "final_logits": final_logits,
-            "aux_3d_logits": aux_3d_logits,
             "channel_gate": gate,
-            "alpha": self.alpha,
-            "alpha_raw": alpha_f32,
-            "effective_alpha": alpha_f32,
-            "mean_abs_channel_gate": mean_abs_gate,
-            "modulation_factor_min": mod_min,
-            "modulation_factor_max": mod_max,
+            "gate_mean": tf.reduce_mean(gate),
+            "gate_std": tf.math.reduce_std(gate),
+            "gate_min": tf.reduce_min(gate),
+            "gate_max": tf.reduce_max(gate),
+            "alpha_raw": tf.cast(self.alpha_raw, tf.float32),
+            "alpha": alpha,
+            "effective_alpha": alpha,
+            "modulation_factor_min": tf.reduce_min(mod_factor),
+            "modulation_factor_max": tf.reduce_max(mod_factor),
             "F_rgb": F_rgb,
             "F_3d": F_3d,
             "F_guided": F_guided,
         }
+
