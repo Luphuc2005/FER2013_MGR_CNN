@@ -122,11 +122,47 @@ def maybe_scaled_loss(optimizer, loss: tf.Tensor) -> tf.Tensor:
     return loss
 
 
-def finite_grads_or_raise(context_name: str, grads: List[tf.Tensor]) -> None:
-    for i, g in enumerate(grads):
-        if g is not None:
-            if not tf.reduce_all(tf.math.is_finite(g)):
-                raise ValueError(f"Non-finite gradient (NaN/Inf) detected in ({context_name}) at index {i}")
+def all_grads_finite(grads: List[tf.Tensor]) -> tf.Tensor:
+    checks = [tf.reduce_all(tf.math.is_finite(g)) for g in grads if g is not None]
+    if not checks:
+        return tf.constant(True)
+    return tf.reduce_all(tf.stack(checks))
+
+
+def sanitize_grads(grads: List[tf.Tensor]) -> List[tf.Tensor]:
+    return [
+        None if g is None else tf.where(tf.math.is_finite(g), g, tf.zeros_like(g))
+        for g in grads
+    ]
+
+
+def maybe_wrap_loss_scale_optimizer(
+    optimizer: tf.keras.optimizers.Optimizer,
+    cfg: Dict,
+    name: str,
+) -> tf.keras.optimizers.Optimizer:
+    training_cfg = cfg.get("training", {})
+    use_loss_scale = bool(training_cfg.get("use_loss_scale_optimizer", False))
+    if not use_loss_scale:
+        print(f"[RUNTIME] LossScaleOptimizer disabled for {name}", flush=True)
+        return optimizer
+
+    initial_scale = float(training_cfg.get("loss_scale_initial_scale", 4096.0))
+    dynamic_growth_steps = int(training_cfg.get("loss_scale_dynamic_growth_steps", 2000))
+    print(
+        f"[RUNTIME] LossScaleOptimizer enabled for {name} "
+        f"(initial_scale={initial_scale:g}, dynamic_growth_steps={dynamic_growth_steps})",
+        flush=True,
+    )
+    try:
+        return tf.keras.mixed_precision.LossScaleOptimizer(
+            optimizer,
+            dynamic=True,
+            initial_scale=initial_scale,
+            dynamic_growth_steps=dynamic_growth_steps,
+        )
+    except TypeError:
+        return tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
 
 
 def make_train_step(
@@ -136,8 +172,10 @@ def make_train_step(
     cfg: Dict,
 ):
     grad_clip_norm = float(cfg.get("training", {}).get("grad_clip_norm", 1.0))
+    skip_nonfinite_batches = bool(cfg.get("training", {}).get("skip_nonfinite_batches", True))
     head_vars = model.head_variables()
     backbone_vars = model.backbone_variables() if optimizer_backbone is not None else []
+    head_var_ids = {id(h) for h in head_vars}
 
     def _compute_unscaled_grads(tape, scaled_head_loss, scaled_backbone_loss):
         if hasattr(optimizer_head, "get_unscaled_gradients"):
@@ -163,21 +201,39 @@ def make_train_step(
             raise RuntimeError("No valid gradients in train_step.")
         grads_all = [g for g, _ in valid]
         vars_all = [v for _, v in valid]
-        finite_grads_or_raise("train", grads_all)
-        clipped_all, grad_norm = tf.clip_by_global_norm(grads_all, grad_clip_norm)
+        grads_are_finite = all_grads_finite(grads_all)
+        if not skip_nonfinite_batches:
+            with tf.control_dependencies([
+                tf.debugging.assert_equal(
+                    grads_are_finite,
+                    True,
+                    message="Non-finite gradient (NaN/Inf) detected in train_step",
+                )
+            ]):
+                clipped_all, grad_norm = tf.clip_by_global_norm(grads_all, grad_clip_norm)
+        else:
+            safe_grads_all = sanitize_grads(grads_all)
+            clipped_all, grad_norm = tf.clip_by_global_norm(safe_grads_all, grad_clip_norm)
+            apply_scale = tf.cast(grads_are_finite, clipped_all[0].dtype)
+            clipped_all = [g * apply_scale for g in clipped_all]
 
         clipped_head = []
         vars_head = []
         clipped_backbone = []
         vars_backbone = []
         for grad, var in zip(clipped_all, vars_all):
-            if id(var) in {id(h) for h in head_vars}:
+            if id(var) in head_var_ids:
                 clipped_head.append(grad)
                 vars_head.append(var)
             else:
                 clipped_backbone.append(grad)
                 vars_backbone.append(var)
-        return (list(zip(clipped_head, vars_head)), list(zip(clipped_backbone, vars_backbone)), tf.cast(grad_norm, tf.float32))
+        return (
+            list(zip(clipped_head, vars_head)),
+            list(zip(clipped_backbone, vars_backbone)),
+            tf.cast(grad_norm, tf.float32),
+            grads_are_finite,
+        )
 
     use_sam = str(cfg.get("training", {}).get("optimizer", "")).lower() == "sam"
     sam_rho = float(cfg.get("training", {}).get("sam_rho", 0.03))
@@ -192,7 +248,7 @@ def make_train_step(
 
         grads_head, grads_backbone = _compute_unscaled_grads(tape, scaled_head_loss, scaled_backbone_loss)
         del tape
-        clipped_head_pairs, clipped_backbone_pairs, grad_norm = _clip_all(grads_head, grads_backbone)
+        clipped_head_pairs, clipped_backbone_pairs, grad_norm, grads_are_finite = _clip_all(grads_head, grads_backbone)
 
         if use_sam:
             eps_list = []
@@ -215,7 +271,8 @@ def make_train_step(
             for eps, var in eps_list:
                 var.assign_sub(eps)
 
-            clipped_head_pairs, clipped_backbone_pairs, grad_norm = _clip_all(grads_head2, grads_backbone2)
+            clipped_head_pairs, clipped_backbone_pairs, grad_norm, grads_are_finite2 = _clip_all(grads_head2, grads_backbone2)
+            grads_are_finite = tf.logical_and(grads_are_finite, grads_are_finite2)
 
         if clipped_head_pairs:
             optimizer_head.apply_gradients(clipped_head_pairs)
@@ -239,6 +296,7 @@ def make_train_step(
             "gate_max": tf.cast(tf.reduce_max(gate), tf.float32),
             "gate_std": tf.cast(tf.math.reduce_std(gate), tf.float32),
             "gamma_cascade": tf.cast(gamma_cascade, tf.float32),
+            "nonfinite_grads": tf.cast(tf.logical_not(grads_are_finite), tf.int32),
         }
 
     return train_step
@@ -356,11 +414,15 @@ def main() -> int:
     warmup_epochs = int(cfg.get("training", {}).get("warmup_epochs", 5))
     freeze_epochs = int(cfg.get("model", {}).get("freeze_backbone_epochs", 4))
 
-    optimizer_head = tf.keras.mixed_precision.LossScaleOptimizer(
-        build_adamw_optimizer(lr_head_base, weight_decay)
+    optimizer_head = maybe_wrap_loss_scale_optimizer(
+        build_adamw_optimizer(lr_head_base, weight_decay),
+        cfg,
+        "head",
     )
-    optimizer_backbone = tf.keras.mixed_precision.LossScaleOptimizer(
-        build_adamw_optimizer(lr_backbone_base, weight_decay)
+    optimizer_backbone = maybe_wrap_loss_scale_optimizer(
+        build_adamw_optimizer(lr_backbone_base, weight_decay),
+        cfg,
+        "backbone",
     )
 
     lr_fn_head = build_cosine_schedule(lr_head_base, warmup_epochs, total_epochs, steps_per_epoch)
@@ -390,6 +452,7 @@ def main() -> int:
         grad_norms = []
         gate_means = []
         gamma_cascades = []
+        nonfinite_batches = 0
 
         active_opt_backbone = None if is_backbone_frozen else optimizer_backbone
         active_step_fn = make_train_step(model, optimizer_head, active_opt_backbone, cfg)
@@ -412,6 +475,7 @@ def main() -> int:
             grad_norms.append(float(step_metrics["grad_norm"].numpy()))
             gate_means.append(float(step_metrics["gate_mean"].numpy()))
             gamma_cascades.append(float(step_metrics["gamma_cascade"].numpy()))
+            nonfinite_batches += int(step_metrics["nonfinite_grads"].numpy())
             step_idx += 1
 
         train_loss = train_loss_sum / max(1, train_count_sum)
@@ -432,7 +496,8 @@ def main() -> int:
             f"Epoch {epoch:02d}/{total_epochs:02d} [{phase_str}] ({elapsed:.1f}s) - "
             f"Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f} | "
             f"Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, Macro-F1: {val_macro_f1:.4f} | "
-            f"GateMean: {avg_gate_mean:.3f}, GammaCascade: {avg_gamma_cascade:.4f}, GradNorm: {avg_grad_norm:.2f}",
+            f"GateMean: {avg_gate_mean:.3f}, GammaCascade: {avg_gamma_cascade:.4f}, "
+            f"GradNorm: {avg_grad_norm:.2f}, NonFiniteBatches: {nonfinite_batches}",
             flush=True,
         )
 

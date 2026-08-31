@@ -91,6 +91,8 @@ training:
   weight_decay: 0.035
   scheduler: "cosine"
   grad_clip_norm: 1.0
+  use_loss_scale_optimizer: false
+  loss_scale_initial_scale: 4096
   skip_nonfinite_batches: true
   monitor: "val_accuracy"
   resume: false
