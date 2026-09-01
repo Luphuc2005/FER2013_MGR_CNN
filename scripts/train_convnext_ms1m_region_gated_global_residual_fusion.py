@@ -21,7 +21,57 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import tensorflow as tf
+
+def plot_training_curves(history: List[Dict], output_path: Path) -> None:
+    if not history:
+        return
+    df = pd.DataFrame(history)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # 1. Loss
+    axes[0, 0].plot(df["epoch"], df["train_loss"], label="Train Loss", color="blue", linewidth=2)
+    axes[0, 0].plot(df["epoch"], df["val_loss"], label="Val Loss", color="orange", linewidth=2)
+    axes[0, 0].set_title("Loss Curves")
+    axes[0, 0].set_xlabel("Epoch")
+    axes[0, 0].set_ylabel("Loss")
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # 2. Accuracy
+    axes[0, 1].plot(df["epoch"], df["train_accuracy"], label="Train Acc", color="blue", linewidth=2)
+    axes[0, 1].plot(df["epoch"], df["val_accuracy"], label="Val Acc", color="green", linewidth=2)
+    axes[0, 1].set_title("Accuracy Curves")
+    axes[0, 1].set_xlabel("Epoch")
+    axes[0, 1].set_ylabel("Accuracy")
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # 3. Gate Mean
+    if "gate_mean" in df.columns:
+        axes[1, 0].plot(df["epoch"], df["gate_mean"], label="Gate Mean (S3/S4)", color="purple", linewidth=2)
+        axes[1, 0].set_title("Region Gated Mean")
+        axes[1, 0].set_xlabel("Epoch")
+        axes[1, 0].set_ylabel("Value")
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+
+    # 4. Gradient Norm
+    if "train_grad_norm" in df.columns:
+        axes[1, 1].plot(df["epoch"], df["train_grad_norm"], label="Grad Norm", color="brown", linewidth=2)
+        axes[1, 1].set_title("Gradient Norm")
+        axes[1, 1].set_xlabel("Epoch")
+        axes[1, 1].set_ylabel("Norm")
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -572,6 +622,7 @@ def main() -> int:
         }
         history.append(row)
         write_history_csv(history, run_dir / "training_history.csv")
+        plot_training_curves(history, run_dir / "training_curves.png")
         print(
             f"Epoch {epoch + 1}/{epochs} [{epoch_time:.1f}s] "
             f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
