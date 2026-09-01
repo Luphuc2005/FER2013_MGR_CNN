@@ -225,6 +225,30 @@ class ConvNeXtBaseFRBackbone(tf.keras.layers.Layer):
             return endpoints
         return endpoints["stage4"]
 
+    def freeze_stages(self, freeze_stage_indices=(1, 2)):
+        """Freeze specified stages (1-based, e.g., [1, 2] freezes stem, stage 1, downsample 1, and stage 2)."""
+        stages_set = set(freeze_stage_indices)
+        if 1 in stages_set:
+            self.stem_conv.trainable = False
+            self.stem_norm.trainable = False
+            for block in self.stages[0]:
+                block.trainable = False
+        if 2 in stages_set:
+            if len(self.downsample_layers) > 0:
+                self.downsample_layers[0].trainable = False
+            for block in self.stages[1]:
+                block.trainable = False
+        if 3 in stages_set:
+            if len(self.downsample_layers) > 1:
+                self.downsample_layers[1].trainable = False
+            for block in self.stages[2]:
+                block.trainable = False
+        if 4 in stages_set:
+            if len(self.downsample_layers) > 2:
+                self.downsample_layers[2].trainable = False
+            for block in self.stages[3]:
+                block.trainable = False
+
 
 class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
     """Single-head ConvNeXt-Base face-pretrained FER baseline."""
@@ -244,6 +268,22 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             layer_scale_init_value=float(model_cfg.get("layer_scale_init_value", 1e-6)),
             name="convnext_base_fr_backbone",
         )
+        freeze_cfg = model_cfg.get("freeze_stages", None)
+        if freeze_cfg is not None or model_cfg.get("freeze_stage1_2", False):
+            if isinstance(freeze_cfg, (list, tuple)):
+                stages_to_freeze = [int(s) for s in freeze_cfg]
+            elif isinstance(freeze_cfg, int):
+                stages_to_freeze = list(range(1, freeze_cfg + 1))
+            elif model_cfg.get("freeze_stage1_2", False):
+                stages_to_freeze = [1, 2]
+            else:
+                stages_to_freeze = [1, 2]
+            self.backbone.freeze_stages(stages_to_freeze)
+            print(
+                f"[ConvNeXtBaseFace] Frozen backbone stages {stages_to_freeze}. "
+                f"Trainable stages: {[s for s in (1, 2, 3, 4) if s not in stages_to_freeze]} + Head.",
+                flush=True,
+            )
         self.use_multiscale_adapter = bool(
             model_cfg.get("use_multiscale_adapter", False)
             or model_cfg.get("ablation") == "multiscale_adapter"

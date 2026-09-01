@@ -32,7 +32,7 @@ tta:
   flip_weight: 0.5
 
 data:
-  data_path: "/kaggle/input/datasets/doduyquynii/fer13-split"
+  data_path: "/kaggle/input/datasets/lhongphuc3/mask-rafdb/outputs/rafdb_mediapipe_region_masks"
   mask_dir: null
   num_classes: 7
   image_size: 112
@@ -88,6 +88,7 @@ model:
   freeze_backbone_epochs: 4
   unfreeze_backbone: true
   freeze_unfrozen_batchnorm: true
+  freeze_stage1_2: true
   ablation: "cnn_only"
 
 stage_transition:
