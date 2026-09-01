@@ -9,8 +9,8 @@ source:
 
 runtime:
   gpu_ids: [0, 1]
-  batch_size_per_gpu: 64
-  fallback_batch_size_per_gpu: 32
+  batch_size_per_gpu: 32
+  fallback_batch_size_per_gpu: 16
   require_two_gpus: true
   min_gpus: 2
   memory_growth: true
