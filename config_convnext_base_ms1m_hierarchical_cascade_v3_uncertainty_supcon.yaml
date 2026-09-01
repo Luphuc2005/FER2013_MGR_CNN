@@ -1,0 +1,118 @@
+seed:
+  random_seed: 42
+
+source:
+  note: "SOTA V3 Config: ConvNeXt-B MS1M Cascade with Dynamic Region Uncertainty Weighting, Supervised Regional Contrastive Loss (SupCon), and Auxiliary Supervision."
+
+runtime:
+  gpu_ids: [0]
+  batch_size_per_gpu: 32
+  fallback_batch_size_per_gpu: 16
+  require_two_gpus: false
+  min_gpus: 1
+  memory_growth: true
+  use_mixed_precision: true
+  intra_op_threads: 16
+  inter_op_threads: 4
+  tf_data_num_parallel_calls: 4
+  tf_data_private_threadpool_size: 4
+  tf_data_deterministic: false
+  prefetch_buffer: 2
+  distributed_eval: false
+  eval_tta_hflip: true
+  train_val_tta_hflip: true
+
+tta:
+  enabled: true
+  hflip: true
+  original_weight: 0.5
+  flip_weight: 0.5
+
+data:
+  data_path: "data/fer13-split"
+  mask_dir: "data/mediapipe_region_masks"
+  num_classes: 7
+  image_size: 112
+  channels: 3
+  normalize: true
+  predecode_pixels: true
+  preload_masks: true
+  allow_missing_masks: false
+  use_clean_filter: false
+  bad_row_indices_path: null
+  mask_ablation: "none"
+  mask_region_permutation: [4, 2, 0, 5, 1, 3]
+  shuffle_buffer: 28709
+  cache: false
+
+augmentation:
+  horizontal_flip: true
+  rotation_degrees: 15.0
+  brightness_delta: 0.15
+  contrast_lower: 0.85
+  contrast_upper: 1.15
+  gamma_prob: 0.5
+  gamma_min: 0.5
+  gamma_max: 2.0
+  random_erasing_prob: 0.40
+  random_erasing_area_min: 0.02
+  random_erasing_area_max: 0.15
+  random_erasing_value: "random"
+
+model:
+  name: "convnext_base_ms1m_hierarchical_cascade_v3_uncertainty_supcon"
+  arch: "convnext_base_ms1m_hierarchical_cascade"
+  pretrained: true
+  convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
+  convnext_base_require_pretrained: false
+  drop_path_rate: 0.1
+  layer_scale_init_value: 0.000001
+  classifier_dropout: 0.35
+
+  # Architectural Enhancements V3
+  num_regions: 6
+  embed_dim: 256
+  num_heads: 4
+  num_encoder_layers: 2                         # 2-Layer Transformer Encoder
+  transformer_dropout: 0.25
+  mask_guided_attention: true
+  mask_attention_alpha: 0.3
+  mask_floor: 0.05
+  use_cnn_aux_loss: true                        # Deep Backbone Auxiliary Supervision
+  cnn_aux_loss_weight: 0.20
+
+  # NEW V3 Features (1 & 2)
+  use_dynamic_region_uncertainty: true          # Feature 1: Dynamic Region Uncertainty Weighting
+  use_regional_supcon_loss: true                # Feature 2: Supervised Regional Contrastive Loss
+  regional_supcon_loss_weight: 0.10
+  supcon_temperature: 0.10
+
+  freeze_backbone_epochs: 4
+  unfreeze_backbone: true
+
+training:
+  epochs: 60
+  patience: 15
+  warmup_epochs: 5
+  loss: "cross_entropy"
+  label_smoothing: 0.10
+  optimizer: "sam"
+  base_optimizer: "adamw"
+  sam_rho: 0.03
+  sam_adaptive: false
+  lr: 0.0003
+  finetune_lr: 0.0003
+  visual_extractor_lr: 0.00003
+  weight_decay: 0.035
+  scheduler: "cosine"
+  grad_clip_norm: 1.0
+  skip_nonfinite_batches: true
+  monitor: "val_accuracy"
+  resume: false
+  best_checkpoint_start_epoch: 1
+  periodic_checkpoint_interval: 10
+  progress_interval: 100
+
+paths:
+  output_dir: "outputs/tf_runs/convnext_base_ms1m_hierarchical_cascade_v3_uncertainty_supcon"
+  logs_dir: "logs"

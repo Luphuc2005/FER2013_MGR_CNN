@@ -139,6 +139,25 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         return x
 
 
+class DynamicRegionUncertaintyRouter(tf.keras.layers.Layer):
+    """
+    Dynamic Region Uncertainty Weighting:
+    Predicts dynamic per-region importance/uncertainty weights in range [0, 2]
+    via a 2-layer MLP (Dense(128) -> GELU -> Dense(1) -> Sigmoid * 2.0).
+    """
+    def __init__(self, embed_dim: int = 256, **kwargs):
+        super().__init__(**kwargs)
+        self.router_mlp = tf.keras.Sequential([
+            tf.keras.layers.Dense(128, activation=tf.nn.gelu),
+            tf.keras.layers.Dense(1, activation="sigmoid"),
+        ])
+
+    def call(self, x):
+        # x: [B, 6, 256]
+        weights = self.router_mlp(x) * 2.0  # [B, 6, 1]
+        return weights
+
+
 class RegionAttentionPooling(tf.keras.layers.Layer):
     """
     Attention pooling across 6 region tokens:
@@ -262,13 +281,23 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
             for i in range(num_layers)
         ]
 
-        # 8. Attention Pooling across 6 regions
+        # 8. Dynamic Region Uncertainty Router (Optional)
+        self.use_dynamic_region_uncertainty = bool(model_cfg.get("use_dynamic_region_uncertainty", False))
+        if self.use_dynamic_region_uncertainty:
+            self.region_router = DynamicRegionUncertaintyRouter(embed_dim=self.embed_dim, name="region_router")
+
+        # 9. Attention Pooling across 6 regions
         self.attn_pooling = RegionAttentionPooling(embed_dim=self.embed_dim, name="attn_pooling")
 
-        # 9. Single Classifier Head: LayerNorm -> Dropout(0.2) -> Dense(7)
+        # 9. Single Classifier Head: LayerNorm -> Dropout(0.35) -> Dense(7)
         self.norm = _norm(1e-5)
-        self.head_dropout = tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout", 0.2)), name="head_dropout")
+        self.head_dropout = tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout", 0.35)), name="head_dropout")
         self.classifier = tf.keras.layers.Dense(self.num_classes, kernel_initializer="he_normal", name="classifier")
+
+        # 10. Optional Auxiliary Classifier Head on Stage 4 Backbone Features
+        self.use_cnn_aux_loss = bool(model_cfg.get("use_cnn_aux_loss", False))
+        if self.use_cnn_aux_loss:
+            self.aux_classifier = tf.keras.layers.Dense(self.num_classes, kernel_initializer="he_normal", name="aux_classifier")
 
         # Load Pretrained Weights into Backbone
         self.pretrained_load_status = "not_requested"
@@ -363,6 +392,11 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
         for block in self.encoder_blocks:
             encoded_regions = block(encoded_regions, training=training)  # [B, 6, 256]
 
+        region_uncertainty_weights = None
+        if self.use_dynamic_region_uncertainty:
+            region_uncertainty_weights = self.region_router(encoded_regions)  # [B, 6, 1]
+            encoded_regions = encoded_regions * region_uncertainty_weights
+
         # 9. Region Attention Pooling
         pooled_feat, region_weights = self.attn_pooling(encoded_regions)  # [B, 256]
 
@@ -371,10 +405,16 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
         x = self.head_dropout(x, training=training)
         logits = self.classifier(x)  # [B, 7]
 
+        aux_logits = None
+        if self.use_cnn_aux_loss:
+            pooled_s4 = tf.reduce_mean(feat_s4_refined, axis=[1, 2])  # [B, 1024]
+            aux_logits = tf.cast(self.aux_classifier(pooled_s4), tf.float32)
+
         tf.debugging.assert_all_finite(logits, "NaN/Inf detected in output logits")
 
         return {
             "logits": tf.cast(logits, tf.float32),
+            "aux_logits": aux_logits,
             "S3": feat_s3,
             "S4": feat_s4,
             "S4_refined": feat_s4_refined,
@@ -386,6 +426,7 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
             "gate": gate,
             "fused_regions": fused_regions,
             "encoded_regions": encoded_regions,
+            "region_uncertainty_weights": region_uncertainty_weights,
             "pooled_feature": pooled_feat,
             "region_weights": region_weights,
         }

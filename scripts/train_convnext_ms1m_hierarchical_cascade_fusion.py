@@ -169,6 +169,57 @@ def cross_entropy_loss(labels: tf.Tensor, logits: tf.Tensor, cfg: Dict) -> tf.Te
     return tf.reduce_mean(loss)
 
 
+def supervised_contrastive_loss(features: tf.Tensor, labels: tf.Tensor, temperature: float = 0.1) -> tf.Tensor:
+    """Supervised Contrastive Loss (SupCon) over normalized feature vectors."""
+    features_f32 = tf.cast(features, tf.float32)
+    norm_features = tf.math.l2_normalize(features_f32, axis=-1)  # [B, D]
+    
+    similarity_matrix = tf.matmul(norm_features, norm_features, transpose_b=True) / float(temperature)  # [B, B]
+    batch_size = tf.shape(labels)[0]
+    self_mask = tf.eye(batch_size, dtype=tf.float32)
+    non_self_mask = 1.0 - self_mask
+    
+    labels_col = tf.expand_dims(labels, axis=1)
+    labels_row = tf.expand_dims(labels, axis=0)
+    pos_mask = tf.cast(tf.equal(labels_col, labels_row), tf.float32) * non_self_mask  # [B, B]
+    
+    max_sim = tf.reduce_max(similarity_matrix, axis=1, keepdims=True)
+    logits = similarity_matrix - tf.stop_gradient(max_sim)
+    
+    exp_logits = tf.exp(logits) * non_self_mask
+    sum_exp_logits = tf.reduce_sum(exp_logits, axis=1, keepdims=True) + 1e-8
+    log_prob = logits - tf.math.log(sum_exp_logits)
+    
+    num_pos_per_row = tf.reduce_sum(pos_mask, axis=1)
+    has_pos = tf.cast(num_pos_per_row > 0, tf.float32)
+    
+    mean_log_prob_pos = tf.reduce_sum(log_prob * pos_mask, axis=1) / (num_pos_per_row + 1e-8)
+    loss = -tf.reduce_sum(mean_log_prob_pos * has_pos) / (tf.reduce_sum(has_pos) + 1e-8)
+    return tf.cast(loss, tf.float32)
+
+
+def compute_total_loss(labels: tf.Tensor, outputs: Dict[str, tf.Tensor], cfg: Dict) -> tf.Tensor:
+    total_loss = cross_entropy_loss(labels, outputs["logits"], cfg)
+    
+    # 1. Auxiliary Backbone Loss
+    aux_logits = outputs.get("aux_logits")
+    if aux_logits is not None and bool(cfg.get("model", {}).get("use_cnn_aux_loss", False)):
+        aux_weight = float(cfg.get("model", {}).get("cnn_aux_loss_weight", 0.20))
+        aux_loss = cross_entropy_loss(labels, aux_logits, cfg)
+        total_loss = total_loss + aux_weight * aux_loss
+        
+    # 2. Supervised Regional Contrastive Loss (SupCon)
+    if bool(cfg.get("model", {}).get("use_regional_supcon_loss", False)):
+        supcon_weight = float(cfg.get("model", {}).get("regional_supcon_loss_weight", 0.10))
+        temp = float(cfg.get("model", {}).get("supcon_temperature", 0.10))
+        pooled_feat = outputs.get("pooled_feature")
+        if pooled_feat is not None:
+            supcon_loss = supervised_contrastive_loss(pooled_feat, labels, temperature=temp)
+            total_loss = total_loss + supcon_weight * supcon_loss
+            
+    return total_loss
+
+
 def maybe_scaled_loss(optimizer, loss: tf.Tensor) -> tf.Tensor:
     if hasattr(optimizer, "get_scaled_loss"):
         return optimizer.get_scaled_loss(loss)
@@ -295,7 +346,7 @@ def make_train_step(
     def train_step(inputs, labels):
         with tf.GradientTape(persistent=True) as tape:
             outputs = model(inputs, training=True)
-            loss = cross_entropy_loss(labels, outputs["logits"], cfg)
+            loss = compute_total_loss(labels, outputs, cfg)
             scaled_head_loss = maybe_scaled_loss(optimizer_head, loss)
             scaled_backbone_loss = maybe_scaled_loss(optimizer_backbone, loss) if backbone_vars else None
 
@@ -314,7 +365,7 @@ def make_train_step(
 
             with tf.GradientTape(persistent=True) as tape2:
                 outputs2 = model(inputs, training=True)
-                loss2 = cross_entropy_loss(labels, outputs2["logits"], cfg)
+                loss2 = compute_total_loss(labels, outputs2, cfg)
                 scaled_head_loss2 = maybe_scaled_loss(optimizer_head, loss2)
                 scaled_backbone_loss2 = maybe_scaled_loss(optimizer_backbone, loss2) if backbone_vars else None
 
