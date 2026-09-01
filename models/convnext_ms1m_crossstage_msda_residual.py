@@ -80,7 +80,7 @@ class DepthwiseSeparableBranch(tf.keras.layers.Layer):
 
 
 class S3MultiscaleRefinement(tf.keras.layers.Layer):
-    """Three lightweight parallel S3 branches producing F_ms [B,14,14,512]."""
+    """Four lightweight parallel S3 branches (1x1, dw_d1, dw_d2, dw_d4) producing F_ms [B,14,14,512]."""
 
     def __init__(self, branch_dim: int = 256, out_dim: int = 512, name: Optional[str] = None):
         super().__init__(name=name)
@@ -97,12 +97,17 @@ class S3MultiscaleRefinement(tf.keras.layers.Layer):
             dilation_rate=2,
             name="branch_c_dwsep_d2",
         )
+        self.branch_d = DepthwiseSeparableBranch(
+            branch_dim=self.branch_dim,
+            dilation_rate=4,
+            name="branch_d_dwsep_d4",
+        )
         self.project = tf.keras.layers.Conv2D(
             self.out_dim,
             1,
             padding="same",
             kernel_initializer="he_normal",
-            name="concat_pointwise_768_to_512",
+            name="concat_pointwise_1024_to_512",
         )
         self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="f_ms_ln")
         self.act = tf.keras.layers.Activation(tf.nn.gelu, name="f_ms_gelu")
@@ -111,11 +116,12 @@ class S3MultiscaleRefinement(tf.keras.layers.Layer):
         a = self.branch_a(s3, training=training)
         b = self.branch_b(s3, training=training)
         c = self.branch_c(s3, training=training)
-        merged = tf.concat([a, b, c], axis=-1)
+        d = self.branch_d(s3, training=training)
+        merged = tf.concat([a, b, c, d], axis=-1)
         f_ms = self.project(merged)
         f_ms = self.norm(f_ms)
         f_ms = self.act(f_ms)
-        return f_ms, a, b, c, merged
+        return f_ms, a, b, c, d, merged
 
 
 class ChannelAttention(tf.keras.layers.Layer):
@@ -264,6 +270,12 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
             initial_alpha=float(msda_cfg.get("initial_alpha", 0.005)),
             name="bounded_cross_stage_alpha",
         )
+        self.use_aux_loss = bool(model_cfg.get("use_aux_loss", False))
+        self.aux_classifier = tf.keras.layers.Dense(
+            self.num_classes,
+            kernel_initializer="he_normal",
+            name="aux_classifier",
+        )
 
     @property
     def backbone(self):
@@ -353,7 +365,7 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
         s3 = endpoints["stage3"]
         s4 = endpoints["stage4"]
 
-        f_ms, branch_a, branch_b, branch_c, f_concat = self.ms_refine(s3, training=training)
+        f_ms, branch_a, branch_b, branch_c, branch_d, f_concat = self.ms_refine(s3, training=training)
         f_ca, w_c = self.channel_attention(f_ms, training=training)
         f_sa, w_s = self.spatial_attention(f_ms, training=training)
         f_da, fusion_weights = self.dual_fusion(f_ca, f_sa, training=training)
@@ -371,6 +383,12 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
         baseline_dropped = self.rgb_baseline.head_dropout(baseline_pooled, training=False)
         baseline_logits = tf.cast(self.rgb_baseline.classifier(baseline_dropped), tf.float32)
 
+        pooled_feat = tf.reduce_mean(f_da, axis=[1, 2])  # [B, 512] for SupCon
+        aux_logits = None
+        if self.use_aux_loss:
+            aux_logits = tf.cast(self.aux_classifier(baseline_pooled), tf.float32)
+            aux_logits = tf.where(tf.math.is_finite(aux_logits), aux_logits, tf.zeros_like(aux_logits))
+
         s4_norm = self._norm(s4)
         delta_raw_norm = self._norm(delta_raw)
         delta_norm_norm = self._norm(delta_norm)
@@ -383,7 +401,9 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
         outputs = {
             "logits": logits,
             "baseline_logits": baseline_logits,
-            "cnn_aux_logits": None,
+            "cnn_aux_logits": aux_logits,
+            "aux_logits": aux_logits,
+            "pooled_feature": pooled_feat,
             "semantic_logits": None,
             "ortho_loss": tf.constant(0.0, dtype=tf.float32),
             "S1": s1,
@@ -393,6 +413,7 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
             "branch_a": branch_a,
             "branch_b": branch_b,
             "branch_c": branch_c,
+            "branch_d": branch_d,
             "F_concat": f_concat,
             "F_ms": f_ms,
             "F_ca": f_ca,
