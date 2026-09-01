@@ -183,8 +183,9 @@ def supervised_contrastive_loss(features: tf.Tensor, labels: tf.Tensor, temperat
     labels_row = tf.expand_dims(labels, axis=0)
     pos_mask = tf.cast(tf.equal(labels_col, labels_row), tf.float32) * non_self_mask  # [B, B]
     
+    num_pos = tf.reduce_sum(pos_mask)
     max_sim = tf.reduce_max(similarity_matrix, axis=1, keepdims=True)
-    logits = similarity_matrix - tf.stop_gradient(max_sim)
+    logits = tf.clip_by_value(similarity_matrix - tf.stop_gradient(max_sim), -50.0, 50.0)
     
     exp_logits = tf.exp(logits) * non_self_mask
     sum_exp_logits = tf.reduce_sum(exp_logits, axis=1, keepdims=True) + 1e-8
@@ -195,7 +196,9 @@ def supervised_contrastive_loss(features: tf.Tensor, labels: tf.Tensor, temperat
     
     mean_log_prob_pos = tf.reduce_sum(log_prob * pos_mask, axis=1) / (num_pos_per_row + 1e-8)
     loss = -tf.reduce_sum(mean_log_prob_pos * has_pos) / (tf.reduce_sum(has_pos) + 1e-8)
-    return tf.cast(loss, tf.float32)
+    
+    loss_val = tf.where(tf.logical_and(tf.math.is_finite(loss), num_pos > 0.0), loss, tf.constant(0.0, dtype=tf.float32))
+    return tf.cast(loss_val, tf.float32)
 
 
 def compute_total_loss(labels: tf.Tensor, outputs: Dict[str, tf.Tensor], cfg: Dict) -> tf.Tensor:

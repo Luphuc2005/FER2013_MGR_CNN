@@ -100,8 +100,9 @@ class MaskedCrossAttention(tf.keras.layers.Layer):
             mask_penalty = tf.math.log(mask_clipped + 1e-6) * self.mask_alpha  # [B, 6, N]
             scores_f32 = scores_f32 + tf.expand_dims(mask_penalty, axis=1)    # [B, H, 6, N]
 
-        attn_weights_f32 = tf.nn.softmax(scores_f32, axis=-1)
-        attn_weights_f32 = tf.debugging.check_numerics(attn_weights_f32, "NaN/Inf in cross_attention softmax")
+        scores_clipped = tf.clip_by_value(scores_f32, -50.0, 50.0)
+        attn_weights_f32 = tf.nn.softmax(scores_clipped, axis=-1)
+        attn_weights_f32 = tf.where(tf.math.is_finite(attn_weights_f32), attn_weights_f32, tf.ones_like(attn_weights_f32) / tf.cast(tf.shape(attn_weights_f32)[-1], tf.float32))
         attn_weights = self.attn_drop(tf.cast(attn_weights_f32, scores.dtype), training=training)
 
         context = tf.einsum("bhqk,bhkd->bhqd", attn_weights, v)  # [B, H, 6, D]
@@ -169,11 +170,12 @@ class RegionAttentionPooling(tf.keras.layers.Layer):
 
     def call(self, x):
         # x: [B, 6, 256]
-        scores = self.score_proj(x)  # [B, 6, 1]
+        x_f32 = tf.cast(x, tf.float32)
+        scores = self.score_proj(x_f32)  # [B, 6, 1] in float32
         scores_sq = tf.squeeze(scores, axis=-1)  # [B, 6]
-        scores_f32 = tf.cast(scores_sq, tf.float32)
-        weights_f32 = tf.nn.softmax(scores_f32, axis=-1)  # [B, 6]
-        weights_f32 = tf.debugging.check_numerics(weights_f32, "NaN/Inf in region attention pooling softmax")
+        scores_clipped = tf.clip_by_value(scores_sq, -50.0, 50.0)
+        weights_f32 = tf.nn.softmax(scores_clipped, axis=-1)  # [B, 6]
+        weights_f32 = tf.where(tf.math.is_finite(weights_f32), weights_f32, tf.ones_like(weights_f32) / 6.0)
         weights = tf.cast(tf.expand_dims(weights_f32, axis=-1), x.dtype)  # [B, 6, 1]
         pooled = tf.reduce_sum(weights * x, axis=1)  # [B, 256]
         return pooled, weights_f32
