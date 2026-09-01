@@ -317,7 +317,14 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
         return status
 
     def backbone_variables(self) -> List[tf.Variable]:
-        return list(self.backbone.trainable_variables)
+        vars_list = list(self.backbone.trainable_variables)
+        if bool(self.cfg.get("model", {}).get("freeze_stage12", False)):
+            filtered = [
+                v for v in vars_list
+                if not any(k in v.name.lower() for k in ["stem", "stage1", "stage2", "downsample_stage2"])
+            ]
+            return filtered
+        return vars_list
 
     def head_variables(self) -> List[tf.Variable]:
         backbone_ids = {id(v) for v in self.backbone.trainable_variables}
