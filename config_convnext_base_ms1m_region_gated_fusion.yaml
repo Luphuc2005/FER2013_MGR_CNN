@@ -2,7 +2,7 @@ seed:
   random_seed: 42
 
 source:
-  note: "ConvNeXt-B MS1M Multi-Scale Region Gated Fusion for FER2013."
+  note: "SOTA Config: ConvNeXt-B MS1M Multi-Scale Region Gated Fusion for FER2013."
 
 runtime:
   gpu_ids: [0]
@@ -19,8 +19,14 @@ runtime:
   tf_data_deterministic: false
   prefetch_buffer: 2
   distributed_eval: false
-  eval_tta_hflip: false
-  train_val_tta_hflip: false
+  eval_tta_hflip: true
+  train_val_tta_hflip: true
+
+tta:
+  enabled: true
+  hflip: true
+  original_weight: 0.5
+  flip_weight: 0.5
 
 data:
   data_path: "data/fer13-split"
@@ -32,8 +38,8 @@ data:
   predecode_pixels: true
   preload_masks: false
   allow_missing_masks: false
-  use_clean_filter: true
-  bad_row_indices_path: "data/bad_row_indices_drop345_mediapipe_failed.txt"
+  use_clean_filter: false
+  bad_row_indices_path: null
   mask_ablation: "none"
   shuffle_buffer: 28709
   cache: false
@@ -72,8 +78,8 @@ model:
   embed_dim: 256
   num_heads: 4
   num_encoder_layers: 1
-  transformer_dropout: 0.10
-  classifier_dropout: 0.20
+  transformer_dropout: 0.25
+  classifier_dropout: 0.35
   mask_attention_alpha: 0.3
   mask_floor: 0.05
 
@@ -92,12 +98,14 @@ training:
   base_optimizer: "adamw"
   sam_rho: 0.03
   sam_adaptive: false
-  lr: 0.0001
-  finetune_lr: 0.0001
-  visual_extractor_lr: 0.00001
+  lr: 0.0003
+  finetune_lr: 0.0003
+  visual_extractor_lr: 0.00003
   weight_decay: 0.035
   scheduler: "cosine"
   grad_clip_norm: 1.0
+  use_loss_scale_optimizer: false
+  loss_scale_initial_scale: 4096
   skip_nonfinite_batches: true
   monitor: "val_accuracy"
   resume: false

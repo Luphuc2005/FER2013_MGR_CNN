@@ -2,7 +2,7 @@ seed:
   random_seed: 42
 
 source:
-  note: "ConvNeXt-Base MS1M ArcFace with Hierarchical Cascade Guidance (S3 DWConv -> S4) and Region Gated Fusion."
+  note: "SOTA Config: ConvNeXt-Base MS1M ArcFace with Hierarchical Cascade Guidance (S3 DWConv -> S4) and Region Gated Fusion."
 
 runtime:
   gpu_ids: [0]
@@ -22,6 +22,12 @@ runtime:
   eval_tta_hflip: true
   train_val_tta_hflip: true
 
+tta:
+  enabled: true
+  hflip: true
+  original_weight: 0.5
+  flip_weight: 0.5
+
 data:
   data_path: "data/fer13-split"
   mask_dir: "data/mediapipe_region_masks"
@@ -32,8 +38,8 @@ data:
   predecode_pixels: true
   preload_masks: true
   allow_missing_masks: false
-  use_clean_filter: true
-  bad_row_indices_path: "data/bad_row_indices_drop345_mediapipe_failed.txt"
+  use_clean_filter: false
+  bad_row_indices_path: null
   mask_ablation: "none"
   mask_region_permutation: [4, 2, 0, 5, 1, 3]
   shuffle_buffer: 28709
@@ -61,13 +67,13 @@ model:
   convnext_base_require_pretrained: false
   drop_path_rate: 0.1
   layer_scale_init_value: 0.000001
-  classifier_dropout: 0.20
+  classifier_dropout: 0.35
 
   num_regions: 6
   embed_dim: 256
   num_heads: 4
   num_encoder_layers: 1
-  transformer_dropout: 0.10
+  transformer_dropout: 0.25
   mask_guided_attention: true
   mask_attention_alpha: 0.3
   mask_floor: 0.05
@@ -85,14 +91,12 @@ training:
   base_optimizer: "adamw"
   sam_rho: 0.03
   sam_adaptive: false
-  lr: 0.0001
-  finetune_lr: 0.0001
-  visual_extractor_lr: 0.00001
+  lr: 0.0003
+  finetune_lr: 0.0003
+  visual_extractor_lr: 0.00003
   weight_decay: 0.035
   scheduler: "cosine"
   grad_clip_norm: 1.0
-  use_loss_scale_optimizer: false
-  loss_scale_initial_scale: 4096
   skip_nonfinite_batches: true
   monitor: "val_accuracy"
   resume: false

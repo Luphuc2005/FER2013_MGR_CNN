@@ -21,9 +21,62 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import tensorflow as tf
 import yaml
 from sklearn.metrics import classification_report, f1_score
+
+def save_plots_and_history(history_logs: List[Dict], output_dir: Path):
+    if not history_logs:
+        return
+    df = pd.DataFrame(history_logs)
+    csv_path = output_dir / "history.csv"
+    df.to_csv(csv_path, index=False)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # 1. Loss
+    axes[0, 0].plot(df["epoch"], df["train_loss"], label="Train Loss", color="blue", linewidth=2)
+    axes[0, 0].plot(df["epoch"], df["val_loss"], label="Val Loss", color="orange", linewidth=2)
+    axes[0, 0].set_title("Loss Curves")
+    axes[0, 0].set_xlabel("Epoch")
+    axes[0, 0].set_ylabel("Loss")
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # 2. Accuracy
+    axes[0, 1].plot(df["epoch"], df["train_acc"], label="Train Acc", color="blue", linewidth=2)
+    axes[0, 1].plot(df["epoch"], df["val_acc"], label="Val Acc", color="green", linewidth=2)
+    axes[0, 1].set_title("Accuracy Curves")
+    axes[0, 1].set_xlabel("Epoch")
+    axes[0, 1].set_ylabel("Accuracy")
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # 3. Gate Mean & Gamma Cascade
+    axes[1, 0].plot(df["epoch"], df["gate_mean"], label="Gate Mean (S3/S4)", color="purple", linewidth=2)
+    axes[1, 0].plot(df["epoch"], df["gamma_cascade"], label="Gamma Cascade (S3->S4)", color="red", linewidth=2)
+    axes[1, 0].set_title("Fusion Parameters Evolution")
+    axes[1, 0].set_xlabel("Epoch")
+    axes[1, 0].set_ylabel("Value")
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # 4. Gradient Norm
+    axes[1, 1].plot(df["epoch"], df["grad_norm"], label="Grad Norm", color="brown", linewidth=2)
+    axes[1, 1].set_title("Gradient Norm")
+    axes[1, 1].set_xlabel("Epoch")
+    axes[1, 1].set_ylabel("Norm")
+    axes[1, 1].legend()
+    axes[1, 1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plot_path = output_dir / "training_curves.png"
+    plt.savefig(plot_path, dpi=150)
+    plt.close()
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=0 --tf_xla_enable_xla_devices=false"
@@ -341,7 +394,7 @@ def evaluate_dataset(model: ConvNeXtMS1MHierarchicalCascadeFusionFER, dataset: t
     y_pred_arr = np.array(y_pred, dtype=np.int32)
     acc = float(np.mean(y_true_arr == y_pred_arr))
     macro_f1 = float(f1_score(y_true_arr, y_pred_arr, average="macro"))
-    report = classification_report(y_true_arr, y_pred_arr, digits=4, output_dict=True)
+    report = classification_report(y_true_arr, y_pred_arr, digits=4, output_dict=True, zero_division=0)
 
     return {
         "loss": avg_loss,
@@ -441,6 +494,7 @@ def main() -> int:
     best_epoch = 0
     patience = int(cfg.get("training", {}).get("patience", 15))
     no_improve_count = 0
+    history_logs = []
 
     for epoch in range(1, total_epochs + 1):
         epoch_start_time = time.time()
@@ -476,6 +530,19 @@ def main() -> int:
             gate_means.append(float(step_metrics["gate_mean"].numpy()))
             gamma_cascades.append(float(step_metrics["gamma_cascade"].numpy()))
             nonfinite_batches += int(step_metrics["nonfinite_grads"].numpy())
+
+            step_in_epoch = ((step_idx) % steps_per_epoch) + 1
+            if step_in_epoch % 100 == 0 or step_in_epoch == steps_per_epoch:
+                cur_loss = train_loss_sum / max(1, train_count_sum)
+                cur_acc = train_correct_sum / max(1, train_count_sum)
+                print(
+                    f"Epoch {epoch:02d}/{total_epochs:02d} step {step_in_epoch:03d}/{steps_per_epoch} "
+                    f"loss={cur_loss:.4f} acc={cur_acc:.4f} "
+                    f"grad_norm={float(step_metrics['grad_norm'].numpy()):.2f} "
+                    f"gate_mean={float(step_metrics['gate_mean'].numpy()):.4f} "
+                    f"gamma_cascade={float(step_metrics['gamma_cascade'].numpy()):.4f}",
+                    flush=True,
+                )
             step_idx += 1
 
         train_loss = train_loss_sum / max(1, train_count_sum)
@@ -500,6 +567,20 @@ def main() -> int:
             f"GradNorm: {avg_grad_norm:.2f}, NonFiniteBatches: {nonfinite_batches}",
             flush=True,
         )
+
+        history_logs.append({
+            "epoch": epoch,
+            "phase": phase_str,
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "val_loss": val_loss,
+            "val_acc": val_acc,
+            "val_macro_f1": val_macro_f1,
+            "gate_mean": avg_gate_mean,
+            "gamma_cascade": avg_gamma_cascade,
+            "grad_norm": avg_grad_norm,
+        })
+        save_plots_and_history(history_logs, output_dir)
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
