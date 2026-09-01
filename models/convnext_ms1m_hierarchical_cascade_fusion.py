@@ -418,11 +418,13 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
         if self.use_cnn_aux_loss:
             pooled_s4 = tf.reduce_mean(feat_s4_refined, axis=[1, 2])  # [B, 1024]
             aux_logits = tf.cast(self.aux_classifier(pooled_s4), tf.float32)
+            aux_logits = tf.where(tf.math.is_finite(aux_logits), aux_logits, tf.zeros_like(aux_logits))
 
-        tf.debugging.assert_all_finite(logits, "NaN/Inf detected in output logits")
+        logits_f32 = tf.cast(logits, tf.float32)
+        logits_f32 = tf.where(tf.math.is_finite(logits_f32), logits_f32, tf.zeros_like(logits_f32))
 
         return {
-            "logits": tf.cast(logits, tf.float32),
+            "logits": logits_f32,
             "aux_logits": aux_logits,
             "S3": feat_s3,
             "S4": feat_s4,

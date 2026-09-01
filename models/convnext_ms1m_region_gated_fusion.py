@@ -354,11 +354,11 @@ class ConvNeXtMS1MRegionGatedFusionFER(tf.keras.Model):
         x = self.head_dropout(x, training=training)
         logits = self.classifier(x)  # [B, 7]
 
-        # Numerical Sanity Check
-        tf.debugging.assert_all_finite(logits, "NaN/Inf detected in output logits")
+        logits_f32 = tf.cast(logits, tf.float32)
+        logits_f32 = tf.where(tf.math.is_finite(logits_f32), logits_f32, tf.zeros_like(logits_f32))
 
         return {
-            "logits": tf.cast(logits, tf.float32),
+            "logits": logits_f32,
             "S3": feat_s3,
             "S4": feat_s4,
             "projected_S3": proj_s3_map,

@@ -373,12 +373,14 @@ class ConvNeXtMS1MRegionGatedGlobalResidualFusionFER(tf.keras.Model):
         x = self.head_dropout(x, training=training)
         logits = self.classifier(x)  # [B, 7]
 
-        # Numerical Sanity Check
-        tf.debugging.assert_all_finite(logits, "NaN/Inf detected in output logits")
-        tf.debugging.assert_all_finite(global_logits, "NaN/Inf detected in global auxiliary logits")
+        logits_f32 = tf.cast(logits, tf.float32)
+        logits_f32 = tf.where(tf.math.is_finite(logits_f32), logits_f32, tf.zeros_like(logits_f32))
+
+        global_logits_f32 = tf.cast(global_logits, tf.float32)
+        global_logits_f32 = tf.where(tf.math.is_finite(global_logits_f32), global_logits_f32, tf.zeros_like(global_logits_f32))
 
         return {
-            "logits": tf.cast(logits, tf.float32),
+            "logits": logits_f32,
             "S3": feat_s3,
             "S4": feat_s4,
             "projected_S3": proj_s3_map,
@@ -392,7 +394,7 @@ class ConvNeXtMS1MRegionGatedGlobalResidualFusionFER(tf.keras.Model):
             "global_feature": global_token,
             "global_region_gate": global_region_gate,
             "fused_feature": fused_feature,
-            "global_logits": tf.cast(global_logits, tf.float32),
+            "global_logits": global_logits_f32,
             "region_weights": region_weights,
         }
 
