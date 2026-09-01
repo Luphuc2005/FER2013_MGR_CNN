@@ -249,14 +249,18 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
             tf.keras.layers.Dense(self.embed_dim, activation="sigmoid"),
         ], name="gate_mlp")
 
-        # 7. Post-fusion Transformer Encoder (EXACTLY 1 Block)
-        self.encoder_block = TransformerEncoderBlock(
-            embed_dim=self.embed_dim,
-            num_heads=self.num_heads,
-            ffn_dim=512,
-            dropout=float(model_cfg.get("transformer_dropout", 0.1)),
-            name="encoder_block",
-        )
+        # 7. Post-fusion Transformer Encoder Blocks (Configurable depth, e.g. 1 or 2 layers)
+        num_layers = int(model_cfg.get("num_encoder_layers", 1))
+        self.encoder_blocks = [
+            TransformerEncoderBlock(
+                embed_dim=self.embed_dim,
+                num_heads=self.num_heads,
+                ffn_dim=512,
+                dropout=float(model_cfg.get("transformer_dropout", 0.1)),
+                name=f"encoder_block_{i}",
+            )
+            for i in range(num_layers)
+        ]
 
         # 8. Attention Pooling across 6 regions
         self.attn_pooling = RegionAttentionPooling(embed_dim=self.embed_dim, name="attn_pooling")
@@ -354,8 +358,10 @@ class ConvNeXtMS1MHierarchicalCascadeFusionFER(tf.keras.Model):
         gate = self.gate_mlp(concat_r, training=training)  # G: [B, 6, 256]
         fused_regions = gate * r3 + (1.0 - gate) * r4       # R: [B, 6, 256]
 
-        # 8. Post-fusion Transformer Encoder Block (Exactly 1 Block)
-        encoded_regions = self.encoder_block(fused_regions, training=training)  # [B, 6, 256]
+        # 8. Post-fusion Transformer Encoder Blocks
+        encoded_regions = fused_regions
+        for block in self.encoder_blocks:
+            encoded_regions = block(encoded_regions, training=training)  # [B, 6, 256]
 
         # 9. Region Attention Pooling
         pooled_feat, region_weights = self.attn_pooling(encoded_regions)  # [B, 256]
