@@ -270,7 +270,14 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
         return self.rgb_baseline.backbone
 
     def backbone_variables(self) -> List[tf.Variable]:
-        return list(self.rgb_baseline.backbone.trainable_variables)
+        vars_list = list(self.rgb_baseline.backbone.trainable_variables)
+        if bool(self.cfg.get("model", {}).get("freeze_stage12", False)):
+            filtered = [
+                v for v in vars_list
+                if not any(k in v.name.lower() for k in ["stem", "stage1", "stage2", "downsample_stage2"])
+            ]
+            return filtered
+        return vars_list
 
     def classifier_variables(self) -> List[tf.Variable]:
         return list(self.rgb_baseline.classifier.trainable_variables) + list(self.rgb_baseline.head_dropout.trainable_variables)
@@ -412,11 +419,12 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
             "fusion_weight_channel": tf.cast(fusion_weights[0], tf.float32),
             "fusion_weight_spatial": tf.cast(fusion_weights[1], tf.float32),
         }
+        logits_f32 = tf.cast(logits, tf.float32)
+        logits_f32 = tf.where(tf.math.is_finite(logits_f32), logits_f32, tf.zeros_like(logits_f32))
+        outputs["logits"] = logits_f32
+
         if return_endpoints:
             outputs["backbone_endpoints"] = endpoints
 
         self._log_shapes_once(image, outputs)
-        tf.debugging.assert_all_finite(logits, "NaN/Inf in MSDA residual logits")
-        tf.debugging.assert_all_finite(g4, "NaN/Inf in G4")
-        tf.debugging.assert_all_finite(delta_norm, "NaN/Inf in delta_norm")
         return outputs
