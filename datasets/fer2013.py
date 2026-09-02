@@ -341,7 +341,10 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
             maxval=1.0 + brightness_delta,
         )
         image = image * brightness
-    image = tf.image.random_contrast(image, lower=float(aug_cfg.get("contrast_lower", 1.0)), upper=float(aug_cfg.get("contrast_upper", 1.0)))
+    contrast_lower = float(aug_cfg.get("contrast_lower", 1.0))
+    contrast_upper = float(aug_cfg.get("contrast_upper", 1.0))
+    if contrast_upper > contrast_lower:
+        image = tf.image.random_contrast(image, lower=contrast_lower, upper=contrast_upper)
     image = tf.clip_by_value(image, 0.0, 255.0)
     gamma_prob = float(aug_cfg.get("gamma_prob", 0.0))
     if gamma_prob > 0.0:
