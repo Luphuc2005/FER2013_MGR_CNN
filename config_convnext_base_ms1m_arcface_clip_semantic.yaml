@@ -125,5 +125,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/tf_runs/convnext_base_ms1m_arcface_clip_semantic"
+  output_dir: "outputs/papers/convnext_base_ms1m_arcface_clip_semantic"
   logs_dir: "logs"
