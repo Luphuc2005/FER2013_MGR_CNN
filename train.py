@@ -908,15 +908,17 @@ def main() -> int:
             directory=str(checkpoint_root / "last"),
             max_to_keep=1,
         )
+        max_to_keep_acc = int(cfg["training"].get("max_to_keep_acc", 5))
+        max_to_keep_loss = int(cfg["training"].get("max_to_keep_loss", 5))
         best_manager = tf.train.CheckpointManager(
             checkpoint,
             directory=str(checkpoint_root / "best"),
-            max_to_keep=1,
+            max_to_keep=max_to_keep_acc,
         )
         best_loss_manager = tf.train.CheckpointManager(
             checkpoint,
             directory=str(checkpoint_root / "best_loss"),
-            max_to_keep=1,
+            max_to_keep=max_to_keep_loss,
         )
         periodic_manager = tf.train.CheckpointManager(
             checkpoint,
