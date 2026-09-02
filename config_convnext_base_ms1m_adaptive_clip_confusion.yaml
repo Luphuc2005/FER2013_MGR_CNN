@@ -2,7 +2,7 @@ seed:
   random_seed: 42
 
 source:
-  note: "Raw Paper Baseline with Data Augmentation & TTA: ConvNeXt-Base MS1M with Data Augmentation, standard AdamW optimizer for ablation comparison."
+  note: "ConvNeXt-Base MS1M with Adaptive Multi-Granularity CLIP Semantic Alignment + Confusion-Aware Hard Semantic Separation."
 
 runtime:
   gpu_ids: [0]
@@ -19,14 +19,14 @@ runtime:
   tf_data_deterministic: false
   prefetch_buffer: 2
   distributed_eval: false
-  eval_tta_hflip: true
-  train_val_tta_hflip: true
+  eval_tta_hflip: false
+  train_val_tta_hflip: false
 
 tta:
-  enabled: true
-  hflip: true
-  original_weight: 0.5
-  flip_weight: 0.5
+  enabled: false
+  hflip: false
+  original_weight: 1.0
+  flip_weight: 0.0
 
 data:
   data_path: "data/fer13-split"
@@ -59,13 +59,46 @@ augmentation:
   random_erasing_value: "random"
 
 model:
-  name: "convnext_base_ms1m_raw_paper_aug"
+  name: "convnext_base_ms1m_adaptive_clip_confusion"
   arch: "convnext_base_ms1m_arcface"
   pretrained: true
   convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
   convnext_base_require_pretrained: true
   drop_path_rate: 0.1
   layer_scale_init_value: 0.000001
+
+  use_semantic_branch: true
+  use_clip_semantic: true
+  multi_prototype: true
+  ablation: "adaptive_clip_confusion"
+
+  # Adaptive Multi-Granularity Gate
+  use_adaptive_granularity: true
+
+  # Confusion-Aware Hard Semantic Separation Loss
+  use_hard_semantic_loss: true
+  lambda_sem: 0.1
+  lambda_hard: 0.05
+  hard_margin: 0.15
+  hard_pairs:
+    0: [4, 2]     # angry -> sad, fear
+    2: [4, 0]     # fear -> sad, angry
+    4: [0, 2, 6]  # sad -> angry, fear, neutral
+    6: [4]        # neutral -> sad
+
+  clip_model_name: "openai/clip-vit-base-patch32"
+  clip_embedding_dim: 512
+  clip_prototypes_path: "pretrained/clip_text_prototypes_7emotions.npy"
+  semantic_logit_scale: 20.0
+
+  clip_semantic:
+    enabled: true
+    multi_prototype: true
+    num_prototypes_per_class: 5
+    semantic_logit_scale: 20.0
+    lambda_sem: 0.1
+    lambda_hard: 0.05
+    hard_margin: 0.15
 
   checkpoint_path: null
   checkpoint_strict: false
@@ -85,7 +118,6 @@ model:
   freeze_backbone_epochs: 4
   unfreeze_backbone: true
   freeze_unfrozen_batchnorm: true
-  ablation: "cnn_only"
 
 stage_transition:
   enable_2stage_switching: false
@@ -95,10 +127,10 @@ training:
   patience: 15
   warmup_epochs: 5
   loss: "cross_entropy"
-  label_smoothing: 0.0               # Raw cross-entropy (No label smoothing)
-  optimizer: "adamw"                 # Standard AdamW (No SAM)
+  label_smoothing: 0.10
+  optimizer: "sam"
   base_optimizer: "adamw"
-  sam_rho: 0.0                       # SAM disabled
+  sam_rho: 0.03
   sam_adaptive: false
   lr: 0.0003
   finetune_lr: 0.0003
@@ -114,5 +146,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/papers/convnext_base_ms1m_raw_paper_aug"
+  output_dir: "outputs/papers/convnext_base_ms1m_adaptive_clip_confusion"
   logs_dir: "logs"

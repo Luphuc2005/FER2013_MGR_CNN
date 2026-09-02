@@ -1,30 +1,30 @@
 #!/bin/bash
-#SBATCH --job-name=FER_BASE_RAW_PAPER
+#SBATCH --job-name=FER_ADAPTIVE_CLIP_CONF
 #SBATCH --partition=gpu-queue
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
 #SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_BASE_RAW_PAPER_%j.out
-#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_BASE_RAW_PAPER_%j.err
+#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_ADAPTIVE_CLIP_CONF_%j.out
+#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_ADAPTIVE_CLIP_CONF_%j.err
 
 set -euo pipefail
 
 ROOT=/home/ptbao/projects/FER2013_MGR_CNN
 cd "$ROOT"
 
-mkdir -p logs outputs/papers/convnext_base_ms1m_raw_paper_baseline
+mkdir -p logs outputs/papers/convnext_base_ms1m_adaptive_clip_confusion
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 
 FER_PY="/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/bin/python"
-CONFIG="$ROOT/config_convnext_base_ms1m_raw_paper_baseline.yaml"
+CONFIG="$ROOT/config_convnext_base_ms1m_adaptive_clip_confusion.yaml"
 
 echo "============================================================"
-echo " FER2013 ConvNeXt-Base MS1M Raw Paper Baseline"
-echo " (No Augmentation | No SAM | Standard AdamW & Cross-Entropy)"
+echo " FER2013 ConvNeXt-Base MS1M Adaptive Multi-Granularity CLIP"
+echo " + Confusion-Aware Hard Semantic Separation"
 echo "============================================================"
 echo "Job ID: ${SLURM_JOB_ID:-standalone}"
 echo "Node: $(hostname)"
@@ -33,7 +33,7 @@ echo "Start: $(date)"
 echo "ROOT=$ROOT"
 echo "FER_PY=$FER_PY"
 echo "CONFIG=$CONFIG"
-echo "Output: outputs/tf_runs/convnext_base_ms1m_raw_paper_baseline"
+echo "Output: outputs/papers/convnext_base_ms1m_adaptive_clip_confusion"
 echo "============================================================"
 
 nvidia-smi
@@ -47,6 +47,6 @@ export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVI
 "$FER_PY" -u train.py --config "$CONFIG"
 
 echo "============================================================"
-echo " FER2013 ConvNeXt-Base MS1M Raw Paper Baseline Completed"
+echo " FER2013 ConvNeXt-Base Adaptive CLIP Training Completed"
 echo " End: $(date)"
 echo "============================================================"

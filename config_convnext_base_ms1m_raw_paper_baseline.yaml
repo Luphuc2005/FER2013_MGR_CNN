@@ -114,5 +114,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/tf_runs/convnext_base_ms1m_raw_paper_baseline"
+  output_dir: "outputs/papers/convnext_base_ms1m_raw_paper_baseline"
   logs_dir: "logs"

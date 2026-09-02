@@ -279,10 +279,21 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             clip_sem_cfg.get("enabled", False)
             or model_cfg.get("use_semantic_branch", False)
             or model_cfg.get("use_clip_semantic", False)
-            or model_cfg.get("ablation") in ("semantic_clip", "clip_semantic", "semantic")
+            or model_cfg.get("ablation") in ("semantic_clip", "clip_semantic", "semantic", "adaptive_clip", "adaptive_clip_confusion")
         )
         self.multi_prototype = bool(
             clip_sem_cfg.get("multi_prototype", model_cfg.get("multi_prototype", False))
+            or model_cfg.get("ablation") in ("adaptive_clip", "adaptive_clip_confusion")
+        )
+        self.use_adaptive_granularity = bool(
+            clip_sem_cfg.get("use_adaptive_granularity", False)
+            or model_cfg.get("use_adaptive_granularity", False)
+            or model_cfg.get("ablation") in ("adaptive_clip", "adaptive_clip_confusion")
+        )
+        self.use_hard_semantic_loss = bool(
+            clip_sem_cfg.get("use_hard_semantic_loss", False)
+            or model_cfg.get("use_hard_semantic_loss", False)
+            or model_cfg.get("ablation") == "adaptive_clip_confusion"
         )
         self.prototype_aggregation = str(
             clip_sem_cfg.get("prototype_aggregation", model_cfg.get("prototype_aggregation", "logsumexp"))
@@ -293,9 +304,31 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         self.lambda_sem = float(
             clip_sem_cfg.get("lambda_sem", model_cfg.get("lambda_sem", 0.1))
         )
+        self.lambda_hard = float(
+            clip_sem_cfg.get("lambda_hard", model_cfg.get("lambda_hard", 0.05))
+        )
+        self.hard_margin = float(
+            clip_sem_cfg.get("hard_margin", model_cfg.get("hard_margin", 0.15))
+        )
         self.semantic_logit_scale = float(
             clip_sem_cfg.get("semantic_logit_scale", model_cfg.get("semantic_logit_scale", 20.0))
         )
+
+        default_hard_pairs = {
+            0: [4, 2],    # angry -> sad, fear
+            2: [4, 0],    # fear -> sad, angry
+            4: [0, 2, 6], # sad -> angry, fear, neutral
+            6: [4],       # neutral -> sad
+        }
+        hard_pairs_config = model_cfg.get("hard_pairs", clip_sem_cfg.get("hard_pairs", default_hard_pairs))
+        hard_matrix_np = np.zeros((self.num_classes, self.num_classes), dtype=np.float32)
+        if hard_pairs_config:
+            for c, hard_list in hard_pairs_config.items():
+                c_int = int(c)
+                if isinstance(hard_list, (list, tuple)):
+                    for j in hard_list:
+                        hard_matrix_np[c_int, int(j)] = 1.0
+        self.hard_pairs_matrix = tf.constant(hard_matrix_np, dtype=tf.float32, name="hard_pairs_matrix")
 
         if self.use_semantic_branch:
             embed_dim = int(clip_sem_cfg.get("clip_embedding_dim", model_cfg.get("clip_embedding_dim", 512)))
@@ -307,17 +340,29 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
             ], name="visual_semantic_projector")
 
+            if self.use_adaptive_granularity:
+                self.granularity_gate = tf.keras.Sequential([
+                    tf.keras.layers.Dense(256, kernel_initializer="he_normal", name="fc1"),
+                    tf.keras.layers.Activation("gelu", name="gelu"),
+                    tf.keras.layers.Dropout(0.1, name="drop"),
+                    tf.keras.layers.Dense(5, kernel_initializer="he_normal", name="fc2"),
+                    tf.keras.layers.Activation("softmax", name="softmax"),
+                ], name="granularity_gate")
+            else:
+                self.granularity_gate = None
+
             clip_model_name = clip_sem_cfg.get("clip_model_name", model_cfg.get("clip_model_name", "openai/clip-vit-base-patch32"))
             cache_path = clip_sem_cfg.get("clip_prototypes_path", model_cfg.get("clip_prototypes_path", None))
             text_proto_array = get_or_compute_clip_text_prototypes(
                 model_name=clip_model_name,
                 cache_path=cache_path,
                 embedding_dim=embed_dim,
-                multi_prototype=self.multi_prototype,
+                multi_prototype=self.multi_prototype or self.use_adaptive_granularity,
             )
             self.text_prototypes = tf.constant(text_proto_array, dtype=tf.float32, name="frozen_clip_text_prototypes")
         else:
             self.visual_projector = None
+            self.granularity_gate = None
             self.text_prototypes = None
 
         self.pretrained_load_status = "not_requested"
@@ -819,6 +864,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         logits = self.classifier(dropped)
 
         semantic_logits = None
+        agg_sim = None
+        granularity_weights = None
+
         if self.use_semantic_branch and self.visual_projector is not None:
             v_proj = self.visual_projector(pooled, training=training)
             v_norm = tf.math.l2_normalize(v_proj, axis=-1)
@@ -826,33 +874,48 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             t_norm = tf.math.l2_normalize(text_protos, axis=-1)
             endpoints["visual_projector"] = v_proj
 
-            if self.multi_prototype:
+            if self.multi_prototype or self.use_adaptive_granularity:
                 # v_norm: (B, 512), t_norm: (7, 5, 512) -> raw_sim: (B, 7, 5)
                 raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
                 endpoints["raw_semantic_similarity"] = raw_sim
                 raw_sim_f32 = tf.cast(raw_sim, tf.float32)
-                if self.prototype_aggregation == "logsumexp":
-                    tau = tf.constant(self.prototype_temperature, dtype=tf.float32)
-                    K = tf.constant(float(raw_sim.shape[-1]), dtype=tf.float32)
-                    lse = tf.reduce_logsumexp(raw_sim_f32 / tau, axis=-1)
-                    agg_sim = tau * (lse - tf.math.log(K))
-                elif self.prototype_aggregation == "mean":
-                    agg_sim = tf.reduce_mean(raw_sim_f32, axis=-1)
-                elif self.prototype_aggregation == "max":
-                    agg_sim = tf.reduce_max(raw_sim_f32, axis=-1)
+
+                if self.use_adaptive_granularity and self.granularity_gate is not None:
+                    # Adaptive Multi-Granularity Weighting: Sample-adaptive gate [B, 5]
+                    granularity_weights = self.granularity_gate(pooled, training=training)  # [B, 5]
+                    granularity_weights_f32 = tf.cast(granularity_weights, tf.float32)
+                    gw_exp = tf.expand_dims(granularity_weights_f32, axis=1)  # [B, 1, 5]
+                    agg_sim = tf.reduce_sum(gw_exp * raw_sim_f32, axis=-1)  # [B, 7]
+                    endpoints["granularity_weights"] = granularity_weights
                 else:
-                    raise ValueError(f"Unsupported prototype_aggregation: {self.prototype_aggregation}")
+                    if self.prototype_aggregation == "logsumexp":
+                        tau = tf.constant(self.prototype_temperature, dtype=tf.float32)
+                        K = tf.constant(float(raw_sim.shape[-1]), dtype=tf.float32)
+                        lse = tf.reduce_logsumexp(raw_sim_f32 / tau, axis=-1)
+                        agg_sim = tau * (lse - tf.math.log(K))
+                    elif self.prototype_aggregation == "mean":
+                        agg_sim = tf.reduce_mean(raw_sim_f32, axis=-1)
+                    elif self.prototype_aggregation == "max":
+                        agg_sim = tf.reduce_max(raw_sim_f32, axis=-1)
+                    else:
+                        raise ValueError(f"Unsupported prototype_aggregation: {self.prototype_aggregation}")
                 semantic_logits = agg_sim * tf.cast(self.semantic_logit_scale, tf.float32)
             else:
                 cos_sim = tf.matmul(v_norm, t_norm, transpose_b=True)
-                semantic_logits = tf.cast(cos_sim * self.semantic_logit_scale, tf.float32)
+                agg_sim = tf.cast(cos_sim, tf.float32)
+                semantic_logits = agg_sim * tf.cast(self.semantic_logit_scale, tf.float32)
             endpoints["semantic_logits"] = semantic_logits
 
         self._log_shapes_once(image, endpoints, pooled, dropped, logits)
         return {
             "logits": tf.cast(logits, tf.float32),
             "semantic_logits": semantic_logits,
+            "agg_sim": agg_sim,
+            "granularity_weights": granularity_weights,
             "lambda_sem": self.lambda_sem,
+            "lambda_hard": self.lambda_hard if self.use_hard_semantic_loss else 0.0,
+            "hard_margin": self.hard_margin,
+            "hard_pairs_matrix": self.hard_pairs_matrix,
             "cnn_aux_logits": None,
             "ortho_loss": tf.constant(0.0, dtype=tf.float32),
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),

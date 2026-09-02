@@ -516,7 +516,19 @@ def make_step_function(
         if outputs.get("semantic_logits") is not None:
             sem_preds = tf.argmax(outputs["semantic_logits"], axis=-1, output_type=tf.int32)
             sem_correct = tf.reduce_sum(tf.cast(tf.equal(sem_preds, labels), tf.int32))
-        return correct, sem_correct, count
+
+        gw_sum = tf.zeros([5], dtype=tf.float32)
+        gw_sq_sum = tf.zeros([5], dtype=tf.float32)
+        entropy_sum = tf.constant(0.0, dtype=tf.float32)
+        gw = outputs.get("granularity_weights")
+        if gw is not None:
+            gw_f32 = tf.cast(gw, tf.float32)
+            gw_sum = tf.reduce_sum(gw_f32, axis=0)
+            gw_sq_sum = tf.reduce_sum(tf.square(gw_f32), axis=0)
+            ent = -tf.reduce_sum(gw_f32 * tf.math.log(gw_f32 + 1e-9), axis=-1)
+            entropy_sum = tf.reduce_sum(ent)
+
+        return correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum
 
     def _clip_gradients(grads):
         if grad_clip_norm:
@@ -549,10 +561,12 @@ def make_step_function(
         if skip_nonfinite:
             grads = [tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) if g is not None else None for g in grads]
 
+        hard_loss = parts.get("hard_semantic", tf.constant(0.0, dtype=tf.float32))
+
         if not use_sam:
             _apply_gradients(grads, trainable_vars)
-            fer_correct, sem_correct, count = _batch_stats(outputs, labels)
-            return raw_loss, parts["ce"], parts["semantic"], fer_correct, sem_correct, count, tf.constant(1, tf.int32)
+            fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum = _batch_stats(outputs, labels)
+            return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, tf.constant(1, tf.int32)
 
         grads = _clip_gradients(grads)
         grad_norm = tf.linalg.global_norm([g for g in grads if g is not None])
@@ -592,8 +606,8 @@ def make_step_function(
             grads_2 = [tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) if g is not None else None for g in grads_2]
 
         _apply_gradients(grads_2, trainable_vars)
-        fer_correct, sem_correct, count = _batch_stats(outputs, labels)
-        return raw_loss, parts["ce"], parts["semantic"], fer_correct, sem_correct, count, tf.constant(1, tf.int32)
+        fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum = _batch_stats(outputs, labels)
+        return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, tf.constant(1, tf.int32)
 
     def train_step_head(features, labels):
         return _step_impl(features, labels, head_vars)
@@ -607,15 +621,23 @@ def make_step_function(
 def make_distributed_train_step(strategy: tf.distribute.Strategy, train_step):
     @tf.function(reduce_retracing=True, jit_compile=False)
     def distributed_step(batch):
-        per_loss, per_ce, per_sem, per_correct, per_sem_correct, per_count, per_ok = strategy.run(train_step, args=batch)
+        (
+            per_loss, per_ce, per_sem, per_hard,
+            per_correct, per_sem_correct, per_count,
+            per_gw_sum, per_gw_sq_sum, per_ent_sum, per_ok
+        ) = strategy.run(train_step, args=batch)
         ok = strategy.reduce(tf.distribute.ReduceOp.SUM, per_ok, axis=None)
         loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_loss, axis=None)
         ce = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_ce, axis=None)
         sem = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_sem, axis=None)
+        hard = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_hard, axis=None)
         correct = strategy.reduce(tf.distribute.ReduceOp.SUM, per_correct, axis=None)
         sem_correct = strategy.reduce(tf.distribute.ReduceOp.SUM, per_sem_correct, axis=None)
         count = strategy.reduce(tf.distribute.ReduceOp.SUM, per_count, axis=None)
-        return loss, ce, sem, correct, sem_correct, count, ok
+        gw_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_gw_sum, axis=None)
+        gw_sq_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_gw_sq_sum, axis=None)
+        ent_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_ent_sum, axis=None)
+        return loss, ce, sem, hard, correct, sem_correct, count, gw_sum, gw_sq_sum, ent_sum, ok
 
     return distributed_step
 
@@ -690,8 +712,8 @@ def evaluate_dataset(
         fer_preds_tta = tf.argmax(outputs_tta["logits"], axis=-1, output_type=tf.int32)
 
         return (
-            total_l_orig, parts_orig["ce"], parts_orig["semantic"], fer_preds_orig,
-            total_l_tta, parts_tta["ce"], parts_tta["semantic"], fer_preds_tta,
+            total_l_orig, parts_orig["ce"], parts_orig["semantic"], parts_orig.get("hard_semantic", tf.constant(0.0, tf.float32)), fer_preds_orig,
+            total_l_tta, parts_tta["ce"], parts_tta["semantic"], parts_tta.get("hard_semantic", tf.constant(0.0, tf.float32)), fer_preds_tta,
             tf.shape(labels)[0], labels
         )
 
@@ -702,10 +724,12 @@ def evaluate_dataset(
     total_loss_orig = 0.0
     total_ce_orig = 0.0
     total_sem_orig = 0.0
+    total_hard_orig = 0.0
 
     total_loss_tta = 0.0
     total_ce_tta = 0.0
     total_sem_tta = 0.0
+    total_hard_tta = 0.0
     total_count = 0
 
     if strategy is not None and strategy.num_replicas_in_sync > 1:
@@ -713,19 +737,21 @@ def evaluate_dataset(
 
         for batch in dist_dataset:
             (
-                loc_tot_o, loc_ce_o, loc_sem_o, loc_p_o,
-                loc_tot_t, loc_ce_t, loc_sem_t, loc_p_t,
+                loc_tot_o, loc_ce_o, loc_sem_o, loc_hd_o, loc_p_o,
+                loc_tot_t, loc_ce_t, loc_sem_t, loc_hd_t, loc_p_t,
                 loc_cnts, loc_lbs
             ) = strategy.run(_eval_step, args=batch)
 
-            for l_tot_o, l_ce_o, l_sem_o, l_p_o, l_tot_t, l_ce_t, l_sem_t, l_p_t, l_cnt, l_lb in zip(
+            for l_tot_o, l_ce_o, l_sem_o, l_hd_o, l_p_o, l_tot_t, l_ce_t, l_sem_t, l_hd_t, l_p_t, l_cnt, l_lb in zip(
                 strategy.experimental_local_results(loc_tot_o),
                 strategy.experimental_local_results(loc_ce_o),
                 strategy.experimental_local_results(loc_sem_o),
+                strategy.experimental_local_results(loc_hd_o),
                 strategy.experimental_local_results(loc_p_o),
                 strategy.experimental_local_results(loc_tot_t),
                 strategy.experimental_local_results(loc_ce_t),
                 strategy.experimental_local_results(loc_sem_t),
+                strategy.experimental_local_results(loc_hd_t),
                 strategy.experimental_local_results(loc_p_t),
                 strategy.experimental_local_results(loc_cnts),
                 strategy.experimental_local_results(loc_lbs),
@@ -736,10 +762,12 @@ def evaluate_dataset(
                 total_loss_orig += float(l_tot_o.numpy()) * count
                 total_ce_orig += float(l_ce_o.numpy()) * count
                 total_sem_orig += float(l_sem_o.numpy()) * count
+                total_hard_orig += float(l_hd_o.numpy()) * count
 
                 total_loss_tta += float(l_tot_t.numpy()) * count
                 total_ce_tta += float(l_ce_t.numpy()) * count
                 total_sem_tta += float(l_sem_t.numpy()) * count
+                total_hard_tta += float(l_hd_t.numpy()) * count
 
                 total_count += count
                 y_true.extend(l_lb.numpy().tolist())
@@ -749,7 +777,7 @@ def evaluate_dataset(
     else:
         for batch in dataset:
             inputs, labels = batch
-            tot_o, ce_o, sem_o, p_o, tot_t, ce_t, sem_t, p_t, count, _ = _eval_step(inputs, labels)
+            tot_o, ce_o, sem_o, hd_o, p_o, tot_t, ce_t, sem_t, hd_t, p_t, count, _ = _eval_step(inputs, labels)
             c = int(count.numpy())
             y_true.extend(labels.numpy().tolist())
             y_pred_orig.extend(p_o.numpy().tolist())
@@ -758,10 +786,12 @@ def evaluate_dataset(
             total_loss_orig += float(tot_o.numpy()) * c
             total_ce_orig += float(ce_o.numpy()) * c
             total_sem_orig += float(sem_o.numpy()) * c
+            total_hard_orig += float(hd_o.numpy()) * c
 
             total_loss_tta += float(tot_t.numpy()) * c
             total_ce_tta += float(ce_t.numpy()) * c
             total_sem_tta += float(sem_t.numpy()) * c
+            total_hard_tta += float(hd_t.numpy()) * c
 
             total_count += c
 
@@ -772,6 +802,7 @@ def evaluate_dataset(
     metrics_tta["total_loss"] = total_loss_tta / c_norm
     metrics_tta["ce_loss"] = total_ce_tta / c_norm
     metrics_tta["semantic_loss"] = total_sem_tta / c_norm
+    metrics_tta["hard_semantic_loss"] = total_hard_tta / c_norm
     metrics_tta["tta_hflip"] = bool(use_tta)
     metrics_tta["original_weight"] = w_orig
     metrics_tta["flip_weight"] = w_flip
@@ -781,6 +812,7 @@ def evaluate_dataset(
     metrics_tta["no_tta_macro_f1"] = float(metrics_no_tta["macro_f1"])
     metrics_tta["no_tta_weighted_f1"] = float(metrics_no_tta["weighted_f1"])
     metrics_tta["no_tta_loss"] = total_loss_orig / c_norm
+    metrics_tta["no_tta_hard_semantic_loss"] = total_hard_orig / c_norm
 
     print(f"[EVALUATION SUMMARY]", flush=True)
     print(
@@ -992,20 +1024,29 @@ def main() -> int:
         total_losses = []
         ce_losses = []
         sem_losses = []
+        hard_losses = []
+        total_gw_sum = np.zeros(5, dtype=np.float64)
+        total_gw_sq_sum = np.zeros(5, dtype=np.float64)
+        total_entropy_sum = 0.0
         fer_correct = 0
         sem_correct = 0
         seen = 0
         total_steps = int(tf.data.experimental.cardinality(train_ds).numpy())
         for step_index, batch in enumerate(train_loop_ds, start=1):
-            loss, ce_l, sem_l, batch_correct, batch_sem_correct, batch_count, ok = distributed_train_step(batch)
+            loss, ce_l, sem_l, hard_l, batch_correct, batch_sem_correct, batch_count, gw_sum, gw_sq_sum, ent_sum, ok = distributed_train_step(batch)
             if int(ok.numpy()) == 0:
                 continue
+            b_cnt = int(batch_count.numpy())
             fer_correct += int(batch_correct.numpy())
             sem_correct += int(batch_sem_correct.numpy())
-            seen += int(batch_count.numpy())
+            seen += b_cnt
             total_losses.append(float(loss.numpy()))
             ce_losses.append(float(ce_l.numpy()))
             sem_losses.append(float(sem_l.numpy()))
+            hard_losses.append(float(hard_l.numpy()))
+            total_gw_sum += gw_sum.numpy().astype(np.float64)
+            total_gw_sq_sum += gw_sq_sum.numpy().astype(np.float64)
+            total_entropy_sum += float(ent_sum.numpy())
             if progress_interval and step_index % progress_interval == 0:
                 print(
                     f"Epoch {epoch+1}/{cfg['training']['epochs']} "
@@ -1013,6 +1054,7 @@ def main() -> int:
                     f"total_loss={float(loss.numpy()):.4f} "
                     f"ce_loss={float(ce_l.numpy()):.4f} "
                     f"sem_loss={float(sem_l.numpy()):.4f} "
+                    f"hard_loss={float(hard_l.numpy()):.4f} "
                     f"fer_acc={fer_correct / max(seen, 1):.4f} "
                     f"sem_acc={sem_correct / max(seen, 1):.4f} "
                     f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f}",
@@ -1025,8 +1067,25 @@ def main() -> int:
         train_loss = float(np.mean(total_losses)) if total_losses else float("nan")
         train_ce_loss = float(np.mean(ce_losses)) if ce_losses else float("nan")
         train_sem_loss = float(np.mean(sem_losses)) if sem_losses else float("nan")
+        train_hard_loss = float(np.mean(hard_losses)) if hard_losses else float("nan")
         train_acc = fer_correct / max(seen, 1)
         train_sem_acc = sem_correct / max(seen, 1)
+
+        # Compute granularity gate statistics
+        n_samples = max(seen, 1)
+        gw_means = total_gw_sum / n_samples
+        gw_var = np.maximum(0.0, (total_gw_sq_sum / n_samples) - (gw_means ** 2))
+        gw_stds = np.sqrt(gw_var)
+        gate_entropy = total_entropy_sum / n_samples
+
+        # Collapse check: warn if any weight > 0.90
+        for k_idx, gw_m in enumerate(gw_means):
+            if gw_m > 0.90:
+                print(
+                    f"[WARNING] Granularity weight {k_idx} mean ({gw_m:.4f}) > 0.90 at Epoch {epoch+1}! Gate may be collapsing.",
+                    flush=True,
+                )
+
         print(f"[INFO] Epoch {epoch+1}: starting validation", flush=True)
         val_metrics = evaluate_dataset(
             model,
@@ -1084,17 +1143,30 @@ def main() -> int:
             "train_loss": train_loss,
             "train_ce_loss": train_ce_loss,
             "train_semantic_loss": train_sem_loss,
+            "train_hard_semantic_loss": train_hard_loss,
             "train_accuracy": train_acc,
             "train_fer_accuracy": train_acc,
             "train_semantic_accuracy": train_sem_acc,
             "val_loss": float(val_metrics.get("loss", 0.0)),
             "val_ce_loss": float(val_metrics.get("ce_loss", 0.0)),
             "val_semantic_loss": float(val_metrics.get("semantic_loss", 0.0)),
+            "val_hard_semantic_loss": float(val_metrics.get("hard_semantic_loss", 0.0)),
             "val_accuracy": float(val_metrics.get("accuracy", 0.0)),
             "val_fer_accuracy": float(val_metrics.get("fer_accuracy", val_metrics.get("accuracy", 0.0))),
             "val_semantic_accuracy": float(val_metrics.get("semantic_accuracy", 0.0)),
             "val_macro_f1": float(val_metrics.get("macro_f1", 0.0)),
             "val_weighted_f1": float(val_metrics.get("weighted_f1", 0.0)),
+            "gw_mean_0": float(gw_means[0]),
+            "gw_mean_1": float(gw_means[1]),
+            "gw_mean_2": float(gw_means[2]),
+            "gw_mean_3": float(gw_means[3]),
+            "gw_mean_4": float(gw_means[4]),
+            "gw_std_0": float(gw_stds[0]),
+            "gw_std_1": float(gw_stds[1]),
+            "gw_std_2": float(gw_stds[2]),
+            "gw_std_3": float(gw_stds[3]),
+            "gw_std_4": float(gw_stds[4]),
+            "gate_entropy": float(gate_entropy),
             "lr_head": lr,
             "lr_backbone": backbone_lr,
             "monitor_name": monitor_name,
@@ -1108,12 +1180,13 @@ def main() -> int:
             "improved": int(improved),
         }
         history.append(row)
+        gw_means_str = ",".join([f"{m:.3f}" for m in gw_means])
         print(
             f"Epoch {epoch+1}/{cfg['training']['epochs']} [{time_str}] "
-            f"loss={train_loss:.4f} acc={train_acc:.4f} "
+            f"loss={train_loss:.4f} sem_loss={train_sem_loss:.4f} hard_loss={train_hard_loss:.4f} acc={train_acc:.4f} "
             f"val_loss={row['val_loss']:.4f} val_acc={row['val_accuracy']:.4f} "
             f"val_macro_f1={row['val_macro_f1']:.4f} "
-            f"train_time={train_time_sec:.1f}s "
+            f"gw_means=[{gw_means_str}] ent={gate_entropy:.3f} "
             f"throughput={train_samples_per_sec:.1f} samples/s "
             f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f} "
             f"patience={patience_counter}/{patience_limit} "
