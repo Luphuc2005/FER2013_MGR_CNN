@@ -474,7 +474,10 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
 
         baseline_pooled = self.rgb_baseline.gap(tf.cast(s4, tf.float32))
         baseline_dropped = self.rgb_baseline.head_dropout(baseline_pooled, training=False)
-        baseline_logits = tf.cast(self.rgb_baseline.classifier(baseline_dropped), tf.float32)
+        if hasattr(self, "arcface_head") and self.use_arcface:
+            baseline_logits = tf.cast(self.arcface_head(baseline_dropped, labels=labels, training=False), tf.float32)
+        else:
+            baseline_logits = tf.cast(self.rgb_baseline.classifier(baseline_dropped), tf.float32)
 
         pooled_feat = tf.reduce_mean(f_da, axis=[1, 2])  # [B, 512] for SupCon
         aux_logits = None
