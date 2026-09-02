@@ -179,11 +179,12 @@ def get_or_compute_clip_text_prototypes(
 
     prompt_hash, prompt_count = compute_prompt_hash(prompts_per_class)
 
-    if cache_path is None or (multi_prototype and "clip_text_prototypes_7emotions.npy" in cache_path):
+    if cache_path is None or ("clip_text_prototypes_7emotions.npy" in cache_path and "siglip" in model_name.lower()):
+        safe_model_tag = "siglip2" if "siglip2" in model_name.lower() else ("siglip" if "siglip" in model_name.lower() else "clip")
         cache_path = (
-            "pretrained/clip_text_prototypes_7emotions_multigranularity_multi5.npy"
+            f"pretrained/{safe_model_tag}_text_prototypes_7emotions_multigranularity_multi5.npy"
             if multi_prototype
-            else "pretrained/clip_text_prototypes_7emotions.npy"
+            else f"pretrained/{safe_model_tag}_text_prototypes_7emotions.npy"
         )
 
     meta_path = cache_path + ".meta.json"
@@ -199,17 +200,17 @@ def get_or_compute_clip_text_prototypes(
         expected_prompt_count=prompt_count,
     ):
         prototypes = np.load(cache_path).astype(np.float32)
-        print(f"[CLIP] Model: {model_name}", flush=True)
-        print(f"[CLIP] Text encoder loaded successfully", flush=True)
-        print(f"[CLIP] Prototype source: REAL_CLIP", flush=True)
-        print(f"[CLIP] Prompt SHA256 Hash: {prompt_hash[:16]}... (count: {prompt_count})", flush=True)
-        print(f"[CLIP] Synthetic fallback: DISABLED", flush=True)
-        print(f"[CLIP] Prototype shape: {prototypes.shape}", flush=True)
-        print(f"[CLIP] L2 norm check: PASSED (loaded from verified cache: {cache_path})", flush=True)
+        print(f"[CLIP/SigLIP] Model: {model_name}", flush=True)
+        print(f"[CLIP/SigLIP] Text encoder loaded successfully", flush=True)
+        print(f"[CLIP/SigLIP] Prototype source: REAL_CLIP/SIGLIP", flush=True)
+        print(f"[CLIP/SigLIP] Prompt SHA256 Hash: {prompt_hash[:16]}... (count: {prompt_count})", flush=True)
+        print(f"[CLIP/SigLIP] Synthetic fallback: DISABLED", flush=True)
+        print(f"[CLIP/SigLIP] Prototype shape: {prototypes.shape}", flush=True)
+        print(f"[CLIP/SigLIP] L2 norm check: PASSED (loaded from verified cache: {cache_path})", flush=True)
         return prototypes
 
     if os.path.exists(cache_path):
-        print(f"[CLIP] Stale, modified prompt, or unverified cache detected at '{cache_path}'. Regenerating using REAL_CLIP...", flush=True)
+        print(f"[CLIP/SigLIP] Stale, modified prompt, or unverified cache detected at '{cache_path}'. Regenerating using REAL model...", flush=True)
         try:
             os.remove(cache_path)
         except Exception:
@@ -220,7 +221,7 @@ def get_or_compute_clip_text_prototypes(
         except Exception:
             pass
 
-    # Encode using REAL CLIP Text Encoder via HuggingFace Transformers
+    # Encode using REAL Text Encoder via HuggingFace Transformers
     prototypes = _encode_with_transformers(
         model_name=model_name,
         prompts_per_class=prompts_per_class,
@@ -230,28 +231,27 @@ def get_or_compute_clip_text_prototypes(
 
     if prototypes is None:
         raise RuntimeError(
-            f"[CLIP ERROR] Could not initialize or run HuggingFace CLIP model '{model_name}'.\n"
-            f"Synthetic fallback is DISABLED. Training cannot proceed without real CLIP text embeddings!\n"
+            f"[CLIP/SigLIP ERROR] Could not initialize or run HuggingFace model '{model_name}'.\n"
+            f"Synthetic fallback is DISABLED. Training cannot proceed without real text embeddings!\n"
             f"Possible causes:\n"
             f"  1) Compute node has no internet access to download HuggingFace model.\n"
             f"     --> FIX: Upload/copy the pre-generated 'pretrained/*.npy' and 'pretrained/*.meta.json' cache files from local to server.\n"
-            f"  2) Thư viện 'transformers' hoặc 'torch' chưa được cài trong environment.\n"
-            f"     --> FIX: Run 'pip install transformers torch' on the server login node."
+            f"  2) Thư viện 'transformers' hoặc 'torch' chưa được cài trong environment."
         )
 
     # Post-checks
     if prototypes.shape != expected_shape:
         raise RuntimeError(
-            f"[CLIP ERROR] Expected prototype shape {expected_shape}, but got {prototypes.shape}."
+            f"[CLIP/SigLIP ERROR] Expected prototype shape {expected_shape}, but got {prototypes.shape}."
         )
 
     if not np.all(np.isfinite(prototypes)):
-        raise RuntimeError("[CLIP ERROR] Generated text prototypes contain non-finite values (NaN or Inf).")
+        raise RuntimeError("[CLIP/SigLIP ERROR] Generated text prototypes contain non-finite values (NaN or Inf).")
 
     norms = np.linalg.norm(prototypes, axis=-1)
     if not np.allclose(norms, 1.0, atol=1e-3):
         raise RuntimeError(
-            f"[CLIP ERROR] Generated text prototypes failed L2 normalization check (min norm={norms.min():.4f}, max norm={norms.max():.4f})."
+            f"[CLIP/SigLIP ERROR] Generated text prototypes failed L2 normalization check (min norm={norms.min():.4f}, max norm={norms.max():.4f})."
         )
 
     # Save cache & provenance metadata including prompt_hash & prompt_count
@@ -271,17 +271,17 @@ def get_or_compute_clip_text_prototypes(
             }
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta_data, f, indent=2)
-            print(f"[CLIP] Cached REAL_CLIP prototypes saved to {cache_path}", flush=True)
+            print(f"[CLIP/SigLIP] Cached prototypes saved to {cache_path}", flush=True)
         except Exception as e:
-            print(f"[CLIP] Warning: Could not save text prototypes cache: {e}", flush=True)
+            print(f"[CLIP/SigLIP] Warning: Could not save text prototypes cache: {e}", flush=True)
 
-    print(f"[CLIP] Model: {model_name}", flush=True)
-    print(f"[CLIP] Text encoder loaded successfully", flush=True)
-    print(f"[CLIP] Prototype source: REAL_CLIP", flush=True)
-    print(f"[CLIP] Prompt SHA256 Hash: {prompt_hash[:16]}... (count: {prompt_count})", flush=True)
-    print(f"[CLIP] Synthetic fallback: DISABLED", flush=True)
-    print(f"[CLIP] Prototype shape: {prototypes.shape}", flush=True)
-    print(f"[CLIP] L2 norm check: PASSED (all vectors L2 norm ≈ 1.0)", flush=True)
+    print(f"[CLIP/SigLIP] Model: {model_name}", flush=True)
+    print(f"[CLIP/SigLIP] Text encoder loaded successfully", flush=True)
+    print(f"[CLIP/SigLIP] Prototype source: REAL_CLIP/SIGLIP", flush=True)
+    print(f"[CLIP/SigLIP] Prompt SHA256 Hash: {prompt_hash[:16]}... (count: {prompt_count})", flush=True)
+    print(f"[CLIP/SigLIP] Synthetic fallback: DISABLED", flush=True)
+    print(f"[CLIP/SigLIP] Prototype shape: {prototypes.shape}", flush=True)
+    print(f"[CLIP/SigLIP] L2 norm check: PASSED (all vectors L2 norm ≈ 1.0)", flush=True)
 
     return prototypes.astype(np.float32)
 
@@ -292,20 +292,22 @@ def _encode_with_transformers(
     embedding_dim: int,
     multi_prototype: bool = False,
 ) -> Optional[np.ndarray]:
-    """Encodes text prompts using HuggingFace transformers CLIP text model (PyTorch or TF)."""
+    """Encodes text prompts using HuggingFace transformers CLIP/SigLIP text model (PyTorch or TF)."""
     # 1. Try PyTorch Transformers
     try:
         import torch
-        from transformers import AutoTokenizer, CLIPTextModelWithProjection, CLIPModel
+        from transformers import AutoTokenizer, AutoModel, CLIPTextModelWithProjection, CLIPModel
 
-        print(f"[CLIP] Loading PyTorch HuggingFace model '{model_name}' (multi_prototype={multi_prototype})...", flush=True)
+        print(f"[CLIP/SigLIP] Loading PyTorch HuggingFace model '{model_name}' (multi_prototype={multi_prototype})...", flush=True)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
+        text_encoder = None
         try:
-            text_encoder = CLIPTextModelWithProjection.from_pretrained(model_name)
-            use_projection = True
+            text_encoder = AutoModel.from_pretrained(model_name)
         except Exception:
-            text_encoder = CLIPModel.from_pretrained(model_name)
-            use_projection = False
+            try:
+                text_encoder = CLIPTextModelWithProjection.from_pretrained(model_name)
+            except Exception:
+                text_encoder = CLIPModel.from_pretrained(model_name)
 
         text_encoder.eval()
 
@@ -314,7 +316,7 @@ def _encode_with_transformers(
             for c in range(7):
                 prompts = prompts_per_class[c]
                 inputs = tokenizer(prompts, padding=True, return_tensors="pt")
-                if use_projection and hasattr(text_encoder, "get_text_features"):
+                if hasattr(text_encoder, "get_text_features"):
                     embeds = text_encoder.get_text_features(**inputs)
                 elif hasattr(text_encoder, "text_model"):
                     outputs = text_encoder(**inputs)
