@@ -330,6 +330,12 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                         hard_matrix_np[c_int, int(j)] = 1.0
         self.hard_pairs_matrix = tf.constant(hard_matrix_np, dtype=tf.float32, name="hard_pairs_matrix")
 
+        self.use_au_region_routed = bool(
+            clip_sem_cfg.get("use_au_region_routed", False)
+            or model_cfg.get("use_au_region_routed", False)
+            or model_cfg.get("ablation") in ("au_region_routed", "adaptive_clip_confusion", "au_routed_clip")
+        )
+
         if self.use_semantic_branch:
             embed_dim = int(clip_sem_cfg.get("clip_embedding_dim", model_cfg.get("clip_embedding_dim", 512)))
             self.visual_projector = tf.keras.Sequential([
@@ -339,6 +345,35 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
                 tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
             ], name="visual_semantic_projector")
+
+            if self.use_au_region_routed:
+                self.visual_projector_upper = tf.keras.Sequential([
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
+                    tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
+                    tf.keras.layers.Activation("gelu", name="gelu"),
+                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
+                ], name="visual_projector_upper")
+
+                self.visual_projector_lower = tf.keras.Sequential([
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
+                    tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
+                    tf.keras.layers.Activation("gelu", name="gelu"),
+                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
+                ], name="visual_projector_lower")
+
+                self.visual_projector_au = tf.keras.Sequential([
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
+                    tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
+                    tf.keras.layers.Activation("gelu", name="gelu"),
+                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
+                ], name="visual_projector_au")
+            else:
+                self.visual_projector_upper = None
+                self.visual_projector_lower = None
+                self.visual_projector_au = None
 
             if self.use_adaptive_granularity:
                 self.granularity_gate = tf.keras.Sequential([
@@ -868,15 +903,51 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         granularity_weights = None
 
         if self.use_semantic_branch and self.visual_projector is not None:
-            v_proj = self.visual_projector(pooled, training=training)
-            v_norm = tf.math.l2_normalize(v_proj, axis=-1)
-            text_protos = tf.cast(self.text_prototypes, dtype=v_norm.dtype)
-            t_norm = tf.math.l2_normalize(text_protos, axis=-1)
-            endpoints["visual_projector"] = v_proj
+            text_protos = tf.cast(self.text_prototypes, dtype=tf.float32)
+            t_norm = tf.math.l2_normalize(text_protos, axis=-1) # [7, 5, dim]
+
+            if self.use_au_region_routed and self.visual_projector_upper is not None:
+                # Extract Stage 3 spatial feature maps [B, 14, 14, 512]
+                stage3_feat = endpoints.get("stage3_adapter", endpoints.get("stage3"))
+                z_upper = tf.reduce_mean(stage3_feat[:, 0:8, :, :], axis=[1, 2])
+                z_lower = tf.reduce_mean(stage3_feat[:, 5:14, :, :], axis=[1, 2])
+                z_au = tf.reduce_mean(stage3_feat[:, 3:11, :, :], axis=[1, 2])
+
+                v_global_proj = self.visual_projector(pooled, training=training)
+                v_upper_proj = self.visual_projector_upper(z_upper, training=training)
+                v_lower_proj = self.visual_projector_lower(z_lower, training=training)
+                v_au_proj = self.visual_projector_au(z_au, training=training)
+
+                v_global_norm = tf.math.l2_normalize(v_global_proj, axis=-1)
+                v_upper_norm = tf.math.l2_normalize(v_upper_proj, axis=-1)
+                v_lower_norm = tf.math.l2_normalize(v_lower_proj, axis=-1)
+                v_au_norm = tf.math.l2_normalize(v_au_proj, axis=-1)
+
+                endpoints["visual_projector"] = v_global_proj
+                endpoints["visual_projector_upper"] = v_upper_proj
+                endpoints["visual_projector_lower"] = v_lower_proj
+                endpoints["visual_projector_au"] = v_au_proj
+
+                # Spatial-Semantic Routing to 5 Prototypes:
+                # P0 (Emotion): Global -> t_norm[:,0,:]
+                # P1 (AU-level): AU-region -> t_norm[:,1,:]
+                # P2 (Upper-face): Upper-region -> t_norm[:,2,:]
+                # P3 (Lower-face): Lower-region -> t_norm[:,3,:]
+                # P4 (Combined): Global -> t_norm[:,4,:]
+                s0 = tf.einsum("bd,cd->bc", v_global_norm, t_norm[:, 0, :])
+                s1 = tf.einsum("bd,cd->bc", v_au_norm, t_norm[:, 1, :])
+                s2 = tf.einsum("bd,cd->bc", v_upper_norm, t_norm[:, 2, :])
+                s3 = tf.einsum("bd,cd->bc", v_lower_norm, t_norm[:, 3, :])
+                s4 = tf.einsum("bd,cd->bc", v_global_norm, t_norm[:, 4, :])
+
+                raw_sim = tf.stack([s0, s1, s2, s3, s4], axis=-1)  # [B, 7, 5]
+            else:
+                v_proj = self.visual_projector(pooled, training=training)
+                v_norm = tf.math.l2_normalize(v_proj, axis=-1)
+                endpoints["visual_projector"] = v_proj
+                raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
 
             if self.multi_prototype or self.use_adaptive_granularity:
-                # v_norm: (B, 512), t_norm: (7, 5, 512) -> raw_sim: (B, 7, 5)
-                raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
                 endpoints["raw_semantic_similarity"] = raw_sim
                 raw_sim_f32 = tf.cast(raw_sim, tf.float32)
 

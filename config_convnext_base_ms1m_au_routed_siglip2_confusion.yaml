@@ -1,0 +1,158 @@
+seed:
+  random_seed: 42
+
+source:
+  note: "ConvNeXt-Base MS1M with AU-Region Routed Spatial-Semantic Alignment + SigLIP 2 + Hard-Pair Loss."
+
+runtime:
+  gpu_ids: [0]
+  batch_size_per_gpu: 32
+  fallback_batch_size_per_gpu: 16
+  require_two_gpus: false
+  min_gpus: 1
+  memory_growth: true
+  use_mixed_precision: true
+  intra_op_threads: 16
+  inter_op_threads: 4
+  tf_data_num_parallel_calls: 4
+  tf_data_private_threadpool_size: 4
+  tf_data_deterministic: false
+  prefetch_buffer: 2
+  distributed_eval: false
+  eval_tta_hflip: false
+  train_val_tta_hflip: false
+
+tta:
+  enabled: false
+  hflip: false
+  original_weight: 1.0
+  flip_weight: 0.0
+
+data:
+  data_path: "data/fer13-split"
+  mask_dir: null
+  num_classes: 7
+  image_size: 112
+  channels: 3
+  normalize: true
+  predecode_pixels: true
+  preload_masks: false
+  allow_missing_masks: true
+  use_clean_filter: false
+  bad_row_indices_path: null
+  mask_ablation: "none"
+  shuffle_buffer: 28709
+  cache: false
+
+augmentation:
+  horizontal_flip: true
+  rotation_degrees: 15.0
+  brightness_delta: 0.15
+  contrast_lower: 0.85
+  contrast_upper: 1.15
+  gamma_prob: 0.5
+  gamma_min: 0.5
+  gamma_max: 2.0
+  random_erasing_prob: 0.40
+  random_erasing_area_min: 0.02
+  random_erasing_area_max: 0.15
+  random_erasing_value: "random"
+
+model:
+  name: "convnext_base_ms1m_au_routed_siglip2_confusion"
+  arch: "convnext_base_ms1m_arcface"
+  pretrained: true
+  convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
+  convnext_base_require_pretrained: true
+  drop_path_rate: 0.1
+  layer_scale_init_value: 0.000001
+
+  use_semantic_branch: true
+  use_clip_semantic: true
+  multi_prototype: true
+  ablation: "au_routed_clip"
+
+  # Spatial-Semantic Routing
+  use_au_region_routed: true
+
+  # Adaptive Multi-Granularity Gate
+  use_adaptive_granularity: true
+
+  # Confusion-Aware Hard Semantic Separation Loss
+  use_hard_semantic_loss: true
+  lambda_sem: 0.1
+  lambda_hard: 0.05
+  hard_margin: 0.15
+  hard_pairs:
+    0: [4, 2]     # angry -> sad, fear
+    2: [4, 0]     # fear -> sad, angry
+    4: [0, 2, 6]  # sad -> angry, fear, neutral
+    6: [4]        # neutral -> sad
+
+  # SigLIP 2 Model Configuration
+  clip_model_name: "google/siglip2-base-patch16-224"
+  clip_embedding_dim: 768
+  clip_prototypes_path: "pretrained/siglip2_text_prototypes_7emotions_ensemble_discriminative.npy"
+  semantic_logit_scale: 20.0
+
+  clip_semantic:
+    enabled: true
+    multi_prototype: true
+    use_au_region_routed: true
+    num_prototypes_per_class: 5
+    clip_model_name: "google/siglip2-base-patch16-224"
+    clip_embedding_dim: 768
+    clip_prototypes_path: "pretrained/siglip2_text_prototypes_7emotions_ensemble_discriminative.npy"
+    semantic_logit_scale: 20.0
+    lambda_sem: 0.1
+    lambda_hard: 0.05
+    hard_margin: 0.15
+
+  checkpoint_path: null
+  checkpoint_strict: false
+  classifier_dropout1: 0.35
+  classifier_dropout2: 0.0
+  ortho_loss_weight: 0.0
+
+  use_cnn_aux_loss: false
+  use_cnn_aux_logits: false
+  cnn_aux_loss_weight: 0.0
+
+  attention_logit_weight: 1.0
+  cnn_aux_logit_weight: 0.0
+  logit_fusion: "single_head"
+  finetune_logit_fusion: "single_head"
+
+  freeze_backbone_epochs: 4
+  unfreeze_backbone: true
+  freeze_unfrozen_batchnorm: true
+
+stage_transition:
+  enable_2stage_switching: false
+
+training:
+  epochs: 60
+  patience: 15
+  warmup_epochs: 5
+  loss: "cross_entropy"
+  label_smoothing: 0.10
+  optimizer: "sam"
+  base_optimizer: "adamw"
+  sam_rho: 0.03
+  sam_adaptive: false
+  lr: 0.0003
+  finetune_lr: 0.0003
+  visual_extractor_lr: 0.00003
+  weight_decay: 0.035
+  scheduler: "cosine"
+  grad_clip_norm: 1.0
+  skip_nonfinite_batches: true
+  monitor: "val_accuracy"
+  resume: false
+  best_checkpoint_start_epoch: 1
+  periodic_checkpoint_interval: 10
+  progress_interval: 100
+
+paths:
+  output_dir: "outputs/papers/convnext_base_ms1m_au_routed_siglip2_confusion"
+  logs_dir: "logs"
