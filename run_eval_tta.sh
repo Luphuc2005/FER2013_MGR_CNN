@@ -14,7 +14,8 @@ export NVIDIA_LIB=$ROOT/fer2013_env/lib/python3.9/site-packages/nvidia
 export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVIDIA_LIB/cudnn/lib:$NVIDIA_LIB/cufft/lib:$NVIDIA_LIB/curand/lib:$NVIDIA_LIB/cusolver/lib:$NVIDIA_LIB/cusparse/lib:${LD_LIBRARY_PATH:-}"
 
 echo "============================================================"
-echo " Running TTA Evaluation for: $CONFIG"
+echo " Running TTA Weight Sweep Grid Search (0.0 to 1.0)"
+echo " Config: $CONFIG"
 echo "============================================================"
 
-"$FER_PY" evaluate.py --config "$CONFIG" --split test --tta-hflip
+"$FER_PY" sweep_tta_weights.py --config "$CONFIG" --step 0.05

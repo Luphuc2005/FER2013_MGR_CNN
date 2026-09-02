@@ -661,10 +661,10 @@ def evaluate_dataset(
     w_flip = float(flip_weight if flip_weight is not None else tta_cfg.get("flip_weight", 0.5))
 
     if use_tta:
-        if abs((w_orig + w_flip) - 1.0) > 1e-5:
-            raise ValueError(
-                f"[TTA ERROR] TTA weights must sum to 1.0, got original_weight={w_orig}, flip_weight={w_flip} (sum={w_orig+w_flip:.4f})"
-            )
+        total_w = w_orig + w_flip
+        if total_w > 0 and abs(total_w - 1.0) > 1e-5:
+            w_orig = w_orig / total_w
+            w_flip = w_flip / total_w
         print(f"[TTA] Horizontal Flip: ENABLED", flush=True)
         print(f"[TTA] Original weight: {w_orig:.2f}", flush=True)
         print(f"[TTA] Flip weight:     {w_flip:.2f}", flush=True)
