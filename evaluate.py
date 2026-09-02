@@ -8,8 +8,7 @@ import tensorflow as tf
 from config import load_config
 from datasets.fer2013 import build_datasets
 from metrics.classification import save_metrics
-from models import build_model
-from train import configure_gpus, configure_tensorflow_runtime, evaluate_dataset
+from train import build_model, configure_gpus, configure_tensorflow_runtime, evaluate_dataset
 
 
 def parse_args():
