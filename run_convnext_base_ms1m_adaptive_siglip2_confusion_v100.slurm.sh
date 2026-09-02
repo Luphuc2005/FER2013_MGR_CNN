@@ -44,9 +44,25 @@ nvidia-smi
 export NVIDIA_LIB=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/lib/python3.9/site-packages/nvidia
 export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVIDIA_LIB/cudnn/lib:$NVIDIA_LIB/cufft/lib:$NVIDIA_LIB/curand/lib:$NVIDIA_LIB/cusolver/lib:$NVIDIA_LIB/cusparse/lib:${LD_LIBRARY_PATH:-}"
 
+# 1. Train Model
 "$FER_PY" -u train.py --config "$CONFIG"
 
+# 2. Automated TTA Sweep on Best Accuracy Checkpoint
 echo "============================================================"
-echo " FER2013 ConvNeXt-Base Adaptive SigLIP 2 Training Completed"
+echo " Running Automated TTA Sweep on Best Accuracy Checkpoint..."
+echo "============================================================"
+"$FER_PY" -u sweep_tta_weights.py --config "$CONFIG" --step 0.05 || true
+
+# 3. Automated TTA Sweep on Best Loss Checkpoint
+echo "============================================================"
+echo " Running Automated TTA Sweep on Best Loss Checkpoint..."
+echo "============================================================"
+BEST_LOSS_CKPT=$(ls -d $ROOT/outputs/papers/siglip2-confusion/checkpoints/best_loss/ckpt-* 2>/dev/null | tail -n 1 || true)
+if [ -n "$BEST_LOSS_CKPT" ]; then
+    "$FER_PY" -u sweep_tta_weights.py --config "$CONFIG" --checkpoint "$BEST_LOSS_CKPT" --step 0.05 || true
+fi
+
+echo "============================================================"
+echo " FER2013 SigLIP 2 Pipeline Completed (Training + TTA Sweeps)"
 echo " End: $(date)"
 echo "============================================================"

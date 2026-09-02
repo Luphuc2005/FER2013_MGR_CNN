@@ -913,6 +913,11 @@ def main() -> int:
             directory=str(checkpoint_root / "best"),
             max_to_keep=1,
         )
+        best_loss_manager = tf.train.CheckpointManager(
+            checkpoint,
+            directory=str(checkpoint_root / "best_loss"),
+            max_to_keep=1,
+        )
         periodic_manager = tf.train.CheckpointManager(
             checkpoint,
             directory=str(checkpoint_root / "periodic"),
@@ -976,6 +981,7 @@ def main() -> int:
         "cooldown_remaining": 0,
         "snapshot": None,
     }
+    best_val_loss_tracked = float("inf")
     for epoch in range(start_epoch, int(cfg["training"]["epochs"])):
         epoch_start_time = time.time()
         train_backbone = bool(cfg["model"].get("unfreeze_backbone", True)) and epoch >= freeze_epochs
@@ -1123,6 +1129,15 @@ def main() -> int:
                 f"{best_checkpoint_start_epoch}",
                 flush=True,
             )
+        val_loss_val = float(val_metrics['loss'])
+        val_acc_val = float(val_metrics['accuracy'])
+        if checkpoint_eligible and val_loss_val < best_val_loss_tracked:
+            best_val_loss_tracked = val_loss_val
+            print(
+                f"[INFO] Save best_loss at ep {epoch+1}, val_loss: {val_loss_val:.4f}, val_accuracy: {val_acc_val:.4f}",
+                flush=True,
+            )
+            best_loss_manager.save(checkpoint_number=epoch + 1)
         ckpt_epoch.assign(epoch + 1)
         print(f"[INFO] Epoch {epoch+1}: saving last checkpoint", flush=True)
         last_manager.save(checkpoint_number=epoch + 1)

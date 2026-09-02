@@ -25,8 +25,8 @@ runtime:
 tta:
   enabled: true
   hflip: true
-  original_weight: 0.5
-  flip_weight: 0.5
+  original_weight: 0.40
+  flip_weight: 0.60
 
 data:
   data_path: "data/fer13-split"
