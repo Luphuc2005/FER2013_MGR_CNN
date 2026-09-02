@@ -150,5 +150,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/papers/convnext_base_ms1m_adaptive_siglip2_confusion"
+  output_dir: "outputs/papers/siglip2-confusion"
   logs_dir: "logs"

@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT=/home/ptbao/projects/FER2013_MGR_CNN
 cd "$ROOT"
 
-mkdir -p logs outputs/papers/convnext_base_ms1m_adaptive_siglip2_confusion
+mkdir -p logs outputs/papers/siglip2-confusion
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
@@ -33,7 +33,7 @@ echo "Start: $(date)"
 echo "ROOT=$ROOT"
 echo "FER_PY=$FER_PY"
 echo "CONFIG=$CONFIG"
-echo "Output: outputs/papers/convnext_base_ms1m_adaptive_siglip2_confusion"
+echo "Output: outputs/papers/siglip2-confusion"
 echo "============================================================"
 
 nvidia-smi
