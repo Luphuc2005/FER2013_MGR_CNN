@@ -39,10 +39,10 @@ def resolve_tta_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     flip_w = float(tta_cfg.get("flip_weight", 0.5))
 
     if enabled and hflip:
-        if abs((orig_w + flip_w) - 1.0) > 1e-5:
-            raise ValueError(
-                f"[TTA ERROR] TTA weights must sum to 1.0, got original_weight={orig_w}, flip_weight={flip_w} (sum={orig_w+flip_w:.4f})"
-            )
+        total_w = orig_w + flip_w
+        if total_w > 0 and abs(total_w - 1.0) > 1e-5:
+            orig_w = orig_w / total_w
+            flip_w = flip_w / total_w
 
     resolved = {
         "enabled": enabled,
