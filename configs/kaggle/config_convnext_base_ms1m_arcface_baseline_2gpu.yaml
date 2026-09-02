@@ -21,7 +21,7 @@ runtime:
   tf_data_private_threadpool_size: 4
   tf_data_deterministic: false
   prefetch_buffer: 2
-  distributed_eval: false
+  distributed_eval: true
   eval_tta_hflip: true
   train_val_tta_hflip: true
 

@@ -804,16 +804,15 @@ def evaluate_dataset(
 def main() -> int:
     args = parse_args()
     cfg = load_config(args.config)
+    configure_gpus(cfg)
     configure_tensorflow_runtime(cfg)
     tf.keras.utils.set_random_seed(int(cfg["seed"]["random_seed"]))
-    configure_gpus(cfg)
-    visible_gpu_count = len(tf.config.list_logical_devices("GPU"))
-    strategy_devices = (
-        [f"/GPU:{i}" for i in range(visible_gpu_count)]
-        if visible_gpu_count > 0
-        else ["/CPU:0"]
-    )
-    strategy = tf.distribute.MirroredStrategy(devices=strategy_devices)
+    visible_gpus = tf.config.get_visible_devices("GPU")
+    if visible_gpus:
+        strategy_devices = [f"/GPU:{i}" for i in range(len(visible_gpus))]
+        strategy = tf.distribute.MirroredStrategy(devices=strategy_devices)
+    else:
+        strategy = tf.distribute.MirroredStrategy(devices=["/CPU:0"])
     print(f"TensorFlow {tf.__version__}")
     print(f"Replicas in sync: {strategy.num_replicas_in_sync}")
 
