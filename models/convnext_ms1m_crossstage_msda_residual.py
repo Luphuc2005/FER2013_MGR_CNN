@@ -153,13 +153,15 @@ class SpatialAttention(tf.keras.layers.Layer):
             kernel_initializer="he_normal",
             name="spatial_7x7",
         )
+        self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="spatial_ln")
 
     def call(self, f_ms, training=False):
         x = tf.cast(f_ms, tf.float32)
         avg_map = tf.reduce_mean(x, axis=-1, keepdims=True)
         max_map = tf.reduce_max(x, axis=-1, keepdims=True)
         pooled = tf.concat([avg_map, max_map], axis=-1)
-        w_s = tf.sigmoid(self.conv(pooled, training=training))
+        spatial_logits = self.norm(self.conv(pooled, training=training))
+        w_s = tf.sigmoid(spatial_logits)
         w_s = tf.cast(w_s, f_ms.dtype)
         return f_ms * w_s, w_s
 

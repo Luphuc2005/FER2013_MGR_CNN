@@ -2,7 +2,7 @@ seed:
   random_seed: 42
 
 source:
-  note: "SOTA V3 MSDA Residual Config: Mask-Free ConvNeXt-B MS1M with 4-Branch Dilation (1,2,4), Supervised Contrastive Loss (SupCon), Aux Supervision Head, Frozen Stage 1&2, and SAM Optimizer."
+  note: "SOTA V3 Ultimate MSDA Residual Config: Mask-Free ConvNeXt-B MS1M with 4-Branch Dilation (1,2,4), LayerNorm Spatial Attention, Full Backbone Fine-tuning (Unfrozen Stage 1&2), Initial Alpha 0.05, SupCon Loss, Aux Supervision Head, and SAM Optimizer."
 
 runtime:
   gpu_ids: [0]
@@ -67,7 +67,7 @@ model:
   classifier_dropout: 0.35
 
   # SOTA V3 Advanced Supervision & Architecture
-  freeze_stage12: true                          # Permanently freeze Stage 1 & Stage 2 of ConvNeXt backbone
+  freeze_stage12: false                         # Unfreeze Stage 1 & Stage 2 after warmup for max adaptation
   freeze_backbone_epochs: 4
   unfreeze_backbone: true
   
@@ -83,7 +83,7 @@ cross_stage_msda:
   channel_reduction: 16
   spatial_kernel_size: 7
   alpha_max: 0.20
-  initial_alpha: 0.005
+  initial_alpha: 0.05
 
 training:
   epochs: 60
