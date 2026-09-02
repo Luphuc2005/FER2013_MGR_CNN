@@ -261,6 +261,39 @@ class BoundedResidualAlpha(tf.keras.layers.Layer):
         return tf.ones([tf.shape(reference)[0], 1, 1, 1], dtype=tf.float32) * alpha
 
 
+class ArcFaceCosineClassifier(tf.keras.layers.Layer):
+    """Normalized Cosine Margin Classifier Head for Face & Expression Prototypes."""
+    def __init__(self, num_classes: int = 7, scale: float = 30.0, margin: float = 0.20, name: Optional[str] = None):
+        super().__init__(name=name)
+        self.num_classes = int(num_classes)
+        self.scale = float(scale)
+        self.margin = float(margin)
+
+    def build(self, input_shape):
+        feat_dim = int(input_shape[-1])
+        self.W = self.add_weight(
+            name="weight",
+            shape=(feat_dim, self.num_classes),
+            initializer=tf.keras.initializers.GlorotUniform(),
+            trainable=True
+        )
+
+    def call(self, features, labels=None, training=False):
+        features_f32 = tf.cast(features, tf.float32)
+        features_norm = tf.math.l2_normalize(features_f32, axis=-1)
+        w_norm = tf.math.l2_normalize(tf.cast(self.W, tf.float32), axis=0)
+        
+        cos_theta = tf.matmul(features_norm, w_norm)
+        cos_theta = tf.clip_by_value(cos_theta, -1.0 + 1e-7, 1.0 - 1e-7)
+        
+        if training and labels is not None:
+            labels_one_hot = tf.one_hot(tf.cast(labels, tf.int32), depth=self.num_classes)
+            target_cosine = cos_theta - self.margin
+            cos_theta = tf.where(labels_one_hot > 0.5, target_cosine, cos_theta)
+            
+        return cos_theta * self.scale
+
+
 class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
     """ConvNeXt-B MS1M backbone plus bounded MSDA S3 correction into S4."""
 
@@ -308,6 +341,14 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
             kernel_initializer="he_normal",
             name="aux_classifier",
         )
+        self.use_arcface = bool(model_cfg.get("use_arcface", True))
+        if self.use_arcface:
+            self.arcface_head = ArcFaceCosineClassifier(
+                num_classes=self.num_classes,
+                scale=float(model_cfg.get("arcface_scale", 30.0)),
+                margin=float(model_cfg.get("arcface_margin", 0.20)),
+                name="arcface_cosine_head",
+            )
 
     @property
     def backbone(self):
@@ -347,6 +388,11 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
     def bridge_variables(self) -> List[tf.Variable]:
         return list(self.s2_bridge.trainable_variables)
 
+    def arcface_variables(self) -> List[tf.Variable]:
+        if hasattr(self, "arcface_head") and self.use_arcface:
+            return list(self.arcface_head.trainable_variables)
+        return []
+
     def new_module_variables(self) -> List[tf.Variable]:
         variables: List[tf.Variable] = []
         for module_vars in (
@@ -357,6 +403,7 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
             self.fusion_variables(),
             self.projection_variables(),
             self.alpha_variables(),
+            self.arcface_variables(),
         ):
             variables.extend(module_vars)
         return variables
@@ -393,8 +440,14 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
         print(f"  total_params: {total_params:,}", flush=True)
         print(f"  trainable_params: {trainable_params:,}", flush=True)
 
-    def call(self, inputs, training=False, return_endpoints: bool = False, force_alpha_zero: bool = False):
-        image = inputs["image"] if isinstance(inputs, dict) else inputs
+    def call(self, inputs, training=False, return_endpoints: bool = False, force_alpha_zero: bool = False, labels=None):
+        if isinstance(inputs, dict):
+            image = inputs.get("image", inputs)
+            if labels is None:
+                labels = inputs.get("label", None)
+        else:
+            image = inputs
+
         endpoints = self.rgb_baseline.backbone(image, training=training, return_endpoints=True)
         s1 = endpoints["stage1"]
         s2 = endpoints["stage2"]
@@ -414,7 +467,10 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
 
         pooled = self.rgb_baseline.gap(g4)
         dropped = self.rgb_baseline.head_dropout(pooled, training=training)
-        logits = tf.cast(self.rgb_baseline.classifier(dropped), tf.float32)
+        if hasattr(self, "arcface_head") and self.use_arcface:
+            logits = tf.cast(self.arcface_head(dropped, labels=labels, training=training), tf.float32)
+        else:
+            logits = tf.cast(self.rgb_baseline.classifier(dropped), tf.float32)
 
         baseline_pooled = self.rgb_baseline.gap(tf.cast(s4, tf.float32))
         baseline_dropped = self.rgb_baseline.head_dropout(baseline_pooled, training=False)

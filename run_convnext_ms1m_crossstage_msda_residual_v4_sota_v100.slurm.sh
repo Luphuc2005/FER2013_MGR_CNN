@@ -34,7 +34,7 @@ export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVI
 
 echo "============================================================"
 echo " FER2013 ConvNeXt-B MS1M MSDA Residual V4 SOTA (Mask-Free)"
-echo " Stage 2 Micro-Texture Bridge + 4-Branch Dilation (1,2,4)"
+echo " Stage 2 Micro-Texture Bridge + ArcFace Cosine Head (s=30, m=0.20)"
 echo " Full Backbone Fine-tuning (Unfrozen Stage 1-4) | Initial Alpha 0.05"
 echo " Multi-Scale Dual Attention (Spatial LN + Channel) + SupCon + SAM"
 echo "============================================================"

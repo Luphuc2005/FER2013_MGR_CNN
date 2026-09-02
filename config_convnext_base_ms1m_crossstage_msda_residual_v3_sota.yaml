@@ -78,6 +78,10 @@ model:
   supcon_loss_weight: 0.10
   supcon_temperature: 0.10
 
+  use_arcface: true                             # ArcFace Cosine Margin Classifier Head
+  arcface_scale: 30.0
+  arcface_margin: 0.20
+
 cross_stage_msda:
   branch_dim: 256
   channel_reduction: 16
