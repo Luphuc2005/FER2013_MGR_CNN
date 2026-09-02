@@ -88,7 +88,7 @@ model:
   freeze_backbone_epochs: 4
   unfreeze_backbone: true
   freeze_unfrozen_batchnorm: true
-  freeze_stage1_2: true
+  # freeze_stage1_2: true
   ablation: "cnn_only"
 
 stage_transition:
