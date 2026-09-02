@@ -928,6 +928,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 endpoints["visual_projector_lower"] = v_lower_proj
                 endpoints["visual_projector_au"] = v_au_proj
 
+                # Match dtype for mixed precision (float16 vs float32) compatibility
+                t_norm = tf.cast(t_norm, dtype=v_global_norm.dtype)
+
                 # Spatial-Semantic Routing to 5 Prototypes:
                 # P0 (Emotion): Global -> t_norm[:,0,:]
                 # P1 (AU-level): AU-region -> t_norm[:,1,:]
@@ -944,6 +947,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             else:
                 v_proj = self.visual_projector(pooled, training=training)
                 v_norm = tf.math.l2_normalize(v_proj, axis=-1)
+                t_norm = tf.cast(t_norm, dtype=v_norm.dtype)
                 endpoints["visual_projector"] = v_proj
                 raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
 
