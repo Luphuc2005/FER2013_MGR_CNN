@@ -129,7 +129,7 @@ stage_transition:
 training:
   epochs: 80
   patience: 20
-  warmup_epochs: 5
+  warmup_epochs: 8
   loss: "cross_entropy"
   label_smoothing: 0.05
   optimizer: "sam"
