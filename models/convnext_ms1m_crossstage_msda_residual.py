@@ -79,6 +79,35 @@ class DepthwiseSeparableBranch(tf.keras.layers.Layer):
         return self.act(x)
 
 
+class Stage2ToStage3Bridge(tf.keras.layers.Layer):
+    """Downsamples Stage 2 micro-textures (28x28x256) and fuses with Stage 3 (14x14x512)."""
+    def __init__(self, out_dim: int = 512, name: Optional[str] = None):
+        super().__init__(name=name)
+        self.s2_conv = tf.keras.layers.Conv2D(
+            256,
+            kernel_size=3,
+            strides=2,
+            padding="same",
+            kernel_initializer="he_normal",
+            name="s2_downsample_conv"
+        )
+        self.s2_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="s2_ln")
+        self.fuse_conv = tf.keras.layers.Conv2D(
+            out_dim,
+            kernel_size=1,
+            padding="same",
+            kernel_initializer="he_normal",
+            name="s2_s3_fusion_proj"
+        )
+        self.fuse_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="fuse_ln")
+
+    def call(self, s2, s3, training=False):
+        s2_proj = tf.nn.gelu(self.s2_norm(self.s2_conv(s2, training=training)))
+        f_concat = tf.concat([s3, s2_proj], axis=-1)
+        f_fused = tf.nn.gelu(self.fuse_norm(self.fuse_conv(f_concat, training=training)))
+        return f_fused
+
+
 class S3MultiscaleRefinement(tf.keras.layers.Layer):
     """Four lightweight parallel S3 branches (1x1, dw_d1, dw_d2, dw_d4) producing F_ms [B,14,14,512]."""
 
@@ -251,6 +280,7 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
         baseline_cfg["model"].setdefault("classifier_dropout1", 0.35)
         self.rgb_baseline = ConvNeXtBaseFaceFERBaseline(baseline_cfg)
 
+        self.s2_bridge = Stage2ToStage3Bridge(out_dim=512, name="s2_microtexture_bridge")
         self.ms_refine = S3MultiscaleRefinement(
             branch_dim=int(msda_cfg.get("branch_dim", 256)),
             out_dim=512,
@@ -314,9 +344,13 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
     def alpha_variables(self) -> List[tf.Variable]:
         return list(self.alpha_gate.trainable_variables)
 
+    def bridge_variables(self) -> List[tf.Variable]:
+        return list(self.s2_bridge.trainable_variables)
+
     def new_module_variables(self) -> List[tf.Variable]:
         variables: List[tf.Variable] = []
         for module_vars in (
+            self.bridge_variables(),
             self.multiscale_variables(),
             self.channel_attention_variables(),
             self.spatial_attention_variables(),
@@ -367,7 +401,8 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
         s3 = endpoints["stage3"]
         s4 = endpoints["stage4"]
 
-        f_ms, branch_a, branch_b, branch_c, branch_d, f_concat = self.ms_refine(s3, training=training)
+        s3_fused = self.s2_bridge(s2, s3, training=training)
+        f_ms, branch_a, branch_b, branch_c, branch_d, f_concat = self.ms_refine(s3_fused, training=training)
         f_ca, w_c = self.channel_attention(f_ms, training=training)
         f_sa, w_s = self.spatial_attention(f_ms, training=training)
         f_da, fusion_weights = self.dual_fusion(f_ca, f_sa, training=training)
