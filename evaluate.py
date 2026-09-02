@@ -8,7 +8,7 @@ import tensorflow as tf
 from config import load_config
 from datasets.fer2013 import build_datasets
 from metrics.classification import save_metrics
-from models import MGRConvNeXtFER
+from models import build_model
 from train import configure_gpus, configure_tensorflow_runtime, evaluate_dataset
 
 
@@ -35,10 +35,9 @@ def main() -> int:
     _, val_ds, test_ds = build_datasets(cfg, replicas=strategy.num_replicas_in_sync)
     dataset = val_ds if args.split == "val" else test_ds
     with strategy.scope():
-        model = MGRConvNeXtFER(cfg)
+        model = build_model(cfg)
         dummy_image = tf.zeros([1, cfg["data"]["image_size"], cfg["data"]["image_size"], cfg["data"]["channels"]], tf.float32)
-        dummy_mask = tf.zeros([1, cfg["model"]["token_grid_size"], cfg["model"]["token_grid_size"], cfg["model"]["num_regions"]], tf.float32)
-        model({"image": dummy_image, "mask": dummy_mask}, training=False)
+        model({"image": dummy_image}, training=False)
         ckpt = tf.train.Checkpoint(model=model)
         checkpoint_path = args.checkpoint
         if checkpoint_path is None:

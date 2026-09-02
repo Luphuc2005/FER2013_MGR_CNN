@@ -19,14 +19,14 @@ runtime:
   tf_data_deterministic: false
   prefetch_buffer: 2
   distributed_eval: false
-  eval_tta_hflip: false
+  eval_tta_hflip: true
   train_val_tta_hflip: false
 
 tta:
-  enabled: false
-  hflip: false
+  enabled: true
+  hflip: true
   original_weight: 1.0
-  flip_weight: 0.0
+  flip_weight: 1.0
 
 data:
   data_path: "data/fer13-split"
