@@ -29,7 +29,7 @@ tta:
   flip_weight: 0.60
 
 data:
-  data_path: "/home/ptbao/projects/FER2013_MGR_CNN/data/raf_db"
+  data_path: "/home/ptbao/projects/FER2013_MGR_CNN/data/rafdb"
   mask_dir: null
   num_classes: 7
   image_size: 112

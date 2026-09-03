@@ -127,6 +127,63 @@ def _resolve_mask_split_dir(mask_root: Path, split: str, sample_ids: np.ndarray)
     return best_dir
 
 
+def _collect_records_from_folder(data_dir: Path, split: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    split_dir = data_dir / split
+    if not split_dir.exists() or not split_dir.is_dir():
+        raise FileNotFoundError(f"Neither {split}.csv nor directory {split_dir} exists in {data_dir}")
+
+    emotion_map = {
+        "angry": 0, "disgust": 1, "fear": 2, "happy": 3, "sad": 4, "surprise": 5, "neutral": 6,
+        "happiness": 3, "sadness": 4, "anger": 0,
+        "0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6
+    }
+    rafdb_raw_map = {"1": 5, "2": 2, "3": 1, "4": 3, "5": 4, "6": 0, "7": 6}
+    valid_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".npy"}
+
+    img_paths, labels = [], []
+    subdirs = [p for p in split_dir.iterdir() if p.is_dir()]
+    if not subdirs:
+        subdirs = [split_dir]
+
+    for sdir in sorted(subdirs):
+        folder_name = sdir.name.lower().strip()
+        label_idx = None
+        prefix = folder_name.split("_")[0]
+        if prefix in emotion_map:
+            label_idx = emotion_map[prefix]
+        elif folder_name in emotion_map:
+            label_idx = emotion_map[folder_name]
+        elif prefix.isdigit() and prefix in rafdb_raw_map and len(subdirs) == 7 and "7" in [s.name.split("_")[0] for s in subdirs]:
+            label_idx = rafdb_raw_map[prefix]
+
+        for img_p in sorted(sdir.rglob("*")):
+            if img_p.is_file() and img_p.suffix.lower() in valid_exts:
+                curr_label = label_idx
+                if curr_label is None:
+                    p_name = img_p.parent.name.lower().split("_")[0]
+                    curr_label = emotion_map.get(p_name, 0)
+                try:
+                    rel_p = str(img_p.relative_to(Path(__file__).resolve().parents[1]))
+                except ValueError:
+                    rel_p = str(img_p)
+                img_paths.append(rel_p)
+                labels.append(curr_label)
+
+    if not img_paths:
+        raise FileNotFoundError(f"No image files found in directory {split_dir}")
+
+    csv_path = data_dir / f"{split}.csv"
+    try:
+        if pd is not None:
+            df_gen = pd.DataFrame({"image_path": img_paths, "label": labels})
+            df_gen.to_csv(csv_path, index=False)
+            print(f"[INFO] Auto-generated and saved {csv_path} ({len(df_gen)} samples).")
+    except Exception as e:
+        print(f"[WARNING] Could not save auto-generated {csv_path}: {e}")
+
+    return np.array(img_paths, dtype=object), np.array(labels, dtype=np.int64), np.arange(len(img_paths), dtype=np.int64)
+
+
 def collect_split_records(
     data_dir,
     split: str,
@@ -142,30 +199,33 @@ def collect_split_records(
 ) -> SplitRecords:
     data_dir = _resolve_split_csv_dir(Path(data_dir))
     csv_path = data_dir / f"{split}.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Missing split CSV: {csv_path}")
-    if pd is not None:
-        df = pd.read_csv(csv_path)
-        label_col = next((c for c in ("emotion", "label", "target", "class", "y") if c in df.columns), df.columns[0])
-        pixel_col = next((c for c in ("pixels", "image_path", "filepath", "path", "image", "file") if c in df.columns), df.columns[1])
-        labels = df[label_col].astype("int64").to_numpy()
-        pixels = df[pixel_col].astype(str).to_numpy()
-        sample_ids = np.arange(len(df), dtype=np.int64)
+    if csv_path.exists():
+        if pd is not None:
+            df = pd.read_csv(csv_path)
+            label_col = next((c for c in ("emotion", "label", "target", "class", "y") if c in df.columns), df.columns[0])
+            pixel_col = next((c for c in ("pixels", "image_path", "filepath", "path", "image", "file") if c in df.columns), df.columns[1])
+            labels = df[label_col].astype("int64").to_numpy()
+            pixels = df[pixel_col].astype(str).to_numpy()
+            sample_ids = np.arange(len(df), dtype=np.int64)
+        else:
+            import csv
+            labels_list = []
+            pixels_list = []
+            with csv_path.open("r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                fieldnames = reader.fieldnames or []
+                lbl_key = next((c for c in ("emotion", "label", "target", "class", "y") if c in fieldnames), fieldnames[0])
+                pix_key = next((c for c in ("pixels", "image_path", "filepath", "path", "image", "file") if c in fieldnames), fieldnames[1])
+                for row in reader:
+                    labels_list.append(int(row[lbl_key]))
+                    pixels_list.append(str(row[pix_key]))
+            labels = np.array(labels_list, dtype=np.int64)
+            pixels = np.array(pixels_list, dtype=object)
+            sample_ids = np.arange(len(labels), dtype=np.int64)
+    elif (data_dir / split).is_dir():
+        pixels, labels, sample_ids = _collect_records_from_folder(data_dir, split)
     else:
-        import csv
-        labels_list = []
-        pixels_list = []
-        with csv_path.open("r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames or []
-            lbl_key = next((c for c in ("emotion", "label", "target", "class", "y") if c in fieldnames), fieldnames[0])
-            pix_key = next((c for c in ("pixels", "image_path", "filepath", "path", "image", "file") if c in fieldnames), fieldnames[1])
-            for row in reader:
-                labels_list.append(int(row[lbl_key]))
-                pixels_list.append(str(row[pix_key]))
-        labels = np.array(labels_list, dtype=np.int64)
-        pixels = np.array(pixels_list, dtype=object)
-        sample_ids = np.arange(len(labels), dtype=np.int64)
+        raise FileNotFoundError(f"Missing split CSV or directory for split '{split}' in {data_dir}")
     if split == "train" and use_clean_filter:
         bad = _load_bad_indices(_resolve_path(bad_row_indices_path))
         if bad:

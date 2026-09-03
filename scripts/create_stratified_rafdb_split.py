@@ -18,12 +18,14 @@ from sklearn.model_selection import train_test_split
 
 def main():
     parser = argparse.ArgumentParser(description="Create clean stratified split for RAF-DB.")
-    parser.add_argument("--data_dir", type=str, default="data/raf_db", help="Path to RAF-DB dataset directory containing CSV files or folders.")
+    parser.add_argument("--data_dir", type=str, default="data/rafdb", help="Path to RAF-DB dataset directory containing CSV files or folders.")
     parser.add_argument("--val_ratio", type=float, default=0.10, help="Ratio of validation set (default 0.10).")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
+    if not data_dir.exists() and Path("data/raf_db").exists():
+        data_dir = Path("data/raf_db")
     print("=" * 60)
     print(f" Generating Stratified RAF-DB Split in: {data_dir}")
     print("=" * 60)

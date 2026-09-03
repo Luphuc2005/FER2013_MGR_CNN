@@ -33,7 +33,7 @@ echo "Start: $(date)"
 echo "ROOT=$ROOT"
 echo "FER_PY=$FER_PY"
 echo "CONFIG=$CONFIG"
-echo "Dataset: /home/ptbao/projects/FER2013_MGR_CNN/data/raf_db"
+echo "Dataset: /home/ptbao/projects/FER2013_MGR_CNN/data/rafdb"
 echo "Output: outputs/papers/rafdb_adaptive_siglip2_confusion"
 echo "============================================================"
 

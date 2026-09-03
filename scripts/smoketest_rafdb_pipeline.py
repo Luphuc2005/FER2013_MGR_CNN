@@ -37,12 +37,13 @@ def main():
     print(f"[1/5] Checking RAF-DB dataset directory: {data_dir}")
     if not data_dir.exists():
         print(f"      [WARNING] Directory {data_dir} not found locally.")
-        print("      Attempting local fallback check at data/raf_db...")
-        data_dir = Path("data/raf_db")
-        if data_dir.exists():
-            cfg["data"]["data_path"] = str(data_dir)
-            print(f"      [OK] Local fallback dataset directory found: {data_dir}")
-        else:
+        for fallback in [Path("data/rafdb"), Path("data/raf_db")]:
+            if fallback.exists():
+                data_dir = fallback
+                cfg["data"]["data_path"] = str(data_dir)
+                print(f"      [OK] Local fallback dataset directory found: {data_dir}")
+                break
+        if not data_dir.exists():
             print("      [INFO] Testing with simulated dataset structure for offline validation.")
             
     # Check dataset split records if files exist
