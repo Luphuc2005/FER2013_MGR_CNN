@@ -410,9 +410,31 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
 
     def _resolve_weight_path(self, weight_path: str) -> Path:
         resolved = Path(weight_path)
+        if resolved.exists():
+            return resolved
         if not resolved.is_absolute():
-            resolved = Path(__file__).resolve().parents[1] / weight_path
-        return resolved
+            resolved_rel = Path(__file__).resolve().parents[1] / weight_path
+            if resolved_rel.exists():
+                return resolved_rel
+
+        # Kaggle & environment auto-resolution search
+        filename = Path(weight_path).name
+        search_dirs = [
+            Path("/kaggle/input"),
+            Path("/kaggle/working"),
+            Path(__file__).resolve().parents[1] / "pretrained",
+        ]
+        for search_dir in search_dirs:
+            if search_dir.exists():
+                try:
+                    for found_file in search_dir.rglob(filename):
+                        if found_file.is_file():
+                            print(f"[ConvNeXtBaseFace] Auto-resolved pretrained weight path on Kaggle: {found_file}", flush=True)
+                            return found_file
+                except Exception:
+                    pass
+
+        return Path(__file__).resolve().parents[1] / weight_path
 
     def _build_variables(self) -> None:
         dummy = tf.zeros([1, self.input_size, self.input_size, self.channels], dtype=tf.float32)
