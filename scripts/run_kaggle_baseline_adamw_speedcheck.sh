@@ -12,12 +12,12 @@ MGR_MIN_GPUS=2 \
 MGR_OUTPUT_DIR=outputs/speedcheck_adamw_1gpu \
 python -u train.py --config "$CONFIG" 2>&1 | tee "$LOG_DIR/adamw_1gpu.log"
 
-echo "[SPEEDCHECK] 2x T4 AdamW full-backbone run"
-MGR_GPU_IDS=0,1 \
-MGR_REQUIRE_TWO_GPUS=1 \
-MGR_MIN_GPUS=2 \
-MGR_OUTPUT_DIR=outputs/speedcheck_adamw_2gpu \
-python -u train.py --config "$CONFIG" 2>&1 | tee "$LOG_DIR/adamw_2gpu.log"
+# echo "[SPEEDCHECK] 2x T4 AdamW full-backbone run"
+# MGR_GPU_IDS=0,1 \
+# MGR_REQUIRE_TWO_GPUS=1 \
+# MGR_MIN_GPUS=2 \
+# MGR_OUTPUT_DIR=outputs/speedcheck_adamw_2gpu \
+# python -u train.py --config "$CONFIG" 2>&1 | tee "$LOG_DIR/adamw_2gpu.log"
 
 echo "[SPEEDCHECK] Summary files:"
 echo "  outputs/speedcheck_adamw_1gpu/training_history.csv"
