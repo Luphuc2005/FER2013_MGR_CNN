@@ -36,20 +36,34 @@ def main():
     # Determine source file for training split
     if train_full_csv.exists():
         src_csv = train_full_csv
-        print(f"[INFO] Using existing full training file: {train_full_csv}")
+        df_full = pd.read_csv(src_csv)
+        print(f"[INFO] Using existing full training file: {train_full_csv} ({len(df_full)} rows)")
+    elif train_csv.exists() and val_csv.exists():
+        df_t = pd.read_csv(train_csv)
+        df_v = pd.read_csv(val_csv)
+        df_full = pd.concat([df_t, df_v], ignore_index=True)
+        print(f"[INFO] Combined train.csv ({len(df_t)}) + val.csv ({len(df_v)}) -> Full source ({len(df_full)} rows)")
     elif train_csv.exists():
-        src_csv = train_csv
-        print(f"[INFO] Using train.csv as source split file: {train_csv}")
+        df_full = pd.read_csv(train_csv)
+        print(f"[INFO] Using train.csv as source split file: {train_csv} ({len(df_full)} rows)")
     else:
         raise FileNotFoundError(f"Could not find train.csv or train_full.csv in {data_dir}")
-
-    df_full = pd.read_csv(src_csv)
-    print(f"[INFO] Total source training rows loaded: {len(df_full)}")
 
     # Identify label and image columns
     label_col = next((c for c in ("emotion", "label", "target", "class", "y") if c in df_full.columns), df_full.columns[0])
     pixel_col = next((c for c in ("pixels", "image_path", "filepath", "path", "image", "file") if c in df_full.columns), df_full.columns[1])
     print(f"[INFO] Detected label column: '{label_col}', image/pixel column: '{pixel_col}'")
+
+    # Deduplicate exact duplicate pixel/image entries to prevent data leakage
+    len_before = len(df_full)
+    df_full = df_full.drop_duplicates(subset=[pixel_col]).reset_index(drop=True)
+    if len(df_full) < len_before:
+        print(f"[INFO] Removed {len_before - len(df_full)} exact duplicate image/pixel rows.")
+
+    # Save backup of full clean train set
+    if not train_full_csv.exists():
+        df_full.to_csv(train_full_csv, index=False)
+        print(f"[INFO] Saved backup of full training data to: {train_full_csv}")
 
     # Perform stratified split
     df_train, df_val = train_test_split(
@@ -68,11 +82,6 @@ def main():
     overlap = train_imgs.intersection(val_imgs)
 
     assert len(overlap) == 0, f"[ERROR] Leakage detected in generated split! Overlap count: {len(overlap)}"
-
-    # Backup original full train set if not already backed up
-    if not train_full_csv.exists() and src_csv == train_csv:
-        df_full.to_csv(train_full_csv, index=False)
-        print(f"[INFO] Saved backup of full training data to: {train_full_csv}")
 
     # Save split train and val CSV files
     df_train.to_csv(train_csv, index=False)
