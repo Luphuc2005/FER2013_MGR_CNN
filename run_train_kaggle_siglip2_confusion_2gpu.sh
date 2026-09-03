@@ -29,5 +29,15 @@ echo "============================================================"
 python3 train.py --config "${CONFIG_PATH}" 2>&1 | tee -a "${TRAIN_LOG}"
 
 echo "============================================================"
-echo " Training Completed Successfully! Log saved at ${TRAIN_LOG}  "
+echo " Step 1 Completed! Log saved at ${TRAIN_LOG}                "
+echo " Step 2: Running TTA Weight Sweep Grid Search (0.00 to 1.00)..."
+echo "============================================================"
+
+SWEEP_LOG="${LOG_DIR}/sweep_tta_${STAMP}.log"
+python3 sweep_tta_weights.py --config "${CONFIG_PATH}" 2>&1 | tee -a "${SWEEP_LOG}"
+
+echo "============================================================"
+echo " Full Kaggle Pipeline Completed Successfully!               "
+echo " - Checkpoints saved in outputs directory (Top 5 Best)      "
+echo " - TTA Sweep Log: ${SWEEP_LOG}                              "
 echo "============================================================"

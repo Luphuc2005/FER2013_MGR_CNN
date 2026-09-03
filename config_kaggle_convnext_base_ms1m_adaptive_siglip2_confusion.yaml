@@ -147,6 +147,8 @@ training:
   grad_clip_norm: 1.0
   skip_nonfinite_batches: true
   monitor: "val_accuracy"
+  max_to_keep_acc: 5
+  max_to_keep_loss: 5
   resume: false
   best_checkpoint_start_epoch: 1
   periodic_checkpoint_interval: 10
