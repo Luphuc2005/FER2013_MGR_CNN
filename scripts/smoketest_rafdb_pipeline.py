@@ -59,8 +59,16 @@ def main():
         overlap_tt = train_ids.intersection(test_ids)
         print(f"      - Train/Val overlap count:  {len(overlap_tv)} (Data Leakage Check)")
         print(f"      - Train/Test overlap count: {len(overlap_tt)} (Data Leakage Check)")
-        assert len(overlap_tv) == 0, "ERROR: Data leakage detected between train and val!"
-        assert len(overlap_tt) == 0, "ERROR: Data leakage detected between train and test!"
+        if len(overlap_tv) > 0:
+            print(f"      [DEBUG] Sample overlapping Train/Val items ({min(5, len(overlap_tv))}/{len(overlap_tv)}):")
+            for item in list(overlap_tv)[:5]:
+                print(f"              * {item}")
+        if len(overlap_tt) > 0:
+            print(f"      [DEBUG] Sample overlapping Train/Test items ({min(5, len(overlap_tt))}/{len(overlap_tt)}):")
+            for item in list(overlap_tt)[:5]:
+                print(f"              * {item}")
+        assert len(overlap_tv) == 0, f"ERROR: Data leakage detected! {len(overlap_tv)} samples present in both train and val!"
+        assert len(overlap_tt) == 0, f"ERROR: Data leakage detected! {len(overlap_tt)} samples present in both train and test!"
         print("      [PASSED] No data leakage detected between splits!")
         
         # Build TF datasets
