@@ -319,10 +319,21 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             clip_sem_cfg.get("enabled", False)
             or model_cfg.get("use_semantic_branch", False)
             or model_cfg.get("use_clip_semantic", False)
-            or model_cfg.get("ablation") in ("semantic_clip", "clip_semantic", "semantic")
+            or model_cfg.get("ablation") in ("semantic_clip", "clip_semantic", "semantic", "adaptive_clip", "adaptive_clip_confusion")
         )
         self.multi_prototype = bool(
             clip_sem_cfg.get("multi_prototype", model_cfg.get("multi_prototype", False))
+            or model_cfg.get("ablation") in ("adaptive_clip", "adaptive_clip_confusion")
+        )
+        self.use_adaptive_granularity = bool(
+            clip_sem_cfg.get("use_adaptive_granularity", False)
+            or model_cfg.get("use_adaptive_granularity", False)
+            or model_cfg.get("ablation") in ("adaptive_clip", "adaptive_clip_confusion")
+        )
+        self.use_hard_semantic_loss = bool(
+            clip_sem_cfg.get("use_hard_semantic_loss", False)
+            or model_cfg.get("use_hard_semantic_loss", False)
+            or model_cfg.get("ablation") == "adaptive_clip_confusion"
         )
         self.prototype_aggregation = str(
             clip_sem_cfg.get("prototype_aggregation", model_cfg.get("prototype_aggregation", "logsumexp"))
@@ -333,8 +344,36 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         self.lambda_sem = float(
             clip_sem_cfg.get("lambda_sem", model_cfg.get("lambda_sem", 0.1))
         )
+        self.lambda_hard = float(
+            clip_sem_cfg.get("lambda_hard", model_cfg.get("lambda_hard", 0.05))
+        )
+        self.hard_margin = float(
+            clip_sem_cfg.get("hard_margin", model_cfg.get("hard_margin", 0.15))
+        )
         self.semantic_logit_scale = float(
             clip_sem_cfg.get("semantic_logit_scale", model_cfg.get("semantic_logit_scale", 20.0))
+        )
+
+        default_hard_pairs = {
+            0: [4, 2],    # angry -> sad, fear
+            2: [4, 0],    # fear -> sad, angry
+            4: [0, 2, 6], # sad -> angry, fear, neutral
+            6: [4],       # neutral -> sad
+        }
+        hard_pairs_config = model_cfg.get("hard_pairs", clip_sem_cfg.get("hard_pairs", default_hard_pairs))
+        hard_matrix_np = np.zeros((self.num_classes, self.num_classes), dtype=np.float32)
+        if hard_pairs_config:
+            for c, hard_list in hard_pairs_config.items():
+                c_int = int(c)
+                if isinstance(hard_list, (list, tuple)):
+                    for j in hard_list:
+                        hard_matrix_np[c_int, int(j)] = 1.0
+        self.hard_pairs_matrix = tf.constant(hard_matrix_np, dtype=tf.float32, name="hard_pairs_matrix")
+
+        self.use_au_region_routed = bool(
+            clip_sem_cfg.get("use_au_region_routed", False)
+            or model_cfg.get("use_au_region_routed", False)
+            or model_cfg.get("ablation") in ("au_region_routed", "adaptive_clip_confusion", "au_routed_clip")
         )
 
         if self.use_semantic_branch:
@@ -347,17 +386,58 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
             ], name="visual_semantic_projector")
 
+            if self.use_au_region_routed:
+                self.visual_projector_upper = tf.keras.Sequential([
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
+                    tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
+                    tf.keras.layers.Activation("gelu", name="gelu"),
+                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
+                ], name="visual_projector_upper")
+
+                self.visual_projector_lower = tf.keras.Sequential([
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
+                    tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
+                    tf.keras.layers.Activation("gelu", name="gelu"),
+                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
+                ], name="visual_projector_lower")
+
+                self.visual_projector_au = tf.keras.Sequential([
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
+                    tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
+                    tf.keras.layers.Activation("gelu", name="gelu"),
+                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
+                ], name="visual_projector_au")
+            else:
+                self.visual_projector_upper = None
+                self.visual_projector_lower = None
+                self.visual_projector_au = None
+
+            if self.use_adaptive_granularity:
+                self.granularity_gate = tf.keras.Sequential([
+                    tf.keras.layers.Dense(256, kernel_initializer="he_normal", name="fc1"),
+                    tf.keras.layers.Activation("gelu", name="gelu"),
+                    tf.keras.layers.Dropout(0.1, name="drop"),
+                    tf.keras.layers.Dense(5, kernel_initializer="he_normal", name="fc2"),
+                    tf.keras.layers.Activation("softmax", name="softmax"),
+                ], name="granularity_gate")
+            else:
+                self.granularity_gate = None
+
             clip_model_name = clip_sem_cfg.get("clip_model_name", model_cfg.get("clip_model_name", "openai/clip-vit-base-patch32"))
             cache_path = clip_sem_cfg.get("clip_prototypes_path", model_cfg.get("clip_prototypes_path", None))
             text_proto_array = get_or_compute_clip_text_prototypes(
                 model_name=clip_model_name,
                 cache_path=cache_path,
                 embedding_dim=embed_dim,
-                multi_prototype=self.multi_prototype,
+                multi_prototype=self.multi_prototype or self.use_adaptive_granularity,
             )
             self.text_prototypes = tf.constant(text_proto_array, dtype=tf.float32, name="frozen_clip_text_prototypes")
         else:
             self.visual_projector = None
+            self.granularity_gate = None
             self.text_prototypes = None
 
         self.pretrained_load_status = "not_requested"
@@ -370,9 +450,33 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
 
     def _resolve_weight_path(self, weight_path: str) -> Path:
         resolved = Path(weight_path)
+        if resolved.exists():
+            return resolved
         if not resolved.is_absolute():
-            resolved = Path(__file__).resolve().parents[1] / weight_path
-        return resolved
+            resolved_rel = Path(__file__).resolve().parents[1] / weight_path
+            if resolved_rel.exists():
+                return resolved_rel
+
+        # Kaggle & environment auto-resolution search
+        filename = Path(weight_path).name
+        search_dirs = [
+            Path("/kaggle/input/models/lhngphc/ms1m-pretrained/tensorflow2/default/1"),
+            Path("/kaggle/input"),
+            Path("/kaggle/working"),
+            Path(__file__).resolve().parents[1] / "pretrained",
+            Path(__file__).resolve().parents[1] / "data",
+        ]
+        for search_dir in search_dirs:
+            if search_dir.exists():
+                try:
+                    for found_file in search_dir.rglob(filename):
+                        if found_file.is_file():
+                            print(f"[ConvNeXtBaseFace] Auto-resolved pretrained weight path on Kaggle: {found_file}", flush=True)
+                            return found_file
+                except Exception:
+                    pass
+
+        return Path(__file__).resolve().parents[1] / weight_path
 
     def _build_variables(self) -> None:
         dummy = tf.zeros([1, self.input_size, self.input_size, self.channels], dtype=tf.float32)
@@ -470,25 +574,34 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
 
     def _load_pytorch_pretrained(self, weight_path: str, require: bool = False) -> str:
         resolved = self._resolve_weight_path(weight_path)
-        if not resolved.exists():
-            message = f"[ConvNeXtBaseFace] PyTorch pretrained checkpoint not found: {resolved}"
+        npz_resolved = resolved.with_suffix(".npz")
+
+        raw_state = None
+        if npz_resolved.exists():
+            print(f"[ConvNeXtBaseFace] Loading NumPy (.npz) pretrained checkpoint: {npz_resolved}", flush=True)
+            loaded_npz = np.load(str(npz_resolved))
+            raw_state = {k: loaded_npz[k] for k in loaded_npz.files}
+        elif resolved.exists():
+            try:
+                import torch
+                print(f"[ConvNeXtBaseFace] Loading PyTorch pretrained checkpoint: {resolved}", flush=True)
+                checkpoint = torch.load(str(resolved), map_location="cpu")
+                raw_state = self._extract_state_dict(checkpoint)
+            except Exception as exc:
+                message = f"PyTorch import/load failed ({exc}). Please install CPU PyTorch (`pip install torch --index-url https://download.pytorch.org/whl/cpu`) or provide a .npz checkpoint."
+                if require:
+                    raise RuntimeError(message) from exc
+                print(f"[ConvNeXtBaseFace] WARNING: {message}", flush=True)
+                return "torch_missing"
+        else:
+            message = f"[ConvNeXtBaseFace] Pretrained checkpoint not found: {resolved} (or {npz_resolved})"
             if require:
                 raise FileNotFoundError(message)
             print(f"[ConvNeXtBaseFace] WARNING: {message}", flush=True)
             return "missing"
 
-        try:
-            import torch
-        except Exception as exc:
-            if require:
-                raise RuntimeError("PyTorch is required to load ConvNeXt-B MS1M/ArcFace checkpoint.") from exc
-            print(f"[ConvNeXtBaseFace] WARNING: PyTorch import failed: {exc}", flush=True)
-            return "torch_missing"
-
         self._build_variables()
-        print(f"[ConvNeXtBaseFace] Loading PyTorch pretrained checkpoint: {resolved}", flush=True)
-        checkpoint = torch.load(str(resolved), map_location="cpu")
-        state = self._normalize_state_dict(self._extract_state_dict(checkpoint))
+        state = self._normalize_state_dict(raw_state)
         used_keys = set()
         matched = 0
         unmatched: List[str] = []
@@ -859,40 +972,100 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         logits = self.classifier(dropped)
 
         semantic_logits = None
-        if self.use_semantic_branch and self.visual_projector is not None:
-            v_proj = self.visual_projector(pooled, training=training)
-            v_norm = tf.math.l2_normalize(v_proj, axis=-1)
-            text_protos = tf.cast(self.text_prototypes, dtype=v_norm.dtype)
-            t_norm = tf.math.l2_normalize(text_protos, axis=-1)
-            endpoints["visual_projector"] = v_proj
+        agg_sim = None
+        granularity_weights = None
 
-            if self.multi_prototype:
-                # v_norm: (B, 512), t_norm: (7, 5, 512) -> raw_sim: (B, 7, 5)
-                raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
+        if self.use_semantic_branch and self.visual_projector is not None:
+            text_protos = tf.cast(self.text_prototypes, dtype=tf.float32)
+            t_norm = tf.math.l2_normalize(text_protos, axis=-1) # [7, 5, dim]
+
+            if self.use_au_region_routed and self.visual_projector_upper is not None:
+                # Extract Stage 3 spatial feature maps [B, 14, 14, 512]
+                stage3_feat = endpoints.get("stage3_adapter", endpoints.get("stage3"))
+                z_upper = tf.reduce_mean(stage3_feat[:, 0:8, :, :], axis=[1, 2])
+                z_lower = tf.reduce_mean(stage3_feat[:, 5:14, :, :], axis=[1, 2])
+                z_au = tf.reduce_mean(stage3_feat[:, 3:11, :, :], axis=[1, 2])
+
+                v_global_proj = self.visual_projector(pooled, training=training)
+                v_upper_proj = self.visual_projector_upper(z_upper, training=training)
+                v_lower_proj = self.visual_projector_lower(z_lower, training=training)
+                v_au_proj = self.visual_projector_au(z_au, training=training)
+
+                v_global_norm = tf.math.l2_normalize(v_global_proj, axis=-1)
+                v_upper_norm = tf.math.l2_normalize(v_upper_proj, axis=-1)
+                v_lower_norm = tf.math.l2_normalize(v_lower_proj, axis=-1)
+                v_au_norm = tf.math.l2_normalize(v_au_proj, axis=-1)
+
+                endpoints["visual_projector"] = v_global_proj
+                endpoints["visual_projector_upper"] = v_upper_proj
+                endpoints["visual_projector_lower"] = v_lower_proj
+                endpoints["visual_projector_au"] = v_au_proj
+
+                # Match dtype for mixed precision (float16 vs float32) compatibility
+                t_norm = tf.cast(t_norm, dtype=v_global_norm.dtype)
+
+                # Spatial-Semantic Routing to 5 Prototypes:
+                # P0 (Emotion): Global -> t_norm[:,0,:]
+                # P1 (AU-level): AU-region -> t_norm[:,1,:]
+                # P2 (Upper-face): Upper-region -> t_norm[:,2,:]
+                # P3 (Lower-face): Lower-region -> t_norm[:,3,:]
+                # P4 (Combined): Global -> t_norm[:,4,:]
+                s0 = tf.einsum("bd,cd->bc", v_global_norm, t_norm[:, 0, :])
+                s1 = tf.einsum("bd,cd->bc", v_au_norm, t_norm[:, 1, :])
+                s2 = tf.einsum("bd,cd->bc", v_upper_norm, t_norm[:, 2, :])
+                s3 = tf.einsum("bd,cd->bc", v_lower_norm, t_norm[:, 3, :])
+                s4 = tf.einsum("bd,cd->bc", v_global_norm, t_norm[:, 4, :])
+
+                raw_sim = tf.stack([s0, s1, s2, s3, s4], axis=-1)  # [B, 7, 5]
+            else:
+                v_proj = self.visual_projector(pooled, training=training)
+                v_norm = tf.math.l2_normalize(v_proj, axis=-1)
+                t_norm = tf.cast(t_norm, dtype=v_norm.dtype)
+                endpoints["visual_projector"] = v_proj
+                if len(t_norm.shape) == 3 or (hasattr(t_norm.shape, "rank") and t_norm.shape.rank == 3):
+                    raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
+                else:
+                    raw_sim = tf.einsum("bd,cd->bc", v_norm, t_norm)
+
+            if self.multi_prototype or self.use_adaptive_granularity:
                 endpoints["raw_semantic_similarity"] = raw_sim
                 raw_sim_f32 = tf.cast(raw_sim, tf.float32)
-                if self.prototype_aggregation == "logsumexp":
-                    tau = tf.constant(self.prototype_temperature, dtype=tf.float32)
-                    K = tf.constant(float(raw_sim.shape[-1]), dtype=tf.float32)
-                    lse = tf.reduce_logsumexp(raw_sim_f32 / tau, axis=-1)
-                    agg_sim = tau * (lse - tf.math.log(K))
-                elif self.prototype_aggregation == "mean":
-                    agg_sim = tf.reduce_mean(raw_sim_f32, axis=-1)
-                elif self.prototype_aggregation == "max":
-                    agg_sim = tf.reduce_max(raw_sim_f32, axis=-1)
+
+                if self.use_adaptive_granularity and self.granularity_gate is not None:
+                    # Adaptive Multi-Granularity Weighting: Sample-adaptive gate [B, 5]
+                    granularity_weights = self.granularity_gate(pooled, training=training)  # [B, 5]
+                    granularity_weights_f32 = tf.cast(granularity_weights, tf.float32)
+                    gw_exp = tf.expand_dims(granularity_weights_f32, axis=1)  # [B, 1, 5]
+                    agg_sim = tf.reduce_sum(gw_exp * raw_sim_f32, axis=-1)  # [B, 7]
+                    endpoints["granularity_weights"] = granularity_weights
                 else:
-                    raise ValueError(f"Unsupported prototype_aggregation: {self.prototype_aggregation}")
+                    if self.prototype_aggregation == "logsumexp":
+                        tau = tf.constant(self.prototype_temperature, dtype=tf.float32)
+                        K = tf.constant(float(raw_sim.shape[-1]), dtype=tf.float32)
+                        lse = tf.reduce_logsumexp(raw_sim_f32 / tau, axis=-1)
+                        agg_sim = tau * (lse - tf.math.log(K))
+                    elif self.prototype_aggregation == "mean":
+                        agg_sim = tf.reduce_mean(raw_sim_f32, axis=-1)
+                    elif self.prototype_aggregation == "max":
+                        agg_sim = tf.reduce_max(raw_sim_f32, axis=-1)
+                    else:
+                        raise ValueError(f"Unsupported prototype_aggregation: {self.prototype_aggregation}")
                 semantic_logits = agg_sim * tf.cast(self.semantic_logit_scale, tf.float32)
             else:
-                cos_sim = tf.matmul(v_norm, t_norm, transpose_b=True)
-                semantic_logits = tf.cast(cos_sim * self.semantic_logit_scale, tf.float32)
+                agg_sim = tf.cast(raw_sim, tf.float32)
+                semantic_logits = agg_sim * tf.cast(self.semantic_logit_scale, tf.float32)
             endpoints["semantic_logits"] = semantic_logits
 
         self._log_shapes_once(image, endpoints, pooled, dropped, logits)
         return {
             "logits": tf.cast(logits, tf.float32),
             "semantic_logits": semantic_logits,
+            "agg_sim": agg_sim,
+            "granularity_weights": granularity_weights,
             "lambda_sem": self.lambda_sem,
+            "lambda_hard": self.lambda_hard if self.use_hard_semantic_loss else 0.0,
+            "hard_margin": self.hard_margin,
+            "hard_pairs_matrix": self.hard_pairs_matrix,
             "cnn_aux_logits": None,
             "ortho_loss": tf.constant(0.0, dtype=tf.float32),
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),

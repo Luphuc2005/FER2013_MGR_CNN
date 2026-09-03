@@ -39,10 +39,10 @@ def resolve_tta_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     flip_w = float(tta_cfg.get("flip_weight", 0.5))
 
     if enabled and hflip:
-        if abs((orig_w + flip_w) - 1.0) > 1e-5:
-            raise ValueError(
-                f"[TTA ERROR] TTA weights must sum to 1.0, got original_weight={orig_w}, flip_weight={flip_w} (sum={orig_w+flip_w:.4f})"
-            )
+        total_w = orig_w + flip_w
+        if total_w > 0 and abs(total_w - 1.0) > 1e-5:
+            orig_w = orig_w / total_w
+            flip_w = flip_w / total_w
 
     resolved = {
         "enabled": enabled,
@@ -176,7 +176,98 @@ def apply_env_overrides(cfg: Dict[str, Any]) -> None:
     )
     cfg["paths"]["output_dir"] = _env_str("MGR_OUTPUT_DIR", cfg["paths"].get("output_dir"))
     cfg["paths"]["logs_dir"] = _env_str("MGR_LOGS_DIR", cfg["paths"].get("logs_dir"))
+    cfg["paths"]["auto_increment"] = _env_bool("MGR_AUTO_INCREMENT_DIR", bool(cfg["paths"].get("auto_increment", True)))
     resolve_paths(cfg)
+
+
+def get_versioned_directories(base_dir: Path) -> List[Tuple[int, Path]]:
+    """Returns sorted list of (version_number, directory_path) matching base_dir name pattern."""
+    import re
+    base_dir = Path(base_dir)
+    parent = base_dir.parent
+    stem = base_dir.name
+
+    if not parent.exists():
+        return []
+
+    pattern = re.compile(rf"^{re.escape(stem)}(?:_v?(\d+))?$")
+    versioned = []
+
+    for p in parent.iterdir():
+        if p.is_dir():
+            match = pattern.match(p.name)
+            if match:
+                ver_str = match.group(1)
+                ver = int(ver_str) if ver_str else 1
+                versioned.append((ver, p))
+
+    versioned.sort(key=lambda x: x[0])
+    return versioned
+
+
+def get_next_versioned_dir(base_dir: Path) -> Path:
+    """Returns next available versioned directory path if base_dir or latest version already has checkpoints."""
+    base_dir = Path(base_dir)
+    versioned = get_versioned_directories(base_dir)
+    if not versioned:
+        return base_dir
+
+    highest_ver, highest_path = versioned[-1]
+    ckpt_dir = highest_path / "checkpoints"
+    has_checkpoints = ckpt_dir.exists() and any(ckpt_dir.rglob("ckpt-*"))
+    has_history = (highest_path / "training_history.csv").exists()
+
+    if not has_checkpoints and not has_history:
+        return highest_path
+
+    next_ver = highest_ver + 1
+    return base_dir.parent / f"{base_dir.name}_v{next_ver}"
+
+
+def get_latest_versioned_dir(base_dir: Path) -> Path:
+    """Returns the latest existing versioned directory that contains checkpoints."""
+    base_dir = Path(base_dir)
+    versioned = get_versioned_directories(base_dir)
+    if not versioned:
+        return base_dir
+
+    for ver, p in reversed(versioned):
+        ckpt_dir = p / "checkpoints"
+        if ckpt_dir.exists() and any(ckpt_dir.rglob("ckpt-*")):
+            return p
+
+    return versioned[-1][1]
+
+
+def resolve_auto_increment_output_dir(
+    cfg: Dict[str, Any],
+    is_resume: bool = False,
+    for_eval: bool = False,
+    auto_increment: Optional[bool] = None,
+) -> Path:
+    """Resolves output_dir in cfg. If auto_increment is enabled and resume is False,
+    creates next version directory (_v2, _v3, etc.) when checkpoints already exist.
+    """
+    paths = cfg.setdefault("paths", {})
+    raw_output = paths.get("output_dir", "outputs/default")
+    base_path = Path(raw_output)
+    if not base_path.is_absolute():
+        base_path = PROJECT_ROOT / base_path
+
+    if auto_increment is None:
+        auto_increment = bool(paths.get("auto_increment", True))
+
+    if not auto_increment:
+        paths["output_dir"] = str(base_path)
+        return base_path
+
+    if for_eval or is_resume:
+        target_path = get_latest_versioned_dir(base_path)
+    else:
+        target_path = get_next_versioned_dir(base_path)
+
+    paths["output_dir"] = str(target_path)
+    return target_path
 
 
 def global_batch_size(cfg: Dict[str, Any], replicas: Optional[int] = None) -> int:

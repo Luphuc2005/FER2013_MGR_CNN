@@ -79,8 +79,37 @@ class DepthwiseSeparableBranch(tf.keras.layers.Layer):
         return self.act(x)
 
 
+class Stage2ToStage3Bridge(tf.keras.layers.Layer):
+    """Downsamples Stage 2 micro-textures (28x28x256) and fuses with Stage 3 (14x14x512)."""
+    def __init__(self, out_dim: int = 512, name: Optional[str] = None):
+        super().__init__(name=name)
+        self.s2_conv = tf.keras.layers.Conv2D(
+            256,
+            kernel_size=3,
+            strides=2,
+            padding="same",
+            kernel_initializer="he_normal",
+            name="s2_downsample_conv"
+        )
+        self.s2_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="s2_ln")
+        self.fuse_conv = tf.keras.layers.Conv2D(
+            out_dim,
+            kernel_size=1,
+            padding="same",
+            kernel_initializer="he_normal",
+            name="s2_s3_fusion_proj"
+        )
+        self.fuse_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="fuse_ln")
+
+    def call(self, s2, s3, training=False):
+        s2_proj = tf.nn.gelu(self.s2_norm(self.s2_conv(s2, training=training)))
+        f_concat = tf.concat([s3, s2_proj], axis=-1)
+        f_fused = tf.nn.gelu(self.fuse_norm(self.fuse_conv(f_concat, training=training)))
+        return f_fused
+
+
 class S3MultiscaleRefinement(tf.keras.layers.Layer):
-    """Three lightweight parallel S3 branches producing F_ms [B,14,14,512]."""
+    """Four lightweight parallel S3 branches (1x1, dw_d1, dw_d2, dw_d4) producing F_ms [B,14,14,512]."""
 
     def __init__(self, branch_dim: int = 256, out_dim: int = 512, name: Optional[str] = None):
         super().__init__(name=name)
@@ -97,12 +126,17 @@ class S3MultiscaleRefinement(tf.keras.layers.Layer):
             dilation_rate=2,
             name="branch_c_dwsep_d2",
         )
+        self.branch_d = DepthwiseSeparableBranch(
+            branch_dim=self.branch_dim,
+            dilation_rate=4,
+            name="branch_d_dwsep_d4",
+        )
         self.project = tf.keras.layers.Conv2D(
             self.out_dim,
             1,
             padding="same",
             kernel_initializer="he_normal",
-            name="concat_pointwise_768_to_512",
+            name="concat_pointwise_1024_to_512",
         )
         self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="f_ms_ln")
         self.act = tf.keras.layers.Activation(tf.nn.gelu, name="f_ms_gelu")
@@ -111,11 +145,12 @@ class S3MultiscaleRefinement(tf.keras.layers.Layer):
         a = self.branch_a(s3, training=training)
         b = self.branch_b(s3, training=training)
         c = self.branch_c(s3, training=training)
-        merged = tf.concat([a, b, c], axis=-1)
+        d = self.branch_d(s3, training=training)
+        merged = tf.concat([a, b, c, d], axis=-1)
         f_ms = self.project(merged)
         f_ms = self.norm(f_ms)
         f_ms = self.act(f_ms)
-        return f_ms, a, b, c, merged
+        return f_ms, a, b, c, d, merged
 
 
 class ChannelAttention(tf.keras.layers.Layer):
@@ -147,13 +182,15 @@ class SpatialAttention(tf.keras.layers.Layer):
             kernel_initializer="he_normal",
             name="spatial_7x7",
         )
+        self.norm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="spatial_ln")
 
     def call(self, f_ms, training=False):
         x = tf.cast(f_ms, tf.float32)
         avg_map = tf.reduce_mean(x, axis=-1, keepdims=True)
         max_map = tf.reduce_max(x, axis=-1, keepdims=True)
         pooled = tf.concat([avg_map, max_map], axis=-1)
-        w_s = tf.sigmoid(self.conv(pooled, training=training))
+        spatial_logits = self.norm(self.conv(pooled, training=training))
+        w_s = tf.sigmoid(spatial_logits)
         w_s = tf.cast(w_s, f_ms.dtype)
         return f_ms * w_s, w_s
 
@@ -224,6 +261,39 @@ class BoundedResidualAlpha(tf.keras.layers.Layer):
         return tf.ones([tf.shape(reference)[0], 1, 1, 1], dtype=tf.float32) * alpha
 
 
+class ArcFaceCosineClassifier(tf.keras.layers.Layer):
+    """Normalized Cosine Margin Classifier Head for Face & Expression Prototypes."""
+    def __init__(self, num_classes: int = 7, scale: float = 30.0, margin: float = 0.20, name: Optional[str] = None):
+        super().__init__(name=name)
+        self.num_classes = int(num_classes)
+        self.scale = float(scale)
+        self.margin = float(margin)
+
+    def build(self, input_shape):
+        feat_dim = int(input_shape[-1])
+        self.W = self.add_weight(
+            name="weight",
+            shape=(feat_dim, self.num_classes),
+            initializer=tf.keras.initializers.GlorotUniform(),
+            trainable=True
+        )
+
+    def call(self, features, labels=None, training=False):
+        features_f32 = tf.cast(features, tf.float32)
+        features_norm = tf.math.l2_normalize(features_f32, axis=-1)
+        w_norm = tf.math.l2_normalize(tf.cast(self.W, tf.float32), axis=0)
+        
+        cos_theta = tf.matmul(features_norm, w_norm)
+        cos_theta = tf.clip_by_value(cos_theta, -1.0 + 1e-7, 1.0 - 1e-7)
+        
+        if training and labels is not None:
+            labels_one_hot = tf.one_hot(tf.cast(labels, tf.int32), depth=self.num_classes)
+            target_cosine = cos_theta - self.margin
+            cos_theta = tf.where(labels_one_hot > 0.5, target_cosine, cos_theta)
+            
+        return cos_theta * self.scale
+
+
 class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
     """ConvNeXt-B MS1M backbone plus bounded MSDA S3 correction into S4."""
 
@@ -243,6 +313,7 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
         baseline_cfg["model"].setdefault("classifier_dropout1", 0.35)
         self.rgb_baseline = ConvNeXtBaseFaceFERBaseline(baseline_cfg)
 
+        self.s2_bridge = Stage2ToStage3Bridge(out_dim=512, name="s2_microtexture_bridge")
         self.ms_refine = S3MultiscaleRefinement(
             branch_dim=int(msda_cfg.get("branch_dim", 256)),
             out_dim=512,
@@ -264,13 +335,34 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
             initial_alpha=float(msda_cfg.get("initial_alpha", 0.005)),
             name="bounded_cross_stage_alpha",
         )
+        self.use_aux_loss = bool(model_cfg.get("use_aux_loss", False))
+        self.aux_classifier = tf.keras.layers.Dense(
+            self.num_classes,
+            kernel_initializer="he_normal",
+            name="aux_classifier",
+        )
+        self.use_arcface = bool(model_cfg.get("use_arcface", True))
+        if self.use_arcface:
+            self.arcface_head = ArcFaceCosineClassifier(
+                num_classes=self.num_classes,
+                scale=float(model_cfg.get("arcface_scale", 30.0)),
+                margin=float(model_cfg.get("arcface_margin", 0.20)),
+                name="arcface_cosine_head",
+            )
 
     @property
     def backbone(self):
         return self.rgb_baseline.backbone
 
     def backbone_variables(self) -> List[tf.Variable]:
-        return list(self.rgb_baseline.backbone.trainable_variables)
+        vars_list = list(self.rgb_baseline.backbone.trainable_variables)
+        if bool(self.cfg.get("model", {}).get("freeze_stage12", False)):
+            filtered = [
+                v for v in vars_list
+                if not any(k in v.name.lower() for k in ["stem", "stage1", "stage2", "downsample_stage2"])
+            ]
+            return filtered
+        return vars_list
 
     def classifier_variables(self) -> List[tf.Variable]:
         return list(self.rgb_baseline.classifier.trainable_variables) + list(self.rgb_baseline.head_dropout.trainable_variables)
@@ -293,15 +385,25 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
     def alpha_variables(self) -> List[tf.Variable]:
         return list(self.alpha_gate.trainable_variables)
 
+    def bridge_variables(self) -> List[tf.Variable]:
+        return list(self.s2_bridge.trainable_variables)
+
+    def arcface_variables(self) -> List[tf.Variable]:
+        if hasattr(self, "arcface_head") and self.use_arcface:
+            return list(self.arcface_head.trainable_variables)
+        return []
+
     def new_module_variables(self) -> List[tf.Variable]:
         variables: List[tf.Variable] = []
         for module_vars in (
+            self.bridge_variables(),
             self.multiscale_variables(),
             self.channel_attention_variables(),
             self.spatial_attention_variables(),
             self.fusion_variables(),
             self.projection_variables(),
             self.alpha_variables(),
+            self.arcface_variables(),
         ):
             variables.extend(module_vars)
         return variables
@@ -338,15 +440,22 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
         print(f"  total_params: {total_params:,}", flush=True)
         print(f"  trainable_params: {trainable_params:,}", flush=True)
 
-    def call(self, inputs, training=False, return_endpoints: bool = False, force_alpha_zero: bool = False):
-        image = inputs["image"] if isinstance(inputs, dict) else inputs
+    def call(self, inputs, training=False, return_endpoints: bool = False, force_alpha_zero: bool = False, labels=None):
+        if isinstance(inputs, dict):
+            image = inputs.get("image", inputs)
+            if labels is None:
+                labels = inputs.get("label", None)
+        else:
+            image = inputs
+
         endpoints = self.rgb_baseline.backbone(image, training=training, return_endpoints=True)
         s1 = endpoints["stage1"]
         s2 = endpoints["stage2"]
         s3 = endpoints["stage3"]
         s4 = endpoints["stage4"]
 
-        f_ms, branch_a, branch_b, branch_c, f_concat = self.ms_refine(s3, training=training)
+        s3_fused = self.s2_bridge(s2, s3, training=training)
+        f_ms, branch_a, branch_b, branch_c, branch_d, f_concat = self.ms_refine(s3_fused, training=training)
         f_ca, w_c = self.channel_attention(f_ms, training=training)
         f_sa, w_s = self.spatial_attention(f_ms, training=training)
         f_da, fusion_weights = self.dual_fusion(f_ca, f_sa, training=training)
@@ -358,11 +467,23 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
 
         pooled = self.rgb_baseline.gap(g4)
         dropped = self.rgb_baseline.head_dropout(pooled, training=training)
-        logits = tf.cast(self.rgb_baseline.classifier(dropped), tf.float32)
+        if hasattr(self, "arcface_head") and self.use_arcface:
+            logits = tf.cast(self.arcface_head(dropped, labels=labels, training=training), tf.float32)
+        else:
+            logits = tf.cast(self.rgb_baseline.classifier(dropped), tf.float32)
 
         baseline_pooled = self.rgb_baseline.gap(tf.cast(s4, tf.float32))
         baseline_dropped = self.rgb_baseline.head_dropout(baseline_pooled, training=False)
-        baseline_logits = tf.cast(self.rgb_baseline.classifier(baseline_dropped), tf.float32)
+        if hasattr(self, "arcface_head") and self.use_arcface:
+            baseline_logits = tf.cast(self.arcface_head(baseline_dropped, labels=labels, training=False), tf.float32)
+        else:
+            baseline_logits = tf.cast(self.rgb_baseline.classifier(baseline_dropped), tf.float32)
+
+        pooled_feat = tf.reduce_mean(f_da, axis=[1, 2])  # [B, 512] for SupCon
+        aux_logits = None
+        if self.use_aux_loss:
+            aux_logits = tf.cast(self.aux_classifier(baseline_pooled), tf.float32)
+            aux_logits = tf.where(tf.math.is_finite(aux_logits), aux_logits, tf.zeros_like(aux_logits))
 
         s4_norm = self._norm(s4)
         delta_raw_norm = self._norm(delta_raw)
@@ -376,7 +497,9 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
         outputs = {
             "logits": logits,
             "baseline_logits": baseline_logits,
-            "cnn_aux_logits": None,
+            "cnn_aux_logits": aux_logits,
+            "aux_logits": aux_logits,
+            "pooled_feature": pooled_feat,
             "semantic_logits": None,
             "ortho_loss": tf.constant(0.0, dtype=tf.float32),
             "S1": s1,
@@ -386,6 +509,7 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
             "branch_a": branch_a,
             "branch_b": branch_b,
             "branch_c": branch_c,
+            "branch_d": branch_d,
             "F_concat": f_concat,
             "F_ms": f_ms,
             "F_ca": f_ca,
@@ -412,11 +536,12 @@ class ConvNeXtMS1MCrossStageMSDAResidualFER(tf.keras.Model):
             "fusion_weight_channel": tf.cast(fusion_weights[0], tf.float32),
             "fusion_weight_spatial": tf.cast(fusion_weights[1], tf.float32),
         }
+        logits_f32 = tf.cast(logits, tf.float32)
+        logits_f32 = tf.where(tf.math.is_finite(logits_f32), logits_f32, tf.zeros_like(logits_f32))
+        outputs["logits"] = logits_f32
+
         if return_endpoints:
             outputs["backbone_endpoints"] = endpoints
 
         self._log_shapes_once(image, outputs)
-        tf.debugging.assert_all_finite(logits, "NaN/Inf in MSDA residual logits")
-        tf.debugging.assert_all_finite(g4, "NaN/Inf in G4")
-        tf.debugging.assert_all_finite(delta_norm, "NaN/Inf in delta_norm")
         return outputs

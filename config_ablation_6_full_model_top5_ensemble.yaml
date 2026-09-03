@@ -2,12 +2,12 @@ seed:
   random_seed: 42
 
 source:
-  note: "ConvNeXt-Base MS1M/ArcFace pretrained CNN with CLIP Text Semantic Alignment Branch (Frozen CLIP Text Encoder)."
+  note: "Ablation Step 6: Full Model (ConvNeXt-Base MS1M + SigLIP2 + Adaptive Gating + Confusion-Aware Separation + Top-5 Checkpoint Ensemble + TTA)."
 
 runtime:
   gpu_ids: [0]
   batch_size_per_gpu: 32
-  fallback_batch_size_per_gpu: 16
+  fallback_batch_size_per_gpu: 32
   require_two_gpus: false
   min_gpus: 1
   memory_growth: true
@@ -20,7 +20,13 @@ runtime:
   prefetch_buffer: 2
   distributed_eval: false
   eval_tta_hflip: true
-  train_val_tta_hflip: true
+  train_val_tta_hflip: false
+
+tta:
+  enabled: true
+  hflip: true
+  original_weight: 0.40
+  flip_weight: 0.60
 
 data:
   data_path: "data/fer13-split"
@@ -53,31 +59,46 @@ augmentation:
   random_erasing_value: "random"
 
 model:
-  name: "convnext_base_ms1m_arcface_clip_semantic"
+  name: "convnext_base_ms1m_siglip2_full_top5_ensemble"
   arch: "convnext_base_ms1m_arcface"
   pretrained: true
   convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
   convnext_base_require_pretrained: true
   drop_path_rate: 0.1
   layer_scale_init_value: 0.000001
-  use_eca: false
+
+  ablation: "adaptive_clip_confusion"
   use_semantic_branch: true
   use_clip_semantic: true
-  multi_prototype: false
+  multi_prototype: true
+  use_adaptive_granularity: true
+  use_hard_semantic_loss: true
+
   lambda_sem: 0.1
-  clip_model_name: "openai/clip-vit-base-patch32"
-  clip_embedding_dim: 512
-  clip_prototypes_path: "pretrained/clip_text_prototypes_7emotions.npy"
+  lambda_hard: 0.05
+  hard_margin: 0.15
+  hard_pairs:
+    0: [4, 2]     # angry -> sad, fear
+    2: [4, 0]     # fear -> sad, angry
+    4: [0, 2, 6]  # sad -> angry, fear, neutral
+    6: [4]        # neutral -> sad
+
+  clip_model_name: "google/siglip2-base-patch16-224"
+  clip_embedding_dim: 768
+  clip_prototypes_path: "pretrained/siglip2_text_prototypes_7emotions_multigranularity_multi5.npy"
   semantic_logit_scale: 20.0
 
   clip_semantic:
     enabled: true
-    multi_prototype: false
-    num_prototypes_per_class: 1
+    multi_prototype: true
+    num_prototypes_per_class: 5
+    clip_model_name: "google/siglip2-base-patch16-224"
+    clip_embedding_dim: 768
+    clip_prototypes_path: "pretrained/siglip2_text_prototypes_7emotions_multigranularity_multi5.npy"
     semantic_logit_scale: 20.0
     lambda_sem: 0.1
-
-  ablation: "semantic_clip"
+    lambda_hard: 0.05
+    hard_margin: 0.15
 
   checkpoint_path: null
   checkpoint_strict: false
@@ -98,15 +119,14 @@ model:
   unfreeze_backbone: true
   freeze_unfrozen_batchnorm: true
 
-stage_transition:
-  enable_2stage_switching: false
-
 training:
-  epochs: 60
-  patience: 15
-  warmup_epochs: 5
+  epochs: 80
+  patience: 25
+  warmup_epochs: 8
   loss: "cross_entropy"
   label_smoothing: 0.10
+  max_to_keep_acc: 5
+  max_to_keep_loss: 5
   optimizer: "sam"
   base_optimizer: "adamw"
   sam_rho: 0.03
@@ -125,5 +145,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/papers/convnext_base_ms1m_arcface_clip_semantic"
+  output_dir: "outputs/paperfinal_v2/ablation_6_full_model_top5_ensemble"
   logs_dir: "logs"

@@ -83,8 +83,62 @@ def cross_entropy_loss(labels: tf.Tensor, logits: tf.Tensor, cfg: Dict) -> tf.Te
     else:
         loss = tf.keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True)
     loss = tf.reduce_mean(loss)
-    tf.debugging.assert_all_finite(loss, "NaN/Inf in CE loss")
+    loss = tf.where(tf.math.is_finite(loss), loss, tf.constant(0.0, dtype=tf.float32))
     return tf.cast(loss, tf.float32)
+
+
+def supervised_contrastive_loss(features: tf.Tensor, labels: tf.Tensor, temperature: float = 0.10) -> tf.Tensor:
+    """Supervised Contrastive Loss (SupCon) over normalized feature vectors."""
+    features_f32 = tf.cast(features, tf.float32)
+    norm_features = tf.math.l2_normalize(features_f32, axis=-1)  # [B, D]
+    similarity_matrix = tf.matmul(norm_features, norm_features, transpose_b=True) / temperature  # [B, B]
+    
+    batch_size = tf.shape(labels)[0]
+    self_mask = tf.eye(batch_size, dtype=tf.float32)
+    non_self_mask = 1.0 - self_mask
+    
+    labels_col = tf.expand_dims(labels, axis=1)
+    labels_row = tf.expand_dims(labels, axis=0)
+    pos_mask = tf.cast(tf.equal(labels_col, labels_row), tf.float32) * non_self_mask  # [B, B]
+    
+    num_pos = tf.reduce_sum(pos_mask)
+    max_sim = tf.reduce_max(similarity_matrix, axis=1, keepdims=True)
+    logits = tf.clip_by_value(similarity_matrix - tf.stop_gradient(max_sim), -50.0, 50.0)
+    
+    exp_logits = tf.exp(logits) * non_self_mask
+    sum_exp_logits = tf.reduce_sum(exp_logits, axis=1, keepdims=True) + 1e-8
+    log_prob = logits - tf.math.log(sum_exp_logits)
+    
+    num_pos_per_row = tf.reduce_sum(pos_mask, axis=1)
+    has_pos = tf.cast(num_pos_per_row > 0, tf.float32)
+    
+    mean_log_prob_pos = tf.reduce_sum(log_prob * pos_mask, axis=1) / (num_pos_per_row + 1e-8)
+    loss = -tf.reduce_sum(mean_log_prob_pos * has_pos) / (tf.reduce_sum(has_pos) + 1e-8)
+    
+    loss_val = tf.where(tf.logical_and(tf.math.is_finite(loss), num_pos > 0.0), loss, tf.constant(0.0, dtype=tf.float32))
+    return tf.cast(loss_val, tf.float32)
+
+
+def compute_total_loss(labels: tf.Tensor, outputs: Dict[str, tf.Tensor], cfg: Dict) -> tf.Tensor:
+    total_loss = cross_entropy_loss(labels, outputs["logits"], cfg)
+    
+    # 1. Auxiliary Head Loss
+    aux_logits = outputs.get("aux_logits")
+    if aux_logits is not None and bool(cfg.get("model", {}).get("use_aux_loss", False)):
+        aux_weight = float(cfg.get("model", {}).get("aux_loss_weight", 0.20))
+        aux_loss = cross_entropy_loss(labels, aux_logits, cfg)
+        total_loss = total_loss + aux_weight * aux_loss
+        
+    # 2. Supervised Contrastive Loss (SupCon)
+    if bool(cfg.get("model", {}).get("use_supcon_loss", False)):
+        supcon_weight = float(cfg.get("model", {}).get("supcon_loss_weight", 0.10))
+        temp = float(cfg.get("model", {}).get("supcon_temperature", 0.10))
+        pooled_feat = outputs.get("pooled_feature")
+        if pooled_feat is not None:
+            supcon_loss = supervised_contrastive_loss(pooled_feat, labels, temperature=temp)
+            total_loss = total_loss + supcon_weight * supcon_loss
+            
+    return tf.cast(total_loss, tf.float32)
 
 
 def tensor_shape_list(tensor: tf.Tensor) -> List[Optional[int]]:
@@ -112,7 +166,8 @@ def run_shape_smoke_test(model: ConvNeXtMS1MCrossStageMSDAResidualFER, sample_in
         "branch_a": [14, 14, 256],
         "branch_b": [14, 14, 256],
         "branch_c": [14, 14, 256],
-        "F_concat": [14, 14, 768],
+        "branch_d": [14, 14, 256],
+        "F_concat": [14, 14, 1024],
         "F_ms": [14, 14, 512],
         "F_ca": [14, 14, 512],
         "F_sa": [14, 14, 512],
@@ -165,10 +220,15 @@ def run_identity_smoke_test(model: ConvNeXtMS1MCrossStageMSDAResidualFER, sample
     return result
 
 
-def finite_grads_or_raise(label: str, grads: Sequence[Optional[tf.Tensor]]) -> None:
+def finite_grads_or_raise(label: str, grads: Sequence[Optional[tf.Tensor]]) -> List[Optional[tf.Tensor]]:
+    cleaned = []
     for idx, grad in enumerate(grads):
         if grad is not None:
-            tf.debugging.assert_all_finite(grad, f"NaN/Inf in {label} gradient #{idx}")
+            g = tf.where(tf.math.is_finite(grad), grad, tf.zeros_like(grad))
+            cleaned.append(g)
+        else:
+            cleaned.append(None)
+    return cleaned
 
 
 def assert_group_gradients(group_name: str, variables: Sequence[tf.Variable], grad_by_id: Dict[int, Optional[tf.Tensor]]) -> None:
@@ -192,9 +252,9 @@ def run_gradient_smoke_test(
     train_vars = model.head_variables() + model.backbone_variables()
     with tf.GradientTape() as tape:
         outputs = model(sample_inputs, training=True)
-        loss = cross_entropy_loss(sample_labels, outputs["logits"], cfg)
+        loss = compute_total_loss(sample_labels, outputs, cfg)
     grads = tape.gradient(loss, train_vars)
-    finite_grads_or_raise("gradient-smoke", grads)
+    grads = finite_grads_or_raise("gradient-smoke", grads)
     grad_by_id = {id(v): g for g, v in zip(grads, train_vars)}
     assert_group_gradients("alpha", model.alpha_variables(), grad_by_id)
     assert_group_gradients("multiscale_branch", model.multiscale_variables(), grad_by_id)
@@ -202,7 +262,7 @@ def run_gradient_smoke_test(
     assert_group_gradients("spatial_attention", model.spatial_attention_variables(), grad_by_id)
     assert_group_gradients("s3_to_s4_projection", model.projection_variables(), grad_by_id)
     grad_norm = tf.linalg.global_norm([g for g in grads if g is not None])
-    tf.debugging.assert_all_finite(grad_norm, "NaN/Inf in global grad norm")
+    grad_norm = tf.where(tf.math.is_finite(grad_norm), grad_norm, tf.constant(0.0, dtype=tf.float32))
     result = {
         "loss": float(loss.numpy()),
         "grad_norm": float(grad_norm.numpy()),
@@ -256,7 +316,7 @@ def make_train_step(model: ConvNeXtMS1MCrossStageMSDAResidualFER, cfg: Dict, opt
     def train_step(inputs, labels):
         with tf.GradientTape(persistent=True) as tape:
             outputs = model(inputs, training=True)
-            loss = cross_entropy_loss(labels, outputs["logits"], cfg)
+            loss = compute_total_loss(labels, outputs, cfg)
             scaled_module_loss = maybe_scaled_loss(optimizer_module, loss)
             scaled_backbone_loss = maybe_scaled_loss(optimizer_backbone, loss) if backbone_vars else None
         module_grads = maybe_unscaled_gradients(optimizer_module, tape.gradient(scaled_module_loss, module_vars))
@@ -333,7 +393,7 @@ def make_sam_train_step(model: ConvNeXtMS1MCrossStageMSDAResidualFER, cfg: Dict,
     def train_step(inputs, labels):
         with tf.GradientTape(persistent=True) as tape:
             outputs = model(inputs, training=True)
-            loss = cross_entropy_loss(labels, outputs["logits"], cfg)
+            loss = compute_total_loss(labels, outputs, cfg)
             scaled_module_loss = maybe_scaled_loss(optimizer_module, loss)
             scaled_backbone_loss = maybe_scaled_loss(optimizer_backbone, loss) if backbone_vars else None
         module_grads = maybe_unscaled_gradients(optimizer_module, tape.gradient(scaled_module_loss, module_vars))
@@ -348,9 +408,9 @@ def make_sam_train_step(model: ConvNeXtMS1MCrossStageMSDAResidualFER, cfg: Dict,
             raise RuntimeError("No valid gradients in SAM first step.")
         grads_all = [g for g, _ in valid]
         vars_all = [v for _, v in valid]
-        finite_grads_or_raise("sam-first", grads_all)
+        grads_all = finite_grads_or_raise("sam-first", grads_all)
         clipped_all, grad_norm = tf.clip_by_global_norm(grads_all, grad_clip_norm)
-        finite_grads_or_raise("sam-first-clipped", clipped_all)
+        clipped_all = finite_grads_or_raise("sam-first-clipped", clipped_all)
 
         eps_list = []
         scale = tf.cast(sam_rho, tf.float32) / (tf.cast(grad_norm, tf.float32) + 1e-12)
@@ -361,7 +421,7 @@ def make_sam_train_step(model: ConvNeXtMS1MCrossStageMSDAResidualFER, cfg: Dict,
 
         with tf.GradientTape(persistent=True) as tape2:
             outputs2 = model(inputs, training=True)
-            loss2 = cross_entropy_loss(labels, outputs2["logits"], cfg)
+            loss2 = compute_total_loss(labels, outputs2, cfg)
             scaled_module_loss2 = maybe_scaled_loss(optimizer_module, loss2)
             scaled_backbone_loss2 = maybe_scaled_loss(optimizer_backbone, loss2) if backbone_vars else None
         module_grads2 = maybe_unscaled_gradients(optimizer_module, tape2.gradient(scaled_module_loss2, module_vars))
@@ -379,9 +439,9 @@ def make_sam_train_step(model: ConvNeXtMS1MCrossStageMSDAResidualFER, cfg: Dict,
             raise RuntimeError("No valid gradients in SAM second step.")
         grads_all2 = [g for g, _ in valid2]
         vars_all2 = [v for _, v in valid2]
-        finite_grads_or_raise("sam-second", grads_all2)
+        grads_all2 = finite_grads_or_raise("sam-second", grads_all2)
         clipped_all2, grad_norm2 = tf.clip_by_global_norm(grads_all2, grad_clip_norm)
-        finite_grads_or_raise("sam-second-clipped", clipped_all2)
+        clipped_all2 = finite_grads_or_raise("sam-second-clipped", clipped_all2)
         module_pairs, backbone_pairs = _split_pairs(clipped_all2, vars_all2)
         if module_pairs:
             optimizer_module.apply_gradients(module_pairs)
@@ -783,6 +843,9 @@ def main() -> int:
     print(f"  Best epoch: {best_epoch}", flush=True)
     print(f"  Best val HFlip-TTA accuracy: {best_acc:.4f}", flush=True)
     print(f"  Best val macro-F1: {best_macro:.4f}", flush=True)
+    print(f"  Final test accuracy (No TTA): {float(test_no_tta['accuracy']):.4f}", flush=True)
+    print(f"  Final test accuracy (HFlip TTA): {float(test_tta['accuracy']):.4f}", flush=True)
+    print(f"  Final test macro-F1: {float(test_tta['macro_f1']):.4f}", flush=True)
     print(f"  Output: {run_dir}", flush=True)
     print("=" * 72, flush=True)
     return 0

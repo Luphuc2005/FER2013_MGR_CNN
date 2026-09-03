@@ -146,8 +146,8 @@ def collect_split_records(
         raise FileNotFoundError(f"Missing split CSV: {csv_path}")
     if pd is not None:
         df = pd.read_csv(csv_path)
-        label_col = "emotion" if "emotion" in df.columns else df.columns[0]
-        pixel_col = "pixels" if "pixels" in df.columns else df.columns[1]
+        label_col = next((c for c in ("emotion", "label", "target", "class", "y") if c in df.columns), df.columns[0])
+        pixel_col = next((c for c in ("pixels", "image_path", "filepath", "path", "image", "file") if c in df.columns), df.columns[1])
         labels = df[label_col].astype("int64").to_numpy()
         pixels = df[pixel_col].astype(str).to_numpy()
         sample_ids = np.arange(len(df), dtype=np.int64)
@@ -157,11 +157,12 @@ def collect_split_records(
         pixels_list = []
         with csv_path.open("r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            lbl_key = next((c for c in ("emotion", "label", "target", "class", "y") if c in fieldnames), fieldnames[0])
+            pix_key = next((c for c in ("pixels", "image_path", "filepath", "path", "image", "file") if c in fieldnames), fieldnames[1])
             for row in reader:
-                label_val = row.get("emotion") if "emotion" in row else list(row.values())[0]
-                pixel_val = row.get("pixels") if "pixels" in row else list(row.values())[1]
-                labels_list.append(int(label_val))
-                pixels_list.append(str(pixel_val))
+                labels_list.append(int(row[lbl_key]))
+                pixels_list.append(str(row[pix_key]))
         labels = np.array(labels_list, dtype=np.int64)
         pixels = np.array(pixels_list, dtype=object)
         sample_ids = np.arange(len(labels), dtype=np.int64)
@@ -194,15 +195,41 @@ def collect_split_records(
 
 
 def _decode_pixels(pixels: tf.Tensor, image_size: int, channels: int) -> tf.Tensor:
+    def _read_image_or_pixels(p_tensor):
+        p_str = p_tensor.numpy().decode("utf-8") if hasattr(p_tensor, "numpy") else str(p_tensor)
+        p_path = Path(p_str)
+        if not p_path.is_absolute():
+            p_path = Path(__file__).resolve().parents[1] / p_str
+        if p_path.exists() and p_path.is_file():
+            img_raw = tf.io.read_file(str(p_path))
+            img = tf.io.decode_image(img_raw, channels=channels, expand_animations=False)
+            img = tf.cast(img, tf.float32)
+            if img.shape[-1] == 1 and channels == 3:
+                img = tf.image.grayscale_to_rgb(img)
+            return tf.image.resize(img, [image_size, image_size])
+        
+        # Fallback to space-separated pixel string
+        vals = np.fromstring(p_str, sep=" ", dtype=np.float32)
+        if len(vals) > 0:
+            side = int(np.round(np.sqrt(len(vals))))
+            img = vals.reshape(side, side, 1)
+            img = tf.cast(img, tf.float32)
+            img = tf.image.resize(img, [image_size, image_size], method="bilinear")
+            if channels == 3:
+                img = tf.image.grayscale_to_rgb(img)
+            return img
+        raise ValueError(f"Unable to parse image path or pixel string: {p_str[:50]}")
+
     if pixels.dtype == tf.string:
-        values = tf.strings.to_number(tf.strings.split(tf.expand_dims(pixels, axis=0)).values, out_type=tf.float32)
-        image = tf.reshape(values, [48, 48, 1])
+        image = tf.py_function(func=_read_image_or_pixels, inp=[pixels], Tout=tf.float32)
+        image.set_shape([image_size, image_size, channels])
+        return image
     else:
         image = tf.reshape(tf.cast(pixels, tf.float32), [48, 48, 1])
-    image = tf.image.resize(image, [image_size, image_size], method="bilinear")
-    if channels == 3:
-        image = tf.image.grayscale_to_rgb(image)
-    return image
+        image = tf.image.resize(image, [image_size, image_size], method="bilinear")
+        if channels == 3:
+            image = tf.image.grayscale_to_rgb(image)
+        return image
 
 
 def _normalize_image(image: tf.Tensor, channels: int) -> tf.Tensor:
@@ -341,7 +368,10 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
             maxval=1.0 + brightness_delta,
         )
         image = image * brightness
-    image = tf.image.random_contrast(image, lower=float(aug_cfg.get("contrast_lower", 1.0)), upper=float(aug_cfg.get("contrast_upper", 1.0)))
+    contrast_lower = float(aug_cfg.get("contrast_lower", 1.0))
+    contrast_upper = float(aug_cfg.get("contrast_upper", 1.0))
+    if contrast_upper > contrast_lower:
+        image = tf.image.random_contrast(image, lower=contrast_lower, upper=contrast_upper)
     image = tf.clip_by_value(image, 0.0, 255.0)
     gamma_prob = float(aug_cfg.get("gamma_prob", 0.0))
     if gamma_prob > 0.0:

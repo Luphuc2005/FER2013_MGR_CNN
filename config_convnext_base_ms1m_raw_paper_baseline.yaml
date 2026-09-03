@@ -2,7 +2,7 @@ seed:
   random_seed: 42
 
 source:
-  note: "ConvNeXt-Base MS1M/ArcFace pretrained CNN with CLIP Text Semantic Alignment Branch (Frozen CLIP Text Encoder)."
+  note: "Raw Paper Baseline: ConvNeXt-Base MS1M without Data Augmentation, without SAM, without Label Smoothing, standard AdamW optimizer for ablation comparison."
 
 runtime:
   gpu_ids: [0]
@@ -19,8 +19,14 @@ runtime:
   tf_data_deterministic: false
   prefetch_buffer: 2
   distributed_eval: false
-  eval_tta_hflip: true
-  train_val_tta_hflip: true
+  eval_tta_hflip: false
+  train_val_tta_hflip: false
+
+tta:
+  enabled: false
+  hflip: false
+  original_weight: 1.0
+  flip_weight: 0.0
 
 data:
   data_path: "data/fer13-split"
@@ -39,45 +45,27 @@ data:
   cache: false
 
 augmentation:
-  horizontal_flip: true
-  rotation_degrees: 15.0
-  brightness_delta: 0.15
-  contrast_lower: 0.85
-  contrast_upper: 1.15
-  gamma_prob: 0.5
-  gamma_min: 0.5
-  gamma_max: 2.0
-  random_erasing_prob: 0.40
-  random_erasing_area_min: 0.02
-  random_erasing_area_max: 0.15
+  horizontal_flip: false
+  rotation_degrees: 0.0
+  brightness_delta: 0.0
+  contrast_lower: 1.0
+  contrast_upper: 1.0
+  gamma_prob: 0.0
+  gamma_min: 1.0
+  gamma_max: 1.0
+  random_erasing_prob: 0.0
+  random_erasing_area_min: 0.0
+  random_erasing_area_max: 0.0
   random_erasing_value: "random"
 
 model:
-  name: "convnext_base_ms1m_arcface_clip_semantic"
+  name: "convnext_base_ms1m_raw_paper_baseline"
   arch: "convnext_base_ms1m_arcface"
   pretrained: true
   convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
   convnext_base_require_pretrained: true
   drop_path_rate: 0.1
   layer_scale_init_value: 0.000001
-  use_eca: false
-  use_semantic_branch: true
-  use_clip_semantic: true
-  multi_prototype: false
-  lambda_sem: 0.1
-  clip_model_name: "openai/clip-vit-base-patch32"
-  clip_embedding_dim: 512
-  clip_prototypes_path: "pretrained/clip_text_prototypes_7emotions.npy"
-  semantic_logit_scale: 20.0
-
-  clip_semantic:
-    enabled: true
-    multi_prototype: false
-    num_prototypes_per_class: 1
-    semantic_logit_scale: 20.0
-    lambda_sem: 0.1
-
-  ablation: "semantic_clip"
 
   checkpoint_path: null
   checkpoint_strict: false
@@ -97,6 +85,7 @@ model:
   freeze_backbone_epochs: 4
   unfreeze_backbone: true
   freeze_unfrozen_batchnorm: true
+  ablation: "cnn_only"
 
 stage_transition:
   enable_2stage_switching: false
@@ -106,10 +95,10 @@ training:
   patience: 15
   warmup_epochs: 5
   loss: "cross_entropy"
-  label_smoothing: 0.10
-  optimizer: "sam"
+  label_smoothing: 0.0               # Raw cross-entropy (No label smoothing)
+  optimizer: "adamw"                 # Standard AdamW (No SAM)
   base_optimizer: "adamw"
-  sam_rho: 0.03
+  sam_rho: 0.0                       # SAM disabled
   sam_adaptive: false
   lr: 0.0003
   finetune_lr: 0.0003
@@ -125,5 +114,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/papers/convnext_base_ms1m_arcface_clip_semantic"
+  output_dir: "outputs/papers/convnext_base_ms1m_raw_paper_baseline"
   logs_dir: "logs"

@@ -2,7 +2,7 @@ seed:
   random_seed: 42
 
 source:
-  note: "ConvNeXt-Base MS1M/ArcFace pretrained CNN with CLIP Text Semantic Alignment Branch (Frozen CLIP Text Encoder)."
+  note: "SOTA V4 Ultimate MSDA Residual Config: Mask-Free ConvNeXt-B MS1M with Stage 2 Micro-Texture Bridge, 4-Branch Dilation (1,2,4), LayerNorm Spatial Attention, Full Backbone Fine-tuning (Unfrozen Stage 1-4), Initial Alpha 0.05, SupCon Loss, Aux Supervision Head, and SAM Optimizer."
 
 runtime:
   gpu_ids: [0]
@@ -22,9 +22,14 @@ runtime:
   eval_tta_hflip: true
   train_val_tta_hflip: true
 
+tta:
+  enabled: true
+  hflip: true
+  original_weight: 0.5
+  flip_weight: 0.5
+
 data:
   data_path: "data/fer13-split"
-  mask_dir: null
   num_classes: 7
   image_size: 112
   channels: 3
@@ -34,7 +39,6 @@ data:
   allow_missing_masks: true
   use_clean_filter: false
   bad_row_indices_path: null
-  mask_ablation: "none"
   shuffle_buffer: 28709
   cache: false
 
@@ -53,53 +57,37 @@ augmentation:
   random_erasing_value: "random"
 
 model:
-  name: "convnext_base_ms1m_arcface_clip_semantic"
-  arch: "convnext_base_ms1m_arcface"
+  name: "convnext_base_ms1m_crossstage_msda_residual_v4_sota"
+  arch: "convnext_base_ms1m_crossstage_msda_residual"
   pretrained: true
   convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
-  convnext_base_require_pretrained: true
+  convnext_base_require_pretrained: false
   drop_path_rate: 0.1
   layer_scale_init_value: 0.000001
-  use_eca: false
-  use_semantic_branch: true
-  use_clip_semantic: true
-  multi_prototype: false
-  lambda_sem: 0.1
-  clip_model_name: "openai/clip-vit-base-patch32"
-  clip_embedding_dim: 512
-  clip_prototypes_path: "pretrained/clip_text_prototypes_7emotions.npy"
-  semantic_logit_scale: 20.0
+  classifier_dropout: 0.35
 
-  clip_semantic:
-    enabled: true
-    multi_prototype: false
-    num_prototypes_per_class: 1
-    semantic_logit_scale: 20.0
-    lambda_sem: 0.1
-
-  ablation: "semantic_clip"
-
-  checkpoint_path: null
-  checkpoint_strict: false
-  classifier_dropout1: 0.35
-  classifier_dropout2: 0.0
-  ortho_loss_weight: 0.0
-
-  use_cnn_aux_loss: false
-  use_cnn_aux_logits: false
-  cnn_aux_loss_weight: 0.0
-
-  attention_logit_weight: 1.0
-  cnn_aux_logit_weight: 0.0
-  logit_fusion: "single_head"
-  finetune_logit_fusion: "single_head"
-
+  # SOTA V4 Advanced Supervision & Micro-Texture Bridge Architecture
+  freeze_stage12: false                         # Unfreeze Stage 1 & Stage 2 after 4 warmup epochs for max adaptation
   freeze_backbone_epochs: 4
   unfreeze_backbone: true
-  freeze_unfrozen_batchnorm: true
+  
+  use_aux_loss: true                            # Deep Supervision Aux Classifier Head on Stage 4
+  aux_loss_weight: 0.20
+  
+  use_supcon_loss: true                         # Supervised Contrastive Loss on F_da Features
+  supcon_loss_weight: 0.10
+  supcon_temperature: 0.10
 
-stage_transition:
-  enable_2stage_switching: false
+  use_arcface: true                             # ArcFace Cosine Margin Classifier Head
+  arcface_scale: 30.0
+  arcface_margin: 0.20
+
+cross_stage_msda:
+  branch_dim: 256
+  channel_reduction: 16
+  spatial_kernel_size: 7
+  alpha_max: 0.20
+  initial_alpha: 0.05
 
 training:
   epochs: 60
@@ -125,5 +113,10 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/papers/convnext_base_ms1m_arcface_clip_semantic"
+  output_dir: "outputs/tf_runs/convnext_base_ms1m_crossstage_msda_residual_v4_sota"
   logs_dir: "logs"
+
+smoke_tests:
+  identity_max_abs_logit_diff: 0.0001
+  max_new_module_params: 6500000
+  max_total_params: 95000000

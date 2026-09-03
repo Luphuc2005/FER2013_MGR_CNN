@@ -1,12 +1,15 @@
+# ConvNeXt-Base MS1M Adaptive SigLIP2 + Confusion-Aware Hard Semantic Separation for Kaggle 1-GPU
+# Global Batch Size = 16 (1 GPU x BS 16)
+
 seed:
   random_seed: 42
 
 source:
-  note: "ConvNeXt-Base MS1M/ArcFace pretrained CNN with CLIP Text Semantic Alignment Branch (Frozen CLIP Text Encoder)."
+  note: "ConvNeXt-Base MS1M with Adaptive Multi-Granularity SigLIP2 Semantic Alignment + Confusion-Aware Hard Semantic Separation for Kaggle 1 GPU (BS 16)."
 
 runtime:
   gpu_ids: [0]
-  batch_size_per_gpu: 32
+  batch_size_per_gpu: 16
   fallback_batch_size_per_gpu: 16
   require_two_gpus: false
   min_gpus: 1
@@ -21,6 +24,12 @@ runtime:
   distributed_eval: false
   eval_tta_hflip: true
   train_val_tta_hflip: true
+
+tta:
+  enabled: true
+  hflip: true
+  original_weight: 0.50
+  flip_weight: 0.50
 
 data:
   data_path: "data/fer13-split"
@@ -53,31 +62,50 @@ augmentation:
   random_erasing_value: "random"
 
 model:
-  name: "convnext_base_ms1m_arcface_clip_semantic"
+  name: "kaggle_convnext_base_ms1m_adaptive_siglip2_confusion"
   arch: "convnext_base_ms1m_arcface"
   pretrained: true
   convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
   convnext_base_require_pretrained: true
   drop_path_rate: 0.1
   layer_scale_init_value: 0.000001
-  use_eca: false
+
   use_semantic_branch: true
   use_clip_semantic: true
-  multi_prototype: false
+  multi_prototype: true
+  ablation: "adaptive_clip_confusion"
+
+  # Adaptive Multi-Granularity Gate
+  use_adaptive_granularity: true
+
+  # Confusion-Aware Hard Semantic Separation Loss
+  use_hard_semantic_loss: true
   lambda_sem: 0.1
-  clip_model_name: "openai/clip-vit-base-patch32"
-  clip_embedding_dim: 512
-  clip_prototypes_path: "pretrained/clip_text_prototypes_7emotions.npy"
+  lambda_hard: 0.05
+  hard_margin: 0.15
+  hard_pairs:
+    0: [4, 2]     # angry -> sad, fear
+    2: [4, 0]     # fear -> sad, angry
+    4: [0, 2, 6]  # sad -> angry, fear, neutral
+    6: [4]        # neutral -> sad
+
+  # SigLIP2 Model Configuration (Google SigLIP 2)
+  clip_model_name: "google/siglip2-base-patch16-224"
+  clip_embedding_dim: 768
+  clip_prototypes_path: "pretrained/siglip2_text_prototypes_7emotions_multigranularity_multi5.npy"
   semantic_logit_scale: 20.0
 
   clip_semantic:
     enabled: true
-    multi_prototype: false
-    num_prototypes_per_class: 1
+    multi_prototype: true
+    num_prototypes_per_class: 5
+    clip_model_name: "google/siglip2-base-patch16-224"
+    clip_embedding_dim: 768
+    clip_prototypes_path: "pretrained/siglip2_text_prototypes_7emotions_multigranularity_multi5.npy"
     semantic_logit_scale: 20.0
     lambda_sem: 0.1
-
-  ablation: "semantic_clip"
+    lambda_hard: 0.05
+    hard_margin: 0.15
 
   checkpoint_path: null
   checkpoint_strict: false
@@ -119,11 +147,13 @@ training:
   grad_clip_norm: 1.0
   skip_nonfinite_batches: true
   monitor: "val_accuracy"
+  max_to_keep_acc: 5
+  max_to_keep_loss: 5
   resume: false
   best_checkpoint_start_epoch: 1
   periodic_checkpoint_interval: 10
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/papers/convnext_base_ms1m_arcface_clip_semantic"
+  output_dir: "outputs/kaggle_siglip2_confusion_bs32"
   logs_dir: "logs"
