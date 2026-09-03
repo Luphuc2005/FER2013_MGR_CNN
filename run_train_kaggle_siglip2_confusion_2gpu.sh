@@ -10,20 +10,20 @@ CONFIG_PATH="${CONFIG_PATH:-configs/kaggle/config_convnext_base_ms1m_adaptive_si
 LOG_DIR="/kaggle/working/logs"
 mkdir -p "${LOG_DIR}"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-1}"
 export TF_FORCE_GPU_ALLOW_GROWTH=true
-export MGR_GPU_IDS="${MGR_GPU_IDS:-0,1}"
-export MGR_REQUIRE_TWO_GPUS=1
-export MGR_MIN_GPUS=2
+export MGR_GPU_IDS="${MGR_GPU_IDS:-0}"
+export MGR_REQUIRE_TWO_GPUS=0
+export MGR_MIN_GPUS=1
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
-TRAIN_LOG="${LOG_DIR}/train_siglip2_confusion_2gpu_${STAMP}.log"
+TRAIN_LOG="${LOG_DIR}/train_siglip2_confusion_1gpu_${STAMP}.log"
 
 echo "============================================================"
-echo " Starting SigLIP 2 Confusion-Aware Training on Kaggle 2-GPU "
+echo " Starting SigLIP 2 Confusion-Aware Training on Kaggle 1-GPU "
 echo " Config: ${CONFIG_PATH}"
-echo " CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+echo " CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES} | Batch Size: 16"
 echo "============================================================"
 
 python3 train.py --config "${CONFIG_PATH}" 2>&1 | tee -a "${TRAIN_LOG}"

@@ -1,18 +1,18 @@
-# ConvNeXt-Base MS1M Adaptive SigLIP2 + Confusion-Aware Hard Semantic Separation for Kaggle Dual GPU
-# Global Batch Size = 32 (2 GPUs x BS 16 per GPU)
+# ConvNeXt-Base MS1M Adaptive SigLIP2 + Confusion-Aware Hard Semantic Separation for Kaggle 1-GPU
+# Global Batch Size = 16 (1 GPU x BS 16)
 
 seed:
   random_seed: 42
 
 source:
-  note: "ConvNeXt-Base MS1M with Adaptive Multi-Granularity SigLIP2 Semantic Alignment + Confusion-Aware Hard Semantic Separation for Kaggle Dual GPU (Global BS 32)."
+  note: "ConvNeXt-Base MS1M with Adaptive Multi-Granularity SigLIP2 Semantic Alignment + Confusion-Aware Hard Semantic Separation for Kaggle 1 GPU (BS 16)."
 
 runtime:
-  gpu_ids: [0, 1]
+  gpu_ids: [0]
   batch_size_per_gpu: 16
   fallback_batch_size_per_gpu: 16
-  require_two_gpus: true
-  min_gpus: 2
+  require_two_gpus: false
+  min_gpus: 1
   memory_growth: true
   use_mixed_precision: true
   intra_op_threads: 16
