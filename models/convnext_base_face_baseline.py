@@ -949,7 +949,10 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 v_norm = tf.math.l2_normalize(v_proj, axis=-1)
                 t_norm = tf.cast(t_norm, dtype=v_norm.dtype)
                 endpoints["visual_projector"] = v_proj
-                raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
+                if len(t_norm.shape) == 3 or (hasattr(t_norm.shape, "rank") and t_norm.shape.rank == 3):
+                    raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
+                else:
+                    raw_sim = tf.einsum("bd,cd->bc", v_norm, t_norm)
 
             if self.multi_prototype or self.use_adaptive_granularity:
                 endpoints["raw_semantic_similarity"] = raw_sim
@@ -976,9 +979,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                         raise ValueError(f"Unsupported prototype_aggregation: {self.prototype_aggregation}")
                 semantic_logits = agg_sim * tf.cast(self.semantic_logit_scale, tf.float32)
             else:
-                t_norm_single = tf.cast(t_norm, dtype=v_norm.dtype)
-                cos_sim = tf.matmul(v_norm, t_norm_single, transpose_b=True)
-                agg_sim = tf.cast(cos_sim, tf.float32)
+                agg_sim = tf.cast(raw_sim, tf.float32)
                 semantic_logits = agg_sim * tf.cast(self.semantic_logit_scale, tf.float32)
             endpoints["semantic_logits"] = semantic_logits
 
