@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT=/home/ptbao/projects/FER2013_MGR_CNN
 cd "$ROOT"
 
-mkdir -p logs outputs/paperfinal
+mkdir -p logs outputs/paperfinal_v2
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"

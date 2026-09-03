@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT=/home/ptbao/projects/FER2013_MGR_CNN
 cd "$ROOT"
 
-mkdir -p logs outputs/paperfinal/ablation_2_siglip2_single_proto
+mkdir -p logs outputs/paperfinal_v2/ablation_2_siglip2_single_proto
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
@@ -24,7 +24,7 @@ CONFIG="$ROOT/config_ablation_2_siglip2_single_proto.yaml"
 
 echo "============================================================"
 echo " Ablation Step 2: + SigLIP2 Single Prototype"
-echo " Output: outputs/paperfinal/ablation_2_siglip2_single_proto"
+echo " Output: outputs/paperfinal_v2/ablation_2_siglip2_single_proto"
 echo "============================================================"
 
 export NVIDIA_LIB=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/lib/python3.9/site-packages/nvidia

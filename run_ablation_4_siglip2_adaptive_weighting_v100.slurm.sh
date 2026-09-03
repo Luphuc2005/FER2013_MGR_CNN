@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT=/home/ptbao/projects/FER2013_MGR_CNN
 cd "$ROOT"
 
-mkdir -p logs outputs/paperfinal/ablation_4_siglip2_adaptive_weighting
+mkdir -p logs outputs/paperfinal_v2/ablation_4_siglip2_adaptive_weighting
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
@@ -24,7 +24,7 @@ CONFIG="$ROOT/config_ablation_4_siglip2_adaptive_weighting.yaml"
 
 echo "============================================================"
 echo " Ablation Step 4: + Adaptive Weighting"
-echo " Output: outputs/paperfinal/ablation_4_siglip2_adaptive_weighting"
+echo " Output: outputs/paperfinal_v2/ablation_4_siglip2_adaptive_weighting"
 echo "============================================================"
 
 export NVIDIA_LIB=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/lib/python3.9/site-packages/nvidia

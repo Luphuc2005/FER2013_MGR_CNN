@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT=/home/ptbao/projects/FER2013_MGR_CNN
 cd "$ROOT"
 
-mkdir -p logs outputs/paperfinal/ablation_5_siglip2_confusion_aware
+mkdir -p logs outputs/paperfinal_v2/ablation_5_siglip2_confusion_aware
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
@@ -24,7 +24,7 @@ CONFIG="$ROOT/config_ablation_5_siglip2_confusion_aware.yaml"
 
 echo "============================================================"
 echo " Ablation Step 5: + Confusion-Aware Separation"
-echo " Output: outputs/paperfinal/ablation_5_siglip2_confusion_aware"
+echo " Output: outputs/paperfinal_v2/ablation_5_siglip2_confusion_aware"
 echo "============================================================"
 
 export NVIDIA_LIB=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/lib/python3.9/site-packages/nvidia

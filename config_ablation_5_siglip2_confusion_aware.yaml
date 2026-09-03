@@ -143,5 +143,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/paperfinal/ablation_5_siglip2_confusion_aware"
+  output_dir: "outputs/paperfinal_v2/ablation_5_siglip2_confusion_aware"
   logs_dir: "logs"

@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT=/home/ptbao/projects/FER2013_MGR_CNN
 cd "$ROOT"
 
-mkdir -p logs outputs/paperfinal/ablation_3_siglip2_multigranularity
+mkdir -p logs outputs/paperfinal_v2/ablation_3_siglip2_multigranularity
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
@@ -24,7 +24,7 @@ CONFIG="$ROOT/config_ablation_3_siglip2_multigranularity.yaml"
 
 echo "============================================================"
 echo " Ablation Step 3: + Multi-Granularity Prototypes"
-echo " Output: outputs/paperfinal/ablation_3_siglip2_multigranularity"
+echo " Output: outputs/paperfinal_v2/ablation_3_siglip2_multigranularity"
 echo "============================================================"
 
 export NVIDIA_LIB=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/lib/python3.9/site-packages/nvidia

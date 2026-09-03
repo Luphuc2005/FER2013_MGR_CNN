@@ -145,5 +145,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/paperfinal/ablation_6_full_model_top5_ensemble"
+  output_dir: "outputs/paperfinal_v2/ablation_6_full_model_top5_ensemble"
   logs_dir: "logs"

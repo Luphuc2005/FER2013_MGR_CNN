@@ -117,5 +117,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/paperfinal/ablation_1_baseline"
+  output_dir: "outputs/paperfinal_v2/ablation_1_baseline"
   logs_dir: "logs"

@@ -136,5 +136,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/paperfinal/ablation_3_siglip2_multigranularity"
+  output_dir: "outputs/paperfinal_v2/ablation_3_siglip2_multigranularity"
   logs_dir: "logs"

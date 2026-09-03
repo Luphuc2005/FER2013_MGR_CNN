@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT=/home/ptbao/projects/FER2013_MGR_CNN
 cd "$ROOT"
 
-mkdir -p logs outputs/paperfinal/ablation_1_baseline
+mkdir -p logs outputs/paperfinal_v2/ablation_1_baseline
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
@@ -24,7 +24,7 @@ CONFIG="$ROOT/config_ablation_1_baseline.yaml"
 
 echo "============================================================"
 echo " Ablation Step 1: ConvNeXt-B MS1M Baseline"
-echo " Output: outputs/paperfinal/ablation_1_baseline"
+echo " Output: outputs/paperfinal_v2/ablation_1_baseline"
 echo "============================================================"
 
 export NVIDIA_LIB=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/lib/python3.9/site-packages/nvidia
