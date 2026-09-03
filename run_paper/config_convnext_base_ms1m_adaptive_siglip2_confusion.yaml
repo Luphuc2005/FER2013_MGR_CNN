@@ -5,7 +5,7 @@ source:
   note: "ConvNeXt-Base MS1M with Adaptive Multi-Granularity SigLIP2 Semantic Alignment + Confusion-Aware Hard Semantic Separation."
 
 runtime:
-  gpu_ids: [0]
+  gpu_ids: [0, 1]
   batch_size_per_gpu: 16
   fallback_batch_size_per_gpu: 16
   require_two_gpus: false

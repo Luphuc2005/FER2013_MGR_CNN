@@ -424,6 +424,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             Path("/kaggle/input"),
             Path("/kaggle/working"),
             Path(__file__).resolve().parents[1] / "pretrained",
+            Path(__file__).resolve().parents[1] / "data",
         ]
         for search_dir in search_dirs:
             if search_dir.exists():
@@ -533,25 +534,34 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
 
     def _load_pytorch_pretrained(self, weight_path: str, require: bool = False) -> str:
         resolved = self._resolve_weight_path(weight_path)
-        if not resolved.exists():
-            message = f"[ConvNeXtBaseFace] PyTorch pretrained checkpoint not found: {resolved}"
+        npz_resolved = resolved.with_suffix(".npz")
+
+        raw_state = None
+        if npz_resolved.exists():
+            print(f"[ConvNeXtBaseFace] Loading NumPy (.npz) pretrained checkpoint: {npz_resolved}", flush=True)
+            loaded_npz = np.load(str(npz_resolved))
+            raw_state = {k: loaded_npz[k] for k in loaded_npz.files}
+        elif resolved.exists():
+            try:
+                import torch
+                print(f"[ConvNeXtBaseFace] Loading PyTorch pretrained checkpoint: {resolved}", flush=True)
+                checkpoint = torch.load(str(resolved), map_location="cpu")
+                raw_state = self._extract_state_dict(checkpoint)
+            except Exception as exc:
+                message = f"PyTorch import/load failed ({exc}). Please install CPU PyTorch (`pip install torch --index-url https://download.pytorch.org/whl/cpu`) or provide a .npz checkpoint."
+                if require:
+                    raise RuntimeError(message) from exc
+                print(f"[ConvNeXtBaseFace] WARNING: {message}", flush=True)
+                return "torch_missing"
+        else:
+            message = f"[ConvNeXtBaseFace] Pretrained checkpoint not found: {resolved} (or {npz_resolved})"
             if require:
                 raise FileNotFoundError(message)
             print(f"[ConvNeXtBaseFace] WARNING: {message}", flush=True)
             return "missing"
 
-        try:
-            import torch
-        except Exception as exc:
-            if require:
-                raise RuntimeError("PyTorch is required to load ConvNeXt-B MS1M/ArcFace checkpoint.") from exc
-            print(f"[ConvNeXtBaseFace] WARNING: PyTorch import failed: {exc}", flush=True)
-            return "torch_missing"
-
         self._build_variables()
-        print(f"[ConvNeXtBaseFace] Loading PyTorch pretrained checkpoint: {resolved}", flush=True)
-        checkpoint = torch.load(str(resolved), map_location="cpu")
-        state = self._normalize_state_dict(self._extract_state_dict(checkpoint))
+        state = self._normalize_state_dict(raw_state)
         used_keys = set()
         matched = 0
         unmatched: List[str] = []
