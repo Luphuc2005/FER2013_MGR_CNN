@@ -57,7 +57,7 @@ echo "============================================================"
 echo "============================================================"
 echo " Running Automated TTA Sweep on Best Loss Checkpoint..."
 echo "============================================================"
-BEST_LOSS_CKPT=$(ls -d $ROOT/outputs/papers/siglip2-confusion/checkpoints/best_loss/ckpt-* 2>/dev/null | tail -n 1 || true)
+BEST_LOSS_CKPT=$(ls -d $ROOT/outputs/papers/siglip2-confusion*/checkpoints/best_loss/ckpt-*.index 2>/dev/null | tail -n 1 | sed 's/\.index$//' || true)
 if [ -n "$BEST_LOSS_CKPT" ]; then
     "$FER_PY" -u sweep_tta_weights.py --config "$CONFIG" --checkpoint "$BEST_LOSS_CKPT" --step 0.05 || true
 fi

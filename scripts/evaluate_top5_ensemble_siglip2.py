@@ -25,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import load_config
+from config import load_config, resolve_auto_increment_output_dir
 from datasets.fer2013 import EMOTION_NAMES, build_datasets
 from train import build_model, build_optimizer, configure_gpus, configure_tensorflow_runtime
 
@@ -91,6 +91,7 @@ def extract_probs(model, dataset, w_orig=0.40, w_flip=0.60):
 def main() -> int:
     args = parse_args()
     cfg = load_config(args.config)
+    resolve_auto_increment_output_dir(cfg, for_eval=True)
     configure_tensorflow_runtime(cfg)
     configure_gpus(cfg)
 

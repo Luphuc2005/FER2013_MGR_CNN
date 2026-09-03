@@ -44,7 +44,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*calling iterator did not fully read the dataset being cached.*")
 tf.get_logger().setLevel('ERROR')
 
-from config import load_config, global_batch_size
+from config import load_config, global_batch_size, resolve_auto_increment_output_dir
 from datasets.fer2013 import EMOTION_NAMES, build_datasets
 from losses.classification import supervised_mgr_loss
 from metrics.classification import classification_metrics, save_metrics
@@ -85,6 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FER2013_SGU TensorFlow MGR-CNN training")
     parser.add_argument("--config", type=str, default="config.yaml")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--no-auto-increment", action="store_true", help="Disable auto-incrementing output_dir when checkpoints exist")
     parser.add_argument("--evaluate-only", action="store_true")
     return parser.parse_args()
 
@@ -836,6 +837,18 @@ def evaluate_dataset(
 def main() -> int:
     args = parse_args()
     cfg = load_config(args.config)
+    is_resume = bool(args.resume or cfg["training"].get("resume", False))
+    auto_inc = not bool(args.no_auto_increment) if args.no_auto_increment else bool(cfg["paths"].get("auto_increment", True))
+    orig_output_path = cfg["paths"]["output_dir"]
+    run_dir = resolve_auto_increment_output_dir(
+        cfg,
+        is_resume=is_resume,
+        for_eval=bool(args.evaluate_only),
+        auto_increment=auto_inc,
+    )
+    if str(run_dir) != str(orig_output_path):
+        print(f"[INFO] Existing checkpoint directory detected! Auto-incremented output_dir: {orig_output_path} -> {run_dir}", flush=True)
+
     configure_tensorflow_runtime(cfg)
     tf.keras.utils.set_random_seed(int(cfg["seed"]["random_seed"]))
     configure_gpus(cfg)
