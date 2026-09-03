@@ -445,6 +445,19 @@ def _encode_with_transformers(
         import torch
         from transformers import AutoTokenizer, AutoModel, CLIPTextModelWithProjection, CLIPModel
 
+        def _extract_tensor(out):
+            if isinstance(out, torch.Tensor):
+                return out
+            if hasattr(out, "text_embeds") and isinstance(out.text_embeds, torch.Tensor):
+                return out.text_embeds
+            if hasattr(out, "pooler_output") and isinstance(out.pooler_output, torch.Tensor):
+                return out.pooler_output
+            if hasattr(out, "last_hidden_state") and isinstance(out.last_hidden_state, torch.Tensor):
+                return out.last_hidden_state[:, 0, :]
+            if isinstance(out, (list, tuple)) and len(out) > 0:
+                return _extract_tensor(out[0])
+            raise TypeError(f"Cannot extract torch.Tensor from HuggingFace output of type {type(out)}")
+
         print(f"[CLIP/SigLIP] Loading PyTorch HuggingFace model '{model_name}' (multi_prototype={multi_prototype})...", flush=True)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         text_encoder = None
@@ -468,14 +481,11 @@ def _encode_with_transformers(
                         prompts = [p_item] if isinstance(p_item, str) else p_item
                         inputs = tokenizer(prompts, padding=True, return_tensors="pt")
                         if hasattr(text_encoder, "get_text_features"):
-                            embeds = text_encoder.get_text_features(**inputs)
-                        elif hasattr(text_encoder, "text_model"):
-                            outputs = text_encoder(**inputs)
-                            embeds = outputs.text_embeds if hasattr(outputs, "text_embeds") else outputs[0][:, 0, :]
+                            out = text_encoder.get_text_features(**inputs)
                         else:
-                            outputs = text_encoder(**inputs)
-                            embeds = outputs.text_embeds if hasattr(outputs, "text_embeds") else outputs[0][:, 0, :]
+                            out = text_encoder(**inputs)
 
+                        embeds = _extract_tensor(out)
                         embeds = embeds / embeds.norm(p=2, dim=-1, keepdim=True)
                         level_embed = embeds.mean(dim=0)
                         level_embed = level_embed / level_embed.norm(p=2, dim=-1, keepdim=True)
@@ -490,14 +500,11 @@ def _encode_with_transformers(
                             flat_prompts.append(item)
                     inputs = tokenizer(flat_prompts, padding=True, return_tensors="pt")
                     if hasattr(text_encoder, "get_text_features"):
-                        embeds = text_encoder.get_text_features(**inputs)
-                    elif hasattr(text_encoder, "text_model"):
-                        outputs = text_encoder(**inputs)
-                        embeds = outputs.text_embeds if hasattr(outputs, "text_embeds") else outputs[0][:, 0, :]
+                        out = text_encoder.get_text_features(**inputs)
                     else:
-                        outputs = text_encoder(**inputs)
-                        embeds = outputs.text_embeds if hasattr(outputs, "text_embeds") else outputs[0][:, 0, :]
+                        out = text_encoder(**inputs)
 
+                    embeds = _extract_tensor(out)
                     embeds = embeds / embeds.norm(p=2, dim=-1, keepdim=True)
                     if multi_prototype:
                         class_prototypes.append(embeds.cpu().numpy())
