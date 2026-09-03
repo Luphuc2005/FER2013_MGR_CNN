@@ -10,7 +10,7 @@ from sklearn.metrics import accuracy_score, f1_score
 
 from config import load_config
 from datasets.fer2013 import build_datasets
-from train import configure_gpus, configure_tensorflow_runtime, build_model
+from train import configure_gpus, configure_tensorflow_runtime, build_model, build_optimizer
 
 
 def parse_args():
@@ -97,21 +97,33 @@ def main() -> int:
     
     _, val_ds, test_ds = build_datasets(cfg, replicas=strategy.num_replicas_in_sync)
     
+    first_batch = next(iter(val_ds.take(1)))
+    first_inputs = first_batch[0] if isinstance(first_batch, (tuple, list)) else first_batch
+
     with strategy.scope():
         model = build_model(cfg)
-        dummy_image = tf.zeros([1, cfg["data"]["image_size"], cfg["data"]["image_size"], cfg["data"]["channels"]], tf.float32)
-        model({"image": dummy_image}, training=False)
-        ckpt = tf.train.Checkpoint(model=model)
+        _ = model(first_inputs, training=False)
+        ckpt_epoch = tf.Variable(0, dtype=tf.int64, trainable=False)
+        ckpt_best_metric = tf.Variable(-1.0, dtype=tf.float32, trainable=False)
+        optimizer_head = build_optimizer(cfg, float(cfg["training"]["lr"]))
+        optimizer_backbone = build_optimizer(cfg, float(cfg["training"].get("visual_extractor_lr", cfg["training"]["lr"])))
+        checkpoint = tf.train.Checkpoint(
+            epoch=ckpt_epoch,
+            best_metric=ckpt_best_metric,
+            model=model,
+            optimizer_head=optimizer_head,
+            optimizer_backbone=optimizer_backbone,
+        )
         checkpoint_path = args.checkpoint
         if checkpoint_path is None:
             checkpoint_root = Path(cfg["paths"]["output_dir"]) / "checkpoints"
-            best_manager = tf.train.CheckpointManager(ckpt, directory=str(checkpoint_root / "best"), max_to_keep=1)
-            best_loss_manager = tf.train.CheckpointManager(ckpt, directory=str(checkpoint_root / "best_loss"), max_to_keep=1)
-            last_manager = tf.train.CheckpointManager(ckpt, directory=str(checkpoint_root / "last"), max_to_keep=1)
+            best_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "best"), max_to_keep=1)
+            best_loss_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "best_loss"), max_to_keep=1)
+            last_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "last"), max_to_keep=1)
             checkpoint_path = best_manager.latest_checkpoint or best_loss_manager.latest_checkpoint or last_manager.latest_checkpoint
         if not checkpoint_path:
             raise FileNotFoundError(f"No checkpoint found in {cfg['paths']['output_dir']}")
-        ckpt.restore(checkpoint_path).expect_partial()
+        checkpoint.restore(checkpoint_path).expect_partial()
         print(f"[INFO] Restored checkpoint: {checkpoint_path}")
 
     print("\n[INFO] Extracting raw logits for VALIDATION set...", flush=True)

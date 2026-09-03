@@ -27,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from config import load_config
 from datasets.fer2013 import EMOTION_NAMES, build_datasets
-from train import build_model, configure_gpus, configure_tensorflow_runtime
+from train import build_model, build_optimizer, configure_gpus, configure_tensorflow_runtime
 
 
 def parse_args():
@@ -126,11 +126,23 @@ def main() -> int:
 
     _, val_ds, test_ds = build_datasets(cfg, replicas=strategy.num_replicas_in_sync)
 
+    first_batch = next(iter(val_ds.take(1)))
+    first_inputs = first_batch[0] if isinstance(first_batch, (tuple, list)) else first_batch
+
     with strategy.scope():
         model = build_model(cfg)
-        dummy_image = tf.zeros([1, cfg["data"]["image_size"], cfg["data"]["image_size"], cfg["data"]["channels"]], tf.float32)
-        _ = model({"image": dummy_image}, training=False)
-        ckpt = tf.train.Checkpoint(model=model)
+        _ = model(first_inputs, training=False)
+        ckpt_epoch = tf.Variable(0, dtype=tf.int64, trainable=False)
+        ckpt_best_metric = tf.Variable(-1.0, dtype=tf.float32, trainable=False)
+        optimizer_head = build_optimizer(cfg, float(cfg["training"]["lr"]))
+        optimizer_backbone = build_optimizer(cfg, float(cfg["training"].get("visual_extractor_lr", cfg["training"]["lr"])))
+        ckpt = tf.train.Checkpoint(
+            epoch=ckpt_epoch,
+            best_metric=ckpt_best_metric,
+            model=model,
+            optimizer_head=optimizer_head,
+            optimizer_backbone=optimizer_backbone,
+        )
 
     val_probs_list = []
     test_probs_list = []
