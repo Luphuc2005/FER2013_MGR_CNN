@@ -203,6 +203,28 @@ def build_model(cfg: Dict) -> tf.keras.Model:
     return MGRConvNeXtFER(cfg)
 
 
+def compute_loss(outputs, labels, cfg: Dict, model=None) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
+    num_classes = int(cfg.get("data", {}).get("num_classes", 7))
+    label_smoothing = float(cfg.get("training", {}).get("label_smoothing", 0.0))
+    ortho_weight = float(cfg.get("model", {}).get("ortho_loss_weight", 0.003))
+    cnn_aux_weight = float(cfg.get("model", {}).get("cnn_aux_loss_weight", 0.4))
+    
+    if isinstance(outputs, (tuple, list)):
+        outputs = {"logits": outputs[0]}
+    elif not isinstance(outputs, dict):
+        outputs = {"logits": outputs}
+
+    return supervised_mgr_loss(
+        labels=labels,
+        outputs=outputs,
+        num_classes=num_classes,
+        label_smoothing=label_smoothing,
+        ortho_weight=ortho_weight,
+        cnn_aux_weight=cnn_aux_weight,
+    )
+
+
+
 def ensure_optimizer_built(optimizer, variables: Sequence[tf.Variable], strategy: Optional[tf.distribute.Strategy] = None) -> None:
     variables = [v for v in variables if v is not None]
     if not variables:
