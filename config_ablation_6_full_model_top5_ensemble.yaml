@@ -53,7 +53,7 @@ augmentation:
   gamma_prob: 0.5
   gamma_min: 0.5
   gamma_max: 2.0
-  random_erasing_prob: 0.20
+  random_erasing_prob: 0.40
   random_erasing_area_min: 0.02
   random_erasing_area_max: 0.15
   random_erasing_value: "random"
@@ -74,8 +74,8 @@ model:
   use_adaptive_granularity: true
   use_hard_semantic_loss: true
 
-  lambda_sem: 0.05
-  lambda_hard: 0.03
+  lambda_sem: 0.1
+  lambda_hard: 0.05
   hard_margin: 0.15
   hard_pairs:
     0: [4, 2]     # angry -> sad, fear
@@ -96,8 +96,8 @@ model:
     clip_embedding_dim: 768
     clip_prototypes_path: "pretrained/siglip2_text_prototypes_7emotions_multigranularity_multi5.npy"
     semantic_logit_scale: 20.0
-    lambda_sem: 0.05
-    lambda_hard: 0.03
+    lambda_sem: 0.1
+    lambda_hard: 0.05
     hard_margin: 0.15
 
   checkpoint_path: null
@@ -124,7 +124,7 @@ training:
   patience: 25
   warmup_epochs: 8
   loss: "cross_entropy"
-  label_smoothing: 0.05
+  label_smoothing: 0.10
   max_to_keep_acc: 5
   max_to_keep_loss: 5
   optimizer: "sam"
