@@ -420,6 +420,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         # Kaggle & environment auto-resolution search
         filename = Path(weight_path).name
         search_dirs = [
+            Path("/kaggle/input/models/lhngphc/ms1m-pretrained/tensorflow2/default/1"),
             Path("/kaggle/input"),
             Path("/kaggle/working"),
             Path(__file__).resolve().parents[1] / "pretrained",
