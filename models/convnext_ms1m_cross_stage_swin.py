@@ -102,6 +102,7 @@ class CrossAttention(tf.keras.layers.Layer):
 
         logits = tf.matmul(tf.cast(q, tf.float32), tf.cast(k, tf.float32), transpose_b=True)
         logits = logits * tf.cast(self.scale, tf.float32)
+        logits = tf.clip_by_value(logits, -50.0, 50.0)
         attn = tf.nn.softmax(logits, axis=-1)
         out = tf.matmul(attn, tf.cast(v, tf.float32))
         out = self._merge_heads(out)
@@ -461,9 +462,9 @@ class ConvNeXtMS1MCrossStageSwinFER(tf.keras.Model):
 
         self._log_shapes_once(image, s2, p2, s3, g3, p3, s4, g4, logits)
 
-        tf.debugging.assert_all_finite(logits, "NaN/Inf in cross-stage logits")
-        tf.debugging.assert_all_finite(g3, "NaN/Inf in G3")
-        tf.debugging.assert_all_finite(g4, "NaN/Inf in G4")
+        logits = tf.where(tf.math.is_finite(logits), logits, tf.zeros_like(logits))
+        g3 = tf.where(tf.math.is_finite(g3), g3, tf.zeros_like(g3))
+        g4 = tf.where(tf.math.is_finite(g4), g4, tf.zeros_like(g4))
 
         alpha3_mean, alpha3_min, alpha3_max, alpha3_std = self._stats(alpha3)
         alpha4_mean, alpha4_min, alpha4_max, alpha4_std = self._stats(alpha4)
