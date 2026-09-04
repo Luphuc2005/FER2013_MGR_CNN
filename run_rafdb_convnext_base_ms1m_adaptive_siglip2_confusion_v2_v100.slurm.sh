@@ -63,6 +63,12 @@ echo " Running Post-Training TTA Weight Sweep..."
 echo "============================================================"
 "$FER_PY" -u sweep_tta_weights.py --config "$CONFIG" --step 0.05
 
+# 3. Automated Top-5 Checkpoint Ensemble Evaluation
+echo "============================================================"
+echo " Running Top-5 Checkpoint Ensemble + TTA Evaluation..."
+echo "============================================================"
+"$FER_PY" -u scripts/evaluate_top5_ensemble_siglip2.py --config "$CONFIG" --w-orig 0.60 --w-flip 0.40
+
 echo "============================================================"
 echo " RAF-DB SigLIP2 Confusion v2 Pipeline Completed Successfully!"
 echo " End: $(date)"
