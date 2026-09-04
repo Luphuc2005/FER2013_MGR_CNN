@@ -13,7 +13,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    print("=" * 60)
+    print("[ERROR] 'pandas' module not found in the current Python environment.")
+    print("        Please run the script using the project's virtual environment:")
+    print("        ./fer2013_env/bin/python scripts/create_stratified_rafdb_split.py --data_dir data/rafdb")
+    print("=" * 60)
+    sys.exit(1)
+
 from sklearn.model_selection import train_test_split
 
 def main():
