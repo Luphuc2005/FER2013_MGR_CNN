@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG="../config_convnext_base_ms1m_adaptive_siglip2_confusion.yaml"
+CONFIG="config_convnext_base_ms1m_adaptive_siglip2_confusion.yaml"
 LOG_DIR="outputs/kaggle_speedcheck_logs"
 mkdir -p "$LOG_DIR"
 
