@@ -52,40 +52,59 @@ def main():
         val_rec = collect_split_records(data_dir, "val")
         test_rec = collect_split_records(data_dir, "test")
         
-        print(f"[2/5] RAF-DB Dataset Split Verification:")
-        print(f"      - Train samples: {len(train_rec.labels)} | Labels range: [{train_rec.labels.min()}..{train_rec.labels.max()}]")
-        print(f"      - Val samples:   {len(val_rec.labels)}   | Labels range: [{val_rec.labels.min()}..{val_rec.labels.max()}]")
-        print(f"      - Test samples:  {len(test_rec.labels)}  | Labels range: [{test_rec.labels.min()}..{test_rec.labels.max()}]")
-        
-        # Verify 7 classes [0..6]
-        train_counts = np.bincount(train_rec.labels, minlength=7)
-        test_counts = np.bincount(test_rec.labels, minlength=7)
-        print(f"      - Train class distribution [0..6]: {train_counts.tolist()}")
-        print(f"      - Test class distribution  [0..6]: {test_counts.tolist()}")
+        n_train = len(train_rec.labels)
+        n_val = len(val_rec.labels)
+        n_train_val = n_train + n_val
+        n_test = len(test_rec.labels)
 
-        assert train_rec.labels.min() == 0 and train_rec.labels.max() == 6, f"[ERROR] Label range invalid: [{train_rec.labels.min()}..{train_rec.labels.max()}], expected [0..6]!"
-        assert train_counts[0] > 0, "[ERROR] Class 0 (angry) has 0 samples in training set!"
-        assert test_counts[0] > 0, "[ERROR] Class 0 (angry) has 0 samples in test set!"
+        train_unique = set(train_rec.labels.tolist())
+        val_unique = set(val_rec.labels.tolist())
+        test_unique = set(test_rec.labels.tolist())
 
-        # Verify no data leakage between train, val, test sample_ids / paths
+        train_counts = np.bincount(train_rec.labels, minlength=7).tolist()
+        val_counts = np.bincount(val_rec.labels, minlength=7).tolist()
+        test_counts = np.bincount(test_rec.labels, minlength=7).tolist()
+
+        print(f"[2/5] RAF-DB Benchmark Dataset Verification:")
+        print(f"      - Train samples: {n_train} | Unique labels: {sorted(list(train_unique))}")
+        print(f"      - Val samples:   {n_val}   | Unique labels: {sorted(list(val_unique))}")
+        print(f"      - Train + Val:   {n_train_val} (Expected: 12271)")
+        print(f"      - Test samples:  {n_test}  (Expected: 3068) | Unique labels: {sorted(list(test_unique))}")
+        print(f"      - Class Distribution [0..6] (angry, disgust, fear, happy, sad, surprise, neutral):")
+        print(f"        * Train: {train_counts}")
+        print(f"        * Val:   {val_counts}")
+        print(f"        * Test:  {test_counts}")
+
+        # Verification 1: Exact sample count checks
+        assert n_train_val == 12271, f"[FAIL] Train + Val count is {n_train_val}, expected exactly 12,271!"
+        assert n_test == 3068, f"[FAIL] Test count is {n_test}, expected exactly 3,068!"
+
+        # Verification 2: All 7 classes [0..6] present in every split
+        expected_classes = {0, 1, 2, 3, 4, 5, 6}
+        assert train_unique == expected_classes, f"[FAIL] Train set missing classes: {expected_classes - train_unique}"
+        assert val_unique == expected_classes, f"[FAIL] Val set missing classes: {expected_classes - val_unique}"
+        assert test_unique == expected_classes, f"[FAIL] Test set missing classes: {expected_classes - test_unique}"
+
+        # Verification 3: Data leakage check across all pairs (Train/Val, Train/Test, Val/Test)
         train_ids = set(train_rec.images)
         val_ids = set(val_rec.images)
         test_ids = set(test_rec.images)
+
         overlap_tv = train_ids.intersection(val_ids)
         overlap_tt = train_ids.intersection(test_ids)
-        print(f"      - Train/Val overlap count:  {len(overlap_tv)} (Data Leakage Check)")
-        print(f"      - Train/Test overlap count: {len(overlap_tt)} (Data Leakage Check)")
-        if len(overlap_tv) > 0:
-            print(f"      [DEBUG] Sample overlapping Train/Val items ({min(5, len(overlap_tv))}/{len(overlap_tv)}):")
-            for item in list(overlap_tv)[:5]:
-                print(f"              * {item}")
-        if len(overlap_tt) > 0:
-            print(f"      [DEBUG] Sample overlapping Train/Test items ({min(5, len(overlap_tt))}/{len(overlap_tt)}):")
-            for item in list(overlap_tt)[:5]:
-                print(f"              * {item}")
-        assert len(overlap_tv) == 0, f"ERROR: Data leakage detected! {len(overlap_tv)} samples present in both train and val!"
-        assert len(overlap_tt) == 0, f"ERROR: Data leakage detected! {len(overlap_tt)} samples present in both train and test!"
-        print("      [PASSED] No data leakage detected between splits! 7 classes verified [0..6].")
+        overlap_vt = val_ids.intersection(test_ids)
+
+        print(f"      - Leakage Check:")
+        print(f"        * Train / Val overlap:  {len(overlap_tv)}")
+        print(f"        * Train / Test overlap: {len(overlap_tt)}")
+        print(f"        * Val / Test overlap:   {len(overlap_vt)}")
+
+        assert len(overlap_tv) == 0, f"[FAIL] Data leakage detected between Train and Val! ({len(overlap_tv)} samples)"
+        assert len(overlap_tt) == 0, f"[FAIL] Data leakage detected between Train and Test! ({len(overlap_tt)} samples)"
+        assert len(overlap_vt) == 0, f"[FAIL] Data leakage detected between Val and Test! ({len(overlap_vt)} samples)"
+
+        print("      [PASSED] All Benchmark Checks Succeeded!")
+        print("      [CONFIRMED] Train + Val = 12271 and Test = 3068.")
         
         # Build TF datasets
         train_ds, val_ds, test_ds = build_datasets(cfg, replicas=1)
