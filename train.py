@@ -192,6 +192,9 @@ def build_model(cfg: Dict) -> tf.keras.Model:
         return IR50FERBaseline(cfg)
     if arch in ("convnext_base_imagenet1k", "convnext_base_imagenet", "convnext_base_imagenet_1k"):
         return ConvNeXtBaseImageNetFERBaseline(cfg)
+    if "swin" in name or "swin" in arch or "cross_stage" in name or "cross_stage" in arch:
+        from models.convnext_ms1m_cross_stage_swin import ConvNeXtMS1MCrossStageSwinFER
+        return ConvNeXtMS1MCrossStageSwinFER(cfg)
     if "mgr" in name or "mgr" in arch or "dynamic_gate" in name:
         return MGRConvNeXtFER(cfg)
     if arch in ("convnext_base", "convnext_base_face", "convnext_base_ms1m_arcface") or name.startswith("convnext_base_ms1m"):
