@@ -61,7 +61,7 @@ echo "============================================================"
 echo "============================================================"
 echo " Running Post-Training TTA Weight Sweep..."
 echo "============================================================"
-"$FER_PY" -u scripts/sweep_tta_weights.py "$CONFIG"
+"$FER_PY" -u sweep_tta_weights.py --config "$CONFIG" --step 0.05
 
 echo "============================================================"
 echo " RAF-DB SigLIP2 Confusion v2 Pipeline Completed Successfully!"
