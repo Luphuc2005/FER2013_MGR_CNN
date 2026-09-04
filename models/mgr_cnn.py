@@ -628,14 +628,14 @@ class MGRConvNeXtFER(tf.keras.Model):
         self.cfg = cfg
         self.ablation = model_cfg.get("ablation", "full")
         self.num_classes = int(data_cfg.get("num_classes", 7))
-        self.embed_dim = int(model_cfg["embed_dim"])
+        self.embed_dim = int(model_cfg.get("embed_dim", 512))
         self.visual_dim = int(model_cfg.get("visual_dim", 768))
         self.multi_scale_mgr = bool(model_cfg.get("multi_scale_mgr", False))
         self.stage3_visual_dim = int(model_cfg.get("stage3_visual_dim", 384))
         self.stage4_visual_dim = int(model_cfg.get("stage4_visual_dim", self.visual_dim))
         self.stage3_token_grid_size = int(model_cfg.get("stage3_token_grid_size", 14))
         self.stage4_token_grid_size = int(model_cfg.get("stage4_token_grid_size", model_cfg.get("token_grid_size", 7)))
-        self.num_regions = int(model_cfg["num_regions"])
+        self.num_regions = int(model_cfg.get("num_regions", 6))
         self.region_pooling = model_cfg.get("region_pooling", "concat")
         self.mask_guided_attention = bool(model_cfg.get("mask_guided_attention", True))
         self.mgr_mask_resize_method = str(model_cfg.get("mgr_mask_resize_method", "area"))
@@ -776,7 +776,7 @@ class MGRConvNeXtFER(tf.keras.Model):
         self.cross_attention = CrossAttentionWithMask(
             self.embed_dim,
             self.visual_dim,
-            int(model_cfg["num_heads"]),
+            int(model_cfg.get("num_heads", 4)),
             float(model_cfg.get("transformer_dropout", 0.25)),
             float(model_cfg.get("mask_attention_alpha", 0.3)),
             float(model_cfg.get("mask_floor", 0.05)),
@@ -786,7 +786,7 @@ class MGRConvNeXtFER(tf.keras.Model):
             self.cross_attention_stage3 = CrossAttentionWithMask(
                 self.embed_dim,
                 self.stage3_visual_dim,
-                int(model_cfg["num_heads"]),
+                int(model_cfg.get("num_heads", 4)),
                 float(model_cfg.get("transformer_dropout", 0.25)),
                 float(model_cfg.get("mask_attention_alpha", 0.3)),
                 float(model_cfg.get("mask_floor", 0.05)),

@@ -66,6 +66,9 @@ model:
   convnext_base_require_pretrained: false
   drop_path_rate: 0.1
   layer_scale_init_value: 0.000001
+  embed_dim: 512
+  num_regions: 6
+  num_heads: 4
 
   use_semantic_branch: false
   use_clip_semantic: false
