@@ -103,14 +103,14 @@ training:
   warmup_epochs: 5
   loss: "cross_entropy"
   label_smoothing: 0.10
-  optimizer: "sam"
+  optimizer: "adamw"
   base_optimizer: "adamw"
   sam_rho: 0.03
   sam_adaptive: false
-  lr: 0.0005
-  finetune_lr: 0.0005
-  visual_extractor_lr: 0.0005
-  weight_decay: 0.035
+  lr: 0.0002
+  finetune_lr: 0.0002
+  visual_extractor_lr: 0.0002
+  weight_decay: 0.05
   scheduler: "cosine"
   grad_clip_norm: 1.0
   skip_nonfinite_batches: true

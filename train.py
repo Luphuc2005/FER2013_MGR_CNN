@@ -596,16 +596,18 @@ def make_step_function(
 
         grads = _clip_gradients(grads)
         grad_norm = tf.linalg.global_norm([g for g in grads if g is not None])
+        is_finite_grad = tf.math.is_finite(grad_norm)
 
         eps_list = []
         for var, grad in zip(trainable_vars, grads):
             if grad is None:
                 eps_list.append(None)
                 continue
-            scale = sam_rho / (grad_norm + 1e-12)
+            scale = tf.where(is_finite_grad, sam_rho / (grad_norm + 1e-12), 0.0)
             if sam_adaptive:
                 scale = scale * tf.square(tf.abs(var))
-            eps_list.append(grad * scale)
+            eps = tf.where(tf.math.is_finite(grad), grad * scale, tf.zeros_like(grad))
+            eps_list.append(eps)
 
         for var, eps in zip(trainable_vars, eps_list):
             if eps is not None:
