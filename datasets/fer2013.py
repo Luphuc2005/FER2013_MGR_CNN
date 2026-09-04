@@ -145,23 +145,30 @@ def _collect_records_from_folder(data_dir: Path, split: str) -> Tuple[np.ndarray
     if not subdirs:
         subdirs = [split_dir]
 
+    subdir_prefixes = [sdir.name.lower().strip().split("_")[0] for sdir in subdirs]
+    is_rafdb_1based_folders = (len(subdirs) == 7 and "7" in subdir_prefixes)
+
     for sdir in sorted(subdirs):
         folder_name = sdir.name.lower().strip()
-        label_idx = None
         prefix = folder_name.split("_")[0]
-        if prefix in emotion_map:
+        label_idx = None
+
+        if is_rafdb_1based_folders and prefix in rafdb_raw_map:
+            label_idx = rafdb_raw_map[prefix]
+        elif prefix in emotion_map:
             label_idx = emotion_map[prefix]
         elif folder_name in emotion_map:
             label_idx = emotion_map[folder_name]
-        elif prefix.isdigit() and prefix in rafdb_raw_map and len(subdirs) == 7 and "7" in [s.name.split("_")[0] for s in subdirs]:
-            label_idx = rafdb_raw_map[prefix]
 
         for img_p in sorted(sdir.rglob("*")):
             if img_p.is_file() and img_p.suffix.lower() in valid_exts:
                 curr_label = label_idx
                 if curr_label is None:
                     p_name = img_p.parent.name.lower().split("_")[0]
-                    curr_label = emotion_map.get(p_name, 0)
+                    if is_rafdb_1based_folders and p_name in rafdb_raw_map:
+                        curr_label = rafdb_raw_map[p_name]
+                    else:
+                        curr_label = emotion_map.get(p_name, 0)
                 try:
                     rel_p = str(img_p.relative_to(Path(__file__).resolve().parents[1]))
                 except ValueError:
@@ -177,7 +184,7 @@ def _collect_records_from_folder(data_dir: Path, split: str) -> Tuple[np.ndarray
         if pd is not None:
             df_gen = pd.DataFrame({"image_path": img_paths, "label": labels})
             df_gen.to_csv(csv_path, index=False)
-            print(f"[INFO] Auto-generated and saved {csv_path} ({len(df_gen)} samples).")
+            print(f"[INFO] Auto-generated and saved {csv_path} ({len(df_gen)} samples; label range [{min(labels)}..{max(labels)}]).")
     except Exception as e:
         print(f"[WARNING] Could not save auto-generated {csv_path}: {e}")
 
@@ -199,6 +206,8 @@ def collect_split_records(
 ) -> SplitRecords:
     data_dir = _resolve_split_csv_dir(Path(data_dir))
     csv_path = data_dir / f"{split}.csv"
+    rafdb_raw_map_int = {1: 5, 2: 2, 3: 1, 4: 3, 5: 4, 6: 0, 7: 6}
+
     if csv_path.exists():
         if pd is not None:
             df = pd.read_csv(csv_path)
@@ -207,6 +216,16 @@ def collect_split_records(
             labels = df[label_col].astype("int64").to_numpy()
             pixels = df[pixel_col].astype(str).to_numpy()
             sample_ids = np.arange(len(df), dtype=np.int64)
+
+            # Check if CSV has raw 1-based RAF-DB labels [1..7]
+            if labels.min() == 1 and labels.max() == 7:
+                print(f"[INFO] Auto-remapping RAF-DB 1-based CSV labels [1..7] -> 0-based [0..6] for {csv_path}")
+                labels = np.array([rafdb_raw_map_int.get(int(l), int(l)) for l in labels], dtype=np.int64)
+                df[label_col] = labels
+                df.to_csv(csv_path, index=False)
+            elif labels.min() == 1 and labels.max() == 6 and 0 not in labels and (data_dir / split).is_dir():
+                print(f"[WARNING] Detected legacy mis-mapped CSV with label range [1..6] for {csv_path}. Regenerating clean split from directory {data_dir / split}...")
+                pixels, labels, sample_ids = _collect_records_from_folder(data_dir, split)
         else:
             import csv
             labels_list = []
@@ -220,6 +239,8 @@ def collect_split_records(
                     labels_list.append(int(row[lbl_key]))
                     pixels_list.append(str(row[pix_key]))
             labels = np.array(labels_list, dtype=np.int64)
+            if labels.min() == 1 and labels.max() == 7:
+                labels = np.array([rafdb_raw_map_int.get(int(l), int(l)) for l in labels], dtype=np.int64)
             pixels = np.array(pixels_list, dtype=object)
             sample_ids = np.arange(len(labels), dtype=np.int64)
     elif (data_dir / split).is_dir():

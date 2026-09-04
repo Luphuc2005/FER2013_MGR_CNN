@@ -56,6 +56,19 @@ def main():
     pixel_col = next((c for c in ("pixels", "image_path", "filepath", "path", "image", "file") if c in df_full.columns), df_full.columns[1])
     print(f"[INFO] Detected label column: '{label_col}', image/pixel column: '{pixel_col}'")
 
+    # Normalize RAF-DB 1-based labels [1..7] -> 0-based [0..6]
+    rafdb_raw_map_int = {1: 5, 2: 2, 3: 1, 4: 3, 5: 4, 6: 0, 7: 6}
+    lbl_vals = df_full[label_col].astype(int).to_numpy()
+    if lbl_vals.min() == 1 and lbl_vals.max() == 7:
+        print(f"[INFO] Normalizing raw RAF-DB 1-based labels [1..7] to standard 0-indexed labels [0..6]...")
+        df_full[label_col] = [rafdb_raw_map_int.get(l, l) for l in lbl_vals]
+    elif lbl_vals.min() == 1 and lbl_vals.max() == 6 and 0 not in lbl_vals:
+        print(f"[WARNING] Source data has mis-mapped labels [1..6] missing class 0. Re-scanning folders if available...")
+        from datasets.fer2013 import _collect_records_from_folder
+        if (data_dir / "train").is_dir():
+            px, lb, _ = _collect_records_from_folder(data_dir, "train")
+            df_full = pd.DataFrame({pixel_col: px, label_col: lb})
+
     # Deduplicate exact duplicate pixel/image entries to prevent data leakage
     len_before = len(df_full)
     df_full = df_full.drop_duplicates(subset=[pixel_col]).reset_index(drop=True)

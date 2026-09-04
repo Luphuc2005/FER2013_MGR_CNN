@@ -57,6 +57,16 @@ def main():
         print(f"      - Val samples:   {len(val_rec.labels)}   | Labels range: [{val_rec.labels.min()}..{val_rec.labels.max()}]")
         print(f"      - Test samples:  {len(test_rec.labels)}  | Labels range: [{test_rec.labels.min()}..{test_rec.labels.max()}]")
         
+        # Verify 7 classes [0..6]
+        train_counts = np.bincount(train_rec.labels, minlength=7)
+        test_counts = np.bincount(test_rec.labels, minlength=7)
+        print(f"      - Train class distribution [0..6]: {train_counts.tolist()}")
+        print(f"      - Test class distribution  [0..6]: {test_counts.tolist()}")
+
+        assert train_rec.labels.min() == 0 and train_rec.labels.max() == 6, f"[ERROR] Label range invalid: [{train_rec.labels.min()}..{train_rec.labels.max()}], expected [0..6]!"
+        assert train_counts[0] > 0, "[ERROR] Class 0 (angry) has 0 samples in training set!"
+        assert test_counts[0] > 0, "[ERROR] Class 0 (angry) has 0 samples in test set!"
+
         # Verify no data leakage between train, val, test sample_ids / paths
         train_ids = set(train_rec.images)
         val_ids = set(val_rec.images)
@@ -75,7 +85,7 @@ def main():
                 print(f"              * {item}")
         assert len(overlap_tv) == 0, f"ERROR: Data leakage detected! {len(overlap_tv)} samples present in both train and val!"
         assert len(overlap_tt) == 0, f"ERROR: Data leakage detected! {len(overlap_tt)} samples present in both train and test!"
-        print("      [PASSED] No data leakage detected between splits!")
+        print("      [PASSED] No data leakage detected between splits! 7 classes verified [0..6].")
         
         # Build TF datasets
         train_ds, val_ds, test_ds = build_datasets(cfg, replicas=1)
