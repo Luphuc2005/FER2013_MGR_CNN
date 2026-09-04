@@ -627,11 +627,14 @@ class MGRConvNeXtFER(tf.keras.Model):
         super().__init__(name=model_cfg.get("name", "mgr_convnext_fer"))
         self.cfg = cfg
         self.ablation = model_cfg.get("ablation", "full")
-        self.num_classes = int(data_cfg.get("num_classes", 7))
+        arch_name = str(model_cfg.get("arch", "convnext_tiny")).lower()
+        model_name = str(model_cfg.get("name", "")).lower()
+        use_convnext_base = ("convnext_base" in arch_name) or ("convnext_base" in model_name)
+        default_vis_dim = 1024 if use_convnext_base else 768
         self.embed_dim = int(model_cfg.get("embed_dim", 512))
-        self.visual_dim = int(model_cfg.get("visual_dim", 768))
+        self.visual_dim = int(model_cfg.get("visual_dim", default_vis_dim))
         self.multi_scale_mgr = bool(model_cfg.get("multi_scale_mgr", False))
-        self.stage3_visual_dim = int(model_cfg.get("stage3_visual_dim", 384))
+        self.stage3_visual_dim = int(model_cfg.get("stage3_visual_dim", 512 if use_convnext_base else 384))
         self.stage4_visual_dim = int(model_cfg.get("stage4_visual_dim", self.visual_dim))
         self.stage3_token_grid_size = int(model_cfg.get("stage3_token_grid_size", 14))
         self.stage4_token_grid_size = int(model_cfg.get("stage4_token_grid_size", model_cfg.get("token_grid_size", 7)))

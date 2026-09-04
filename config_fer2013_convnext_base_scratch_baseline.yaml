@@ -59,8 +59,8 @@ augmentation:
   random_erasing_value: "random"
 
 model:
-  name: "fer2013_convnext_base_scratch_baseline"
-  arch: "convnext_base_scratch"
+  name: "convnext_base_ms1m_scratch_baseline"
+  arch: "convnext_base_ms1m_arcface"
   pretrained: false
   convnext_base_pretrained_path: null
   convnext_base_require_pretrained: false
