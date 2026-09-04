@@ -29,7 +29,7 @@ tta:
   flip_weight: 0.60
 
 data:
-  data_path: "data/fer13-split"
+  data_path: "/kaggle/input/datasets/nadkli/raf-db-split/raf_db_split"
   mask_dir: null
   num_classes: 7
   image_size: 112
@@ -62,7 +62,7 @@ model:
   name: "convnext_base_ms1m_adaptive_siglip2_confusion"
   arch: "convnext_base_ms1m_arcface"
   pretrained: true
-  convnext_base_pretrained_path: "data/convnext_base_ms1m_arcface.pth"
+  convnext_base_pretrained_path: "/kaggle/input/models/lhngphc/ms1m-pretrained/tensorflow2/default/1/convnext_base_ms1m_arcface.pth"
   convnext_base_require_pretrained: true
   drop_path_rate: 0.1
   layer_scale_init_value: 0.000001
