@@ -412,10 +412,10 @@ class ConvNeXtMS1MCrossStageSwinFER(tf.keras.Model):
                 v_lower_proj = self.rgb_baseline.visual_projector_lower(z_lower, training=training)
                 v_au_proj = self.rgb_baseline.visual_projector_au(z_au, training=training)
 
-                v_global_norm = tf.math.l2_normalize(v_global_proj, axis=-1)
-                v_upper_norm = tf.math.l2_normalize(v_upper_proj, axis=-1)
-                v_lower_norm = tf.math.l2_normalize(v_lower_proj, axis=-1)
-                v_au_norm = tf.math.l2_normalize(v_au_proj, axis=-1)
+                v_global_norm = tf.math.l2_normalize(v_global_proj, axis=-1, epsilon=1e-5)
+                v_upper_norm = tf.math.l2_normalize(v_upper_proj, axis=-1, epsilon=1e-5)
+                v_lower_norm = tf.math.l2_normalize(v_lower_proj, axis=-1, epsilon=1e-5)
+                v_au_norm = tf.math.l2_normalize(v_au_proj, axis=-1, epsilon=1e-5)
 
                 t_norm = tf.cast(t_norm, dtype=v_global_norm.dtype)
 
@@ -428,7 +428,7 @@ class ConvNeXtMS1MCrossStageSwinFER(tf.keras.Model):
                 raw_sim = tf.stack([s0, s1, s2, s3, s4], axis=-1)
             else:
                 v_proj = self.rgb_baseline.visual_projector(pooled, training=training)
-                v_norm = tf.math.l2_normalize(v_proj, axis=-1)
+                v_norm = tf.math.l2_normalize(v_proj, axis=-1, epsilon=1e-5)
                 t_norm = tf.cast(t_norm, dtype=v_norm.dtype)
                 if len(t_norm.shape) == 3 or (hasattr(t_norm.shape, "rank") and t_norm.shape.rank == 3):
                     raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
@@ -459,6 +459,9 @@ class ConvNeXtMS1MCrossStageSwinFER(tf.keras.Model):
             else:
                 agg_sim = tf.cast(raw_sim, tf.float32)
                 semantic_logits = agg_sim * tf.cast(self.rgb_baseline.semantic_logit_scale, tf.float32)
+
+            agg_sim = tf.where(tf.math.is_finite(agg_sim), agg_sim, tf.zeros_like(agg_sim))
+            semantic_logits = tf.where(tf.math.is_finite(semantic_logits), semantic_logits, tf.zeros_like(semantic_logits))
 
         self._log_shapes_once(image, s2, p2, s3, g3, p3, s4, g4, logits)
 

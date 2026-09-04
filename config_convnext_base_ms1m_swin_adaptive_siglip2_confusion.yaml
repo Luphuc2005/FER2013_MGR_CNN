@@ -152,9 +152,9 @@ training:
   warmup_epochs: 5
   loss: "cross_entropy"
   label_smoothing: 0.10
-  optimizer: "sam"
+  optimizer: "adamw"
   base_optimizer: "adamw"
-  sam_rho: 0.03
+  sam_rho: 0.01
   sam_adaptive: false
   lr: 0.0003
   finetune_lr: 0.0003

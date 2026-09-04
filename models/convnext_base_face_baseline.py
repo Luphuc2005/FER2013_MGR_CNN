@@ -951,10 +951,10 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 v_lower_proj = self.visual_projector_lower(z_lower, training=training)
                 v_au_proj = self.visual_projector_au(z_au, training=training)
 
-                v_global_norm = tf.math.l2_normalize(v_global_proj, axis=-1)
-                v_upper_norm = tf.math.l2_normalize(v_upper_proj, axis=-1)
-                v_lower_norm = tf.math.l2_normalize(v_lower_proj, axis=-1)
-                v_au_norm = tf.math.l2_normalize(v_au_proj, axis=-1)
+                v_global_norm = tf.math.l2_normalize(v_global_proj, axis=-1, epsilon=1e-5)
+                v_upper_norm = tf.math.l2_normalize(v_upper_proj, axis=-1, epsilon=1e-5)
+                v_lower_norm = tf.math.l2_normalize(v_lower_proj, axis=-1, epsilon=1e-5)
+                v_au_norm = tf.math.l2_normalize(v_au_proj, axis=-1, epsilon=1e-5)
 
                 endpoints["visual_projector"] = v_global_proj
                 endpoints["visual_projector_upper"] = v_upper_proj
@@ -979,7 +979,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 raw_sim = tf.stack([s0, s1, s2, s3, s4], axis=-1)  # [B, 7, 5]
             else:
                 v_proj = self.visual_projector(pooled, training=training)
-                v_norm = tf.math.l2_normalize(v_proj, axis=-1)
+                v_norm = tf.math.l2_normalize(v_proj, axis=-1, epsilon=1e-5)
                 t_norm = tf.cast(t_norm, dtype=v_norm.dtype)
                 endpoints["visual_projector"] = v_proj
                 if len(t_norm.shape) == 3 or (hasattr(t_norm.shape, "rank") and t_norm.shape.rank == 3):
@@ -1014,6 +1014,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             else:
                 agg_sim = tf.cast(raw_sim, tf.float32)
                 semantic_logits = agg_sim * tf.cast(self.semantic_logit_scale, tf.float32)
+            
+            agg_sim = tf.where(tf.math.is_finite(agg_sim), agg_sim, tf.zeros_like(agg_sim))
+            semantic_logits = tf.where(tf.math.is_finite(semantic_logits), semantic_logits, tf.zeros_like(semantic_logits))
             endpoints["semantic_logits"] = semantic_logits
 
         self._log_shapes_once(image, endpoints, pooled, dropped, logits)
