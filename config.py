@@ -14,10 +14,19 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 REQUIRED_SECTIONS = ("seed", "runtime", "data", "augmentation", "model", "training", "paths")
 
 
+def stringify_dict_keys(d: Any) -> Any:
+    if isinstance(d, dict):
+        return {str(k): stringify_dict_keys(v) for k, v in d.items()}
+    if isinstance(d, (list, tuple)):
+        return [stringify_dict_keys(x) for x in d]
+    return d
+
+
 def load_config(path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     config_path = _resolve_config_path(path)
     with config_path.open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
+    cfg = stringify_dict_keys(cfg)
     validate_config(cfg, config_path)
     resolve_paths(cfg)
     apply_env_overrides(cfg)
