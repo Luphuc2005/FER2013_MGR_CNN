@@ -23,6 +23,7 @@ class SplitRecords:
     sample_ids: np.ndarray
     mask_paths: Optional[np.ndarray]
     masks: Optional[np.ndarray] = None
+    bboxes: Optional[np.ndarray] = None
 
 
 def _resolve_path(path):
@@ -42,6 +43,7 @@ def _limit_records(records: SplitRecords, limit: Optional[int]) -> SplitRecords:
         sample_ids=records.sample_ids[sl],
         mask_paths=None if records.mask_paths is None else records.mask_paths[sl],
         masks=None if records.masks is None else records.masks[sl],
+        bboxes=None if records.bboxes is None else records.bboxes[sl],
     )
 
 
@@ -567,7 +569,10 @@ def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool
 
 def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
     dataset_type = str(cfg.get("data", {}).get("dataset_type", "")).lower()
-    if dataset_type in ("affectnet", "affectnet7") or "train_csv" in cfg.get("data", {}):
+    if dataset_type in ("expw", "expw_gdrive"):
+        from .expw import build_expw_datasets
+        return build_expw_datasets(cfg, replicas)
+    if dataset_type in ("affectnet", "affectnet7") or ("train_csv" in cfg.get("data", {}) and "expw" not in str(cfg.get("data", {}).get("train_csv", "")).lower()):
         from .affectnet import build_affectnet_datasets
         return build_affectnet_datasets(cfg, replicas)
     data_dir = _resolve_path(cfg["data"]["data_path"])
