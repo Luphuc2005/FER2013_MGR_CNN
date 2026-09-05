@@ -276,18 +276,34 @@ def collect_split_records(
 
 
 def _decode_pixels(pixels: tf.Tensor, image_size: int, channels: int) -> tf.Tensor:
+    target_h, target_w = int(image_size), int(image_size)
+
     def _read_image_or_pixels(p_tensor):
         p_str = p_tensor.numpy().decode("utf-8") if hasattr(p_tensor, "numpy") else str(p_tensor)
         p_path = Path(p_str)
         if not p_path.is_absolute():
             p_path = Path(__file__).resolve().parents[1] / p_str
         if p_path.exists() and p_path.is_file():
+            try:
+                from PIL import Image
+                with Image.open(p_path) as pil_img:
+                    if channels == 3 and pil_img.mode != "RGB":
+                        pil_img = pil_img.convert("RGB")
+                    elif channels == 1 and pil_img.mode != "L":
+                        pil_img = pil_img.convert("L")
+                    pil_img = pil_img.resize((target_w, target_h), Image.BILINEAR)
+                    arr = np.array(pil_img, dtype=np.float32)
+                    if arr.ndim == 2:
+                        arr = np.expand_dims(arr, axis=-1)
+                    return arr
+            except Exception:
+                pass
             img_raw = tf.io.read_file(str(p_path))
             img = tf.io.decode_image(img_raw, channels=channels, expand_animations=False)
             img = tf.cast(img, tf.float32)
             if img.shape[-1] == 1 and channels == 3:
                 img = tf.image.grayscale_to_rgb(img)
-            return tf.image.resize(img, [image_size, image_size])
+            return tf.image.resize(img, [target_h, target_w], method="bilinear")
         
         # Fallback to space-separated pixel string
         vals = np.fromstring(p_str, sep=" ", dtype=np.float32)
@@ -295,7 +311,7 @@ def _decode_pixels(pixels: tf.Tensor, image_size: int, channels: int) -> tf.Tens
             side = int(np.round(np.sqrt(len(vals))))
             img = vals.reshape(side, side, 1)
             img = tf.cast(img, tf.float32)
-            img = tf.image.resize(img, [image_size, image_size], method="bilinear")
+            img = tf.image.resize(img, [target_h, target_w], method="bilinear")
             if channels == 3:
                 img = tf.image.grayscale_to_rgb(img)
             return img
@@ -303,11 +319,11 @@ def _decode_pixels(pixels: tf.Tensor, image_size: int, channels: int) -> tf.Tens
 
     if pixels.dtype == tf.string:
         image = tf.py_function(func=_read_image_or_pixels, inp=[pixels], Tout=tf.float32)
-        image.set_shape([image_size, image_size, channels])
+        image.set_shape([target_h, target_w, channels])
         return image
     else:
         image = tf.reshape(tf.cast(pixels, tf.float32), [48, 48, 1])
-        image = tf.image.resize(image, [image_size, image_size], method="bilinear")
+        image = tf.image.resize(image, [target_h, target_w], method="bilinear")
         if channels == 3:
             image = tf.image.grayscale_to_rgb(image)
         return image
