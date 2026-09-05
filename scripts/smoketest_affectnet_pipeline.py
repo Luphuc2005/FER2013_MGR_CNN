@@ -21,7 +21,7 @@ import tensorflow as tf
 from config import load_config
 from datasets import EMOTION_NAMES, build_datasets, collect_affectnet_split_records
 from losses.classification import supervised_mgr_loss
-from models import MGRConvNeXtFER, build_model
+from train import build_model
 
 
 def parse_args():
