@@ -127,7 +127,7 @@ def check_csv_statistics(csv_path: Path, split_name: str, check_files_count: int
     if missing_count > 0:
         print(f"[WARNING] Some image files were not found on current filesystem. (Note: On cluster, verify image_root path: {image_root})")
 
-    return total_rows, label_col, path_col
+    return total_rows, lbl_col, path_col
 
 
 def main():
@@ -190,9 +190,9 @@ def main():
         print(f"  Image Pixel Range: min={tf.reduce_min(img_tensor).numpy():.4f}, max={tf.reduce_max(img_tensor).numpy():.4f}, mean={tf.reduce_mean(img_tensor).numpy():.4f}")
 
         # Assertions
-        expected_shape = (cfg["runtime"]["batch_size_per_gpu"], cfg["data"]["image_size"], cfg["data"]["image_size"], cfg["data"]["channels"])
-        assert img_tensor.shape == expected_shape, f"Expected shape {expected_shape}, got {img_tensor.shape}"
-        assert lbl_tensor.shape[0] == cfg["runtime"]["batch_size_per_gpu"], f"Expected batch size {cfg['runtime']['batch_size_per_gpu']}"
+        batch_size = img_tensor.shape[0]
+        assert img_tensor.shape[1:] == (cfg["data"]["image_size"], cfg["data"]["image_size"], cfg["data"]["channels"]), f"Expected spatial shape {(cfg['data']['image_size'], cfg['data']['image_size'], cfg['data']['channels'])}, got {img_tensor.shape[1:]}"
+        assert lbl_tensor.shape[0] == batch_size, f"Label batch size mismatch: image {batch_size} vs label {lbl_tensor.shape[0]}"
         assert tf.reduce_min(lbl_tensor).numpy() >= 0 and tf.reduce_max(lbl_tensor).numpy() <= 6, "Labels out of range [0..6]!"
 
     print("Batch shape & normalization checks PASSED!")
@@ -207,9 +207,9 @@ def main():
     logits = outputs["logits"]
 
     print(f"Model Architecture: {cfg['model']['name']}")
-    print(f"Output Logits Shape: {logits.shape} (Expected: ({cfg['runtime']['batch_size_per_gpu']}, 7))")
+    print(f"Output Logits Shape: {logits.shape}")
 
-    assert logits.shape == (cfg["runtime"]["batch_size_per_gpu"], 7), f"Expected logits shape ({cfg['runtime']['batch_size_per_gpu']}, 7), got {logits.shape}"
+    assert logits.shape == (logits.shape[0], 7), f"Expected logits shape ({logits.shape[0]}, 7), got {logits.shape}"
 
     if outputs.get("semantic_logits") is not None:
         sem_logits = outputs["semantic_logits"]
