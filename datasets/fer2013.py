@@ -550,6 +550,10 @@ def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool
 
 
 def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset]:
+    dataset_type = str(cfg.get("data", {}).get("dataset_type", "")).lower()
+    if dataset_type in ("affectnet", "affectnet7") or "train_csv" in cfg.get("data", {}):
+        from .affectnet import build_affectnet_datasets
+        return build_affectnet_datasets(cfg, replicas)
     data_dir = _resolve_path(cfg["data"]["data_path"])
     mask_dir = _resolve_path(cfg["data"].get("mask_dir"))
     records = {
