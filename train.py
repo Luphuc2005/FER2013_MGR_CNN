@@ -1105,7 +1105,7 @@ def main() -> int:
                     f"hard_loss={float(hard_l.numpy()):.4f} "
                     f"fer_acc={fer_correct / max(seen, 1):.4f} "
                     f"sem_acc={sem_correct / max(seen, 1):.4f} "
-                    f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f}",
+                    f"lr_head={lr:.6f} lr_backbone={backbone_lr:.2e}",
                     flush=True,
                 )
         train_time_sec = time.time() - epoch_start_time
