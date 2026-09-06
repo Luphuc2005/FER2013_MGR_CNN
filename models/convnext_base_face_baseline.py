@@ -937,7 +937,10 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
 
         if self.use_semantic_branch and self.visual_projector is not None:
             text_protos = tf.cast(self.text_prototypes, dtype=tf.float32)
-            t_norm = tf.math.l2_normalize(text_protos, axis=-1) # [7, 5, dim]
+            # Global mean-centering across all text prototypes (7 classes x 5 granularities) to remove shared template overhead
+            proto_mean = tf.reduce_mean(text_protos, axis=[0, 1], keepdims=True)
+            text_protos_centered = text_protos - proto_mean
+            t_norm = tf.math.l2_normalize(text_protos_centered, axis=-1)  # [7, 5, dim]
 
             if self.use_au_region_routed and self.visual_projector_upper is not None:
                 # Extract Stage 3 spatial feature maps [B, 14, 14, 512]

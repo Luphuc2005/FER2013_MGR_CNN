@@ -31,3 +31,4 @@ MISSING_PACKAGES.txt
 *.pt
 *.onnx
 *.md
+/checkpoints-down
