@@ -102,6 +102,15 @@ def check_csv_statistics(csv_path: Path, split_name: str, check_files_count: int
         pct = (c_count / total_rows) * 100.0 if total_rows > 0 else 0
         print(f"  Class {idx} ({name:<8}): {c_count:>7,} samples ({pct:5.2f}%)")
 
+    print(f"\nLabel Verification Samples ({split_name}):")
+    for idx, name in enumerate(EMOTION_NAMES):
+        matching_rows = df[df[lbl_col] == idx]
+        if len(matching_rows) > 0:
+            sample_p = str(matching_rows[path_col].iloc[0])
+            print(f"  Class {idx} ({name:<8}): '{sample_p}'")
+        else:
+            print(f"  Class {idx} ({name:<8}): [WARNING] No samples found for label {idx}")
+
     # Missing file check
     paths = df[path_col].astype(str).to_numpy()
     sample_indices = np.random.choice(len(paths), size=min(check_files_count, len(paths)), replace=False)

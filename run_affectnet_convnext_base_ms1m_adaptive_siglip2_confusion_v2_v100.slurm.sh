@@ -17,6 +17,17 @@ cd "$ROOT"
 mkdir -p logs outputs/papers/affectnet_siglip2_confusion_v2
 rm -rf "$ROOT/outputs/papers/affectnet_siglip2_confusion_v2/checkpoints"
 
+# Fast sync dataset to RAM disk (/dev/shm) to unleash 32 CPUs at 100% speed
+RAM_DIR="/dev/shm/data/affectnet"
+mkdir -p "$RAM_DIR"
+if [ ! -d "$RAM_DIR/Manually_Annotated_Images" ]; then
+    echo "============================================================"
+    echo " [RAMDISK] Fast syncing AffectNet dataset to RAM (/dev/shm)..."
+    echo "============================================================"
+    rsync -aq "$ROOT/data/affectnet/" "$RAM_DIR/" || cp -r "$ROOT/data/affectnet/"* "$RAM_DIR/"
+    echo "[RAMDISK] Dataset sync to RAM complete!"
+fi
+
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 
@@ -28,6 +39,7 @@ echo " AffectNet-7 ConvNeXt-Base MS1M Adaptive SigLIP2 + Confusion v2"
 echo "============================================================"
 echo "Job ID: ${SLURM_JOB_ID:-standalone}"
 echo "Node: $(hostname)"
+echo "Allocated CPUs: ${SLURM_CPUS_PER_TASK:-unknown}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
 echo "Start: $(date)"
 echo "ROOT=$ROOT"

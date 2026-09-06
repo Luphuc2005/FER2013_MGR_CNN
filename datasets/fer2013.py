@@ -26,11 +26,19 @@ class SplitRecords:
     bboxes: Optional[np.ndarray] = None
 
 
-def _resolve_path(path):
+def _resolve_path(path: Optional[Union[str, Path]]) -> Optional[Path]:
     if path in (None, ""):
         return None
     p = Path(path)
-    return p if p.is_absolute() else Path(__file__).resolve().parents[1] / p
+    if p.is_absolute() and p.exists():
+        return p
+    shm_p = Path("/dev/shm") / p
+    if shm_p.exists():
+        return shm_p
+    rel_p = Path(__file__).resolve().parents[1] / p
+    if rel_p.exists():
+        return rel_p
+    return shm_p if shm_p.parent.exists() else rel_p
 
 
 def _limit_records(records: SplitRecords, limit: Optional[int]) -> SplitRecords:
