@@ -1,16 +1,16 @@
 #!/bin/bash
-#SBATCH --job-name=btfer_fer_cpu
+#SBATCH --job-name=btfer_expw_ens_cpu
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
-#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/btfer_fer_cpu_%j.out
-#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/btfer_fer_cpu_%j.err
+#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/btfer_expw_ens_cpu_%j.out
+#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/btfer_expw_ens_cpu_%j.err
 
 set -euo pipefail
 
 ROOT="/home/ptbao/projects/FER2013_MGR_CNN"
 cd "$ROOT"
 
-mkdir -p logs outputs/papers/btfer_crossdomain/fer2013_siglip2_confusion
+mkdir -p logs outputs/papers/btfer_crossdomain/expw_siglip2_confusion_top5_ensemble
 
 export CUDA_VISIBLE_DEVICES="-1"
 export PYTHONUNBUFFERED=1
@@ -27,7 +27,7 @@ else
 fi
 
 echo "============================================================"
-echo " BTFER zero-shot FER2013 cross-domain CPU evaluation"
+echo " BTFER zero-shot ExpW top-5 checkpoint ensemble CPU evaluation"
 echo "============================================================"
 echo "Job ID: ${SLURM_JOB_ID:-standalone}"
 echo "Node: $(hostname)"
@@ -39,16 +39,18 @@ echo "Start: $(date)"
 echo "============================================================"
 
 "$FER_PY" -u scripts/evaluate_btfer_cpu.py \
-    --config "$ROOT/config_convnext_base_ms1m_adaptive_siglip2_confusion.yaml" \
+    --config "$ROOT/config_expw_convnext_base_ms1m_adaptive_siglip2_confusion.yaml" \
     --data-root "$ROOT/data/btfer/Batch_Ready 7" \
-    --experiment-dir "$ROOT/outputs/papers/siglip2-confusion" \
-    --output-dir "$ROOT/outputs/papers/btfer_crossdomain/fer2013_siglip2_confusion" \
+    --experiment-dir "$ROOT/outputs/papers/expw_convnext_base_ms1m_adaptive_siglip2_confusion" \
+    --output-dir "$ROOT/outputs/papers/btfer_crossdomain/expw_siglip2_confusion_top5_ensemble" \
+    --checkpoint-dir "$ROOT/outputs/papers/expw_convnext_base_ms1m_adaptive_siglip2_confusion/checkpoints/best" \
+    --ensemble-top-k 5 \
     --batch-size 64 \
     --intra-op-threads "${SLURM_CPUS_PER_TASK:-16}" \
     --inter-op-threads 4 \
     --save-confusion-png
 
 echo "============================================================"
-echo " BTFER CPU evaluation completed"
+echo " BTFER ExpW top-5 ensemble CPU evaluation completed"
 echo "End: $(date)"
 echo "============================================================"

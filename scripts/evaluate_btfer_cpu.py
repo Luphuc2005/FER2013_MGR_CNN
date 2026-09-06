@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
     parser.add_argument("--checkpoint", type=Path, default=None)
+    parser.add_argument(
+        "--ensemble-top-k",
+        type=int,
+        default=1,
+        help="Average probabilities from the newest K ckpt-* prefixes in --checkpoint-dir. Use 1 for single-checkpoint evaluation.",
+    )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--intra-op-threads", type=int, default=16)
     parser.add_argument("--inter-op-threads", type=int, default=4)
@@ -119,6 +125,8 @@ def normalize_checkpoint_prefix(path: Path) -> Path:
 
 def infer_source_domain(experiment_dir: Path, config_path: Path) -> str:
     text = f"{experiment_dir} {config_path}".lower()
+    if "expw" in text:
+        return "ExpW"
     if "rafdb" in text or "raf-db" in text:
         return "RAF-DB"
     if "fer2013" in text or "fer13" in text or "siglip2-confusion" in text:
@@ -138,6 +146,27 @@ def resolve_checkpoint(checkpoint_dir: Path, explicit_checkpoint: Optional[Path]
     if not ckpt_path.is_absolute():
         ckpt_path = checkpoint_dir / ckpt_path
     return normalize_checkpoint_prefix(ckpt_path)
+
+
+def resolve_checkpoints(
+    checkpoint_dir: Path,
+    explicit_checkpoint: Optional[Path],
+    ensemble_top_k: int,
+) -> List[Path]:
+    if explicit_checkpoint is not None:
+        return [normalize_checkpoint_prefix(explicit_checkpoint)]
+    if ensemble_top_k <= 1:
+        return [resolve_checkpoint(checkpoint_dir, explicit_checkpoint)]
+
+    index_files = sorted(
+        checkpoint_dir.glob("ckpt-*.index"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    prefixes = [normalize_checkpoint_prefix(path) for path in index_files]
+    if not prefixes:
+        raise FileNotFoundError(f"No ckpt-*.index files found in checkpoint dir: {checkpoint_dir}")
+    return prefixes[:ensemble_top_k]
 
 
 def btfer_folder_to_model_label(folder_name: str, class_to_idx: Dict[str, int]) -> int:
@@ -242,6 +271,34 @@ def predict_dataset(
         conf.append(np.max(probs, axis=1))
 
     return np.concatenate(y_true), np.concatenate(y_pred), np.concatenate(conf)
+
+
+def predict_dataset_probs(
+    model: tf.keras.Model,
+    dataset: tf.data.Dataset,
+    *,
+    use_tta_hflip: bool,
+    original_weight: float,
+    flip_weight: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    y_true: List[np.ndarray] = []
+    probs_all: List[np.ndarray] = []
+
+    for inputs, labels in dataset:
+        outputs_orig = model(inputs, training=False)
+        logits = outputs_orig["logits"]
+        if use_tta_hflip:
+            flipped_inputs = dict(inputs)
+            flipped_inputs["image"] = tf.image.flip_left_right(inputs["image"])
+            if "mask" in inputs:
+                flipped_inputs["mask"] = tf.image.flip_left_right(inputs["mask"])
+            outputs_flip = model(flipped_inputs, training=False)
+            logits = original_weight * logits + flip_weight * outputs_flip["logits"]
+
+        probs_all.append(softmax_np(logits.numpy()))
+        y_true.append(labels.numpy().astype(np.int64))
+
+    return np.concatenate(y_true), np.concatenate(probs_all)
 
 
 def write_predictions_csv(
@@ -350,10 +407,12 @@ def main() -> int:
     first_batch = next(iter(dataset.take(1)))
     first_inputs, _ = first_batch
 
-    checkpoint_path = resolve_checkpoint(checkpoint_dir, args.checkpoint)
+    checkpoint_paths = resolve_checkpoints(checkpoint_dir, args.checkpoint, int(args.ensemble_top_k))
     print(f"Checkpoint dir: {checkpoint_dir}", flush=True)
     print(f"Checkpoint state file: {checkpoint_dir / 'checkpoint'}", flush=True)
-    print(f"Resolved checkpoint to restore: {checkpoint_path}", flush=True)
+    print(f"Resolved checkpoints to restore: {len(checkpoint_paths)}", flush=True)
+    for idx, ckpt_path in enumerate(checkpoint_paths, start=1):
+        print(f"  [{idx}/{len(checkpoint_paths)}] {ckpt_path}", flush=True)
 
     model = build_model(cfg)
     _ = model(first_inputs, training=False)
@@ -374,10 +433,6 @@ def main() -> int:
         optimizer_head=optimizer_head,
         optimizer_backbone=optimizer_backbone,
     )
-    checkpoint.restore(str(checkpoint_path)).expect_partial()
-    print(f"Restored checkpoint: {checkpoint_path}", flush=True)
-    print(f"Restored epoch variable: {int(ckpt_epoch.numpy())}", flush=True)
-    print(f"Restored best_metric variable: {float(ckpt_best_metric.numpy()):.6f}", flush=True)
 
     use_tta_hflip = bool(cfg.get("runtime", {}).get("eval_tta_hflip", False) or cfg.get("tta", {}).get("enabled", False))
     if args.tta_hflip:
@@ -394,13 +449,53 @@ def main() -> int:
         flip_weight /= total_weight
     print(f"TTA hflip: {use_tta_hflip} | original_weight={orig_weight:.4f} flip_weight={flip_weight:.4f}", flush=True)
 
-    y_true, y_pred, confidence = predict_dataset(
-        model,
-        dataset,
-        use_tta_hflip=use_tta_hflip,
-        original_weight=orig_weight,
-        flip_weight=flip_weight,
-    )
+    member_probs: List[np.ndarray] = []
+    member_metrics: List[Dict[str, object]] = []
+    y_true: Optional[np.ndarray] = None
+
+    for idx, ckpt_path in enumerate(checkpoint_paths, start=1):
+        checkpoint.restore(str(ckpt_path)).expect_partial()
+        print(f"Restored checkpoint [{idx}/{len(checkpoint_paths)}]: {ckpt_path}", flush=True)
+        print(f"Restored epoch variable: {int(ckpt_epoch.numpy())}", flush=True)
+        print(f"Restored best_metric variable: {float(ckpt_best_metric.numpy()):.6f}", flush=True)
+
+        member_y_true, probs = predict_dataset_probs(
+            model,
+            dataset,
+            use_tta_hflip=use_tta_hflip,
+            original_weight=orig_weight,
+            flip_weight=flip_weight,
+        )
+        if y_true is None:
+            y_true = member_y_true
+        elif not np.array_equal(y_true, member_y_true):
+            raise RuntimeError("Dataset label order changed between checkpoint evaluations.")
+
+        member_pred = np.argmax(probs, axis=1).astype(np.int64)
+        member_acc = float(accuracy_score(member_y_true, member_pred))
+        member_macro_f1 = float(f1_score(member_y_true, member_pred, average="macro", labels=list(range(len(EMOTION_NAMES))), zero_division=0))
+        print(
+            f"Checkpoint [{idx}/{len(checkpoint_paths)}] Accuracy (%): {member_acc * 100.0:.4f} | Macro-F1: {member_macro_f1:.6f}",
+            flush=True,
+        )
+        member_probs.append(probs)
+        member_metrics.append(
+            {
+                "checkpoint": str(ckpt_path),
+                "epoch_variable": int(ckpt_epoch.numpy()),
+                "best_metric_variable": float(ckpt_best_metric.numpy()),
+                "accuracy": member_acc,
+                "accuracy_percent": member_acc * 100.0,
+                "macro_f1": member_macro_f1,
+            }
+        )
+
+    if y_true is None or not member_probs:
+        raise RuntimeError("No checkpoint probabilities were produced.")
+
+    ensemble_probs = np.mean(member_probs, axis=0)
+    y_pred = np.argmax(ensemble_probs, axis=1).astype(np.int64)
+    confidence = np.max(ensemble_probs, axis=1)
 
     labels = list(range(len(EMOTION_NAMES)))
     cm = confusion_matrix(y_true, y_pred, labels=labels)
@@ -432,7 +527,11 @@ def main() -> int:
         "config": str(config_path),
         "experiment_dir": str(args.experiment_dir),
         "checkpoint_dir": str(checkpoint_dir),
-        "restored_checkpoint": str(checkpoint_path),
+        "restored_checkpoint": str(checkpoint_paths[0]),
+        "restored_checkpoints": [str(path) for path in checkpoint_paths],
+        "num_checkpoints_ensembled": int(len(checkpoint_paths)),
+        "checkpoint_member_metrics": member_metrics,
+        "ensemble_method": "softmax_probability_average",
         "class_order": list(EMOTION_NAMES),
         "btfer_folder_counts": folder_counts,
         "total_samples": int(y_true.size),
@@ -463,6 +562,7 @@ def main() -> int:
         maybe_write_confusion_png(args.output_dir / "confusion_matrix.png", cm)
 
     print(f"\nBTFER zero-shot {source_domain} checkpoint evaluation", flush=True)
+    print(f"Checkpoints ensembled: {len(checkpoint_paths)}", flush=True)
     print(f"Total samples: {metrics['total_samples']}", flush=True)
     print(f"Correct samples: {metrics['correct_samples']}", flush=True)
     print(f"Accuracy (%): {metrics['accuracy_percent']:.4f}", flush=True)
