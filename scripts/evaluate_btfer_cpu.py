@@ -42,21 +42,21 @@ from train import (
 
 
 DEFAULT_DATA_ROOT = PROJECT_ROOT / "data" / "btfer" / "Batch_Ready 7"
-DEFAULT_EXPERIMENT_DIR = PROJECT_ROOT / "outputs" / "papers" / "rafdb_adaptive_siglip2_confusion_v2_v4"
+DEFAULT_EXPERIMENT_DIR = PROJECT_ROOT / "outputs" / "papers" / "siglip2-confusion"
 DEFAULT_OUTPUT_DIR = (
     PROJECT_ROOT
     / "outputs"
     / "papers"
     / "btfer_crossdomain"
-    / "rafdb_adaptive_siglip2_confusion_v2_v4"
+    / "fer2013_siglip2_confusion"
 )
-DEFAULT_CONFIG = PROJECT_ROOT / "config_rafdb_convnext_base_ms1m_adaptive_siglip2_confusion_v2.yaml"
+DEFAULT_CONFIG = PROJECT_ROOT / "config_convnext_base_ms1m_adaptive_siglip2_confusion.yaml"
 VALID_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="CPU zero-shot cross-domain BTFER evaluation for RAF-DB SigLIP2 checkpoints."
+        description="CPU zero-shot cross-domain BTFER evaluation for FER SigLIP2 checkpoints."
     )
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--experiment-dir", type=Path, default=DEFAULT_EXPERIMENT_DIR)
@@ -99,6 +99,7 @@ def find_config_path(experiment_dir: Path, explicit_config: Optional[Path]) -> P
         experiment_dir / "config.yml",
         experiment_dir / "run_config.yaml",
         experiment_dir / "used_config.yaml",
+        experiment_dir / "config_convnext_base_ms1m_adaptive_siglip2_confusion.yaml",
         experiment_dir / "config_rafdb_convnext_base_ms1m_adaptive_siglip2_confusion_v2.yaml",
         DEFAULT_CONFIG,
     ]
@@ -115,6 +116,14 @@ def normalize_checkpoint_prefix(path: Path) -> Path:
     raw = re.sub(r"\.data-\d+-of-\d+$", "", raw)
     return Path(raw)
 
+
+def infer_source_domain(experiment_dir: Path, config_path: Path) -> str:
+    text = f"{experiment_dir} {config_path}".lower()
+    if "rafdb" in text or "raf-db" in text:
+        return "RAF-DB"
+    if "fer2013" in text or "fer13" in text or "siglip2-confusion" in text:
+        return "FER2013"
+    return "unknown"
 
 def resolve_checkpoint(checkpoint_dir: Path, explicit_checkpoint: Optional[Path]) -> Path:
     if explicit_checkpoint is not None:
@@ -318,6 +327,7 @@ def main() -> int:
     checkpoint_dir = args.checkpoint_dir or (args.experiment_dir / "checkpoints" / "best")
     config_path = find_config_path(args.experiment_dir, args.config)
     cfg = prepare_config(load_config(config_path), args, config_path)
+    source_domain = infer_source_domain(args.experiment_dir, config_path)
 
     configure_cpu_runtime(args.intra_op_threads, args.inter_op_threads)
 
@@ -417,7 +427,7 @@ def main() -> int:
 
     metrics = {
         "dataset": "BTFER",
-        "source_checkpoint_domain": "RAF-DB",
+        "source_checkpoint_domain": source_domain,
         "zero_shot_cross_domain": True,
         "config": str(config_path),
         "experiment_dir": str(args.experiment_dir),
@@ -452,7 +462,7 @@ def main() -> int:
     if args.save_confusion_png:
         maybe_write_confusion_png(args.output_dir / "confusion_matrix.png", cm)
 
-    print("\nBTFER zero-shot RAF-DB checkpoint evaluation", flush=True)
+    print(f"\nBTFER zero-shot {source_domain} checkpoint evaluation", flush=True)
     print(f"Total samples: {metrics['total_samples']}", flush=True)
     print(f"Correct samples: {metrics['correct_samples']}", flush=True)
     print(f"Accuracy (%): {metrics['accuracy_percent']:.4f}", flush=True)
