@@ -110,23 +110,31 @@ def configure_tensorflow_runtime(cfg: Dict) -> None:
 
 
 def configure_gpus(cfg: Dict) -> None:
+    runtime = cfg["runtime"]
+    require_two_gpus = bool(runtime.get("require_two_gpus", False))
+    min_gpus = int(runtime.get("min_gpus", 1))
+    if require_two_gpus:
+        min_gpus = max(min_gpus, 2)
+    allow_fallback = bool(runtime.get("allow_cpu_fallback", not require_two_gpus))
+
     gpus = tf.config.list_physical_devices("GPU")
     if not gpus:
+        if min_gpus > 0 and not allow_fallback:
+            raise RuntimeError(f"TensorFlow sees 0 GPU(s), need {min_gpus}.")
         print("[WARNING] No GPU devices visible to TensorFlow. Falling back to CPU mode.")
         return
-    gpu_ids = cfg["runtime"].get("gpu_ids", [0])
+    gpu_ids = runtime.get("gpu_ids", [0])
     visible = [gpus[i] for i in gpu_ids if i < len(gpus)]
     if not visible:
         visible = gpus
-    min_gpus = int(cfg["runtime"].get("min_gpus", 1))
     if len(visible) < min_gpus:
-        if bool(cfg["runtime"].get("allow_cpu_fallback", True)) or min_gpus <= 1:
+        if allow_fallback:
             visible = gpus
-        else:
+        if len(visible) < min_gpus:
             raise RuntimeError(f"TensorFlow sees only {len(visible)} GPU(s), need {min_gpus}.")
     if visible:
         tf.config.set_visible_devices(visible, "GPU")
-        if cfg["runtime"].get("memory_growth", True):
+        if runtime.get("memory_growth", True):
             for gpu in visible:
                 try:
                     tf.config.experimental.set_memory_growth(gpu, True)
@@ -523,7 +531,8 @@ def make_step_function(
     cnn_aux_weight = float(cfg["model"].get("cnn_aux_loss_weight", 0.4))
     sam_rho = float(loss_cfg.get("sam_rho", 0.03))
     sam_adaptive = bool(loss_cfg.get("sam_adaptive", False))
-    use_sam = str(loss_cfg.get("optimizer", "sam")).lower() == "sam"
+    optimizer_name = str(loss_cfg.get("optimizer", "sam")).lower().replace("_", "-")
+    use_sam = optimizer_name in {"sam", "adamw+sam", "sam+adamw", "adamw-sam", "sam-adamw"}
     skip_nonfinite = bool(loss_cfg.get("skip_nonfinite_batches", True))
     grad_clip_norm = float(loss_cfg.get("grad_clip_norm", 0.0)) if loss_cfg.get("grad_clip_norm") else None
     loss_scale_tensor = tf.constant(float(loss_scale), dtype=tf.float32)
@@ -1317,8 +1326,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-
-
-

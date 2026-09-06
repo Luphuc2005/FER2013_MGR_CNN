@@ -521,6 +521,56 @@ def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dic
     return features, tf.cast(label, tf.int32)
 
 
+def _make_tensor_dataset(tensors: Dict[str, tf.Tensor]) -> tf.data.Dataset:
+    return tf.data.Dataset.from_tensor_slices(tensors)
+
+
+def _make_class_balanced_tensor_dataset(
+    tensors: Dict[str, tf.Tensor],
+    labels: np.ndarray,
+    cfg: Dict,
+    split: str,
+) -> tf.data.Dataset:
+    num_classes = int(cfg["data"].get("num_classes", len(EMOTION_NAMES)))
+    labels_arr = np.asarray(labels, dtype=np.int64)
+    counts = np.bincount(labels_arr, minlength=num_classes)[:num_classes]
+    active_classes = [idx for idx, count in enumerate(counts) if count > 0]
+    if not active_classes:
+        raise ValueError(f"Cannot build class-balanced sampler for empty {split} split.")
+
+    configured_weights = cfg["data"].get("class_sampling_weights")
+    if configured_weights is None:
+        weights = np.ones(len(active_classes), dtype=np.float64) / float(len(active_classes))
+    else:
+        raw_weights = np.asarray(configured_weights, dtype=np.float64)
+        if raw_weights.shape[0] != num_classes:
+            raise ValueError(
+                f"class_sampling_weights must have {num_classes} entries, got {raw_weights.shape[0]}."
+            )
+        weights = raw_weights[active_classes]
+        weight_sum = float(weights.sum())
+        if weight_sum <= 0.0:
+            raise ValueError("class_sampling_weights must sum to a positive value for present classes.")
+        weights = weights / weight_sum
+
+    class_datasets = []
+    for class_id in active_classes:
+        indices = np.flatnonzero(labels_arr == class_id).astype(np.int64)
+        class_tensors = {key: tf.gather(value, indices) for key, value in tensors.items()}
+        class_datasets.append(_make_tensor_dataset(class_tensors).repeat())
+
+    print(
+        "[INFO] Class-balanced sampling enabled for "
+        f"{split}: counts={counts.tolist()} weights={weights.round(6).tolist()} "
+        f"epoch_samples={len(labels_arr)}",
+        flush=True,
+    )
+    return tf.data.experimental.sample_from_datasets(
+        class_datasets,
+        weights=weights.tolist(),
+        seed=int(cfg["seed"]["random_seed"]),
+    ).take(len(labels_arr))
+
 def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool, replicas: int) -> tf.data.Dataset:
     with tf.device("/CPU:0"):
         pixel_tensor = (
@@ -537,9 +587,19 @@ def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool
             tensors["mask_paths"] = tf.convert_to_tensor(records.mask_paths.astype(str))
         if records.masks is not None:
             tensors["masks"] = tf.convert_to_tensor(records.masks)
-    ds = tf.data.Dataset.from_tensor_slices(tensors)
-    if training:
-        ds = ds.shuffle(int(cfg["data"].get("shuffle_buffer", 4096)), seed=int(cfg["seed"]["random_seed"]), reshuffle_each_iteration=True)
+    sampling_strategy = str(cfg["data"].get("sampling_strategy", "")).lower()
+    use_class_balanced = training and sampling_strategy in {
+        "class_balanced",
+        "class-balanced",
+        "balanced",
+        "balanced_classes",
+    }
+    if use_class_balanced:
+        ds = _make_class_balanced_tensor_dataset(tensors, records.labels, cfg, split)
+    else:
+        ds = _make_tensor_dataset(tensors)
+        if training:
+            ds = ds.shuffle(int(cfg["data"].get("shuffle_buffer", 4096)), seed=int(cfg["seed"]["random_seed"]), reshuffle_each_iteration=True)
     options = tf.data.Options()
     runtime_cfg = cfg.get("runtime", {})
     options.experimental_deterministic = bool(runtime_cfg.get("tf_data_deterministic", True))
@@ -640,4 +700,3 @@ def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.D
         make_dataset(records["val"], cfg, split="val", training=False, replicas=replicas),
         make_dataset(records["test"], cfg, split="test", training=False, replicas=replicas),
     )
-

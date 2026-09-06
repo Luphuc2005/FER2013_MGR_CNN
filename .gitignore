@@ -32,3 +32,4 @@ MISSING_PACKAGES.txt
 *.onnx
 *.md
 /checkpoints-down
+*.ipynb
