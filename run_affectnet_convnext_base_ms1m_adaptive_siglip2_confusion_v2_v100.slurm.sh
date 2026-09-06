@@ -15,6 +15,7 @@ ROOT=/home/ptbao/projects/FER2013_MGR_CNN
 cd "$ROOT"
 
 mkdir -p logs outputs/papers/affectnet_siglip2_confusion_v2
+rm -rf "$ROOT/outputs/papers/affectnet_siglip2_confusion_v2/checkpoints"
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
