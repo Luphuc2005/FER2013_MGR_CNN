@@ -38,6 +38,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
+import cv2
 
 # Force pure CPU execution by default before TensorFlow initializes
 if "CUDA_VISIBLE_DEVICES" not in os.environ:
@@ -104,8 +105,14 @@ def parse_args():
     parser.add_argument(
         "--alpha",
         type=float,
-        default=0.38,
-        help="Heatmap overlay alpha blending factor (0.35 - 0.40)",
+        default=0.45,
+        help="Heatmap overlay weight factor (default: 0.45)",
+    )
+    parser.add_argument(
+        "--orig-weight",
+        type=float,
+        default=0.55,
+        help="Original image overlay weight factor (default: 0.55)",
     )
     parser.add_argument(
         "--colormap",
@@ -445,39 +452,76 @@ def compute_gradcam(
     return heatmap_norm, conf, pred_idx
 
 
-def resize_heatmap_to_image(heatmap: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
-    """Resize 2D heatmap [H, W] to target image dimensions using BICUBIC (INTER_CUBIC) interpolation."""
-    h, w = target_hw
+def resize_heatmap_to_224(heatmap: np.ndarray) -> np.ndarray:
+    """
+    Resize 2D normalized CAM heatmap [H, W] to exactly 224x224 using cv2.INTER_CUBIC.
+    Preserves numerical values clipped strictly to [0.0, 1.0].
+    """
     try:
-        import cv2
-        resized = cv2.resize(heatmap.astype(np.float32), (w, h), interpolation=cv2.INTER_CUBIC)
-    except ImportError:
+        resized = cv2.resize(heatmap.astype(np.float32), (224, 224), interpolation=cv2.INTER_CUBIC)
+    except Exception:
         hm = tf.convert_to_tensor(heatmap[..., None], dtype=tf.float32)
-        hm = tf.image.resize(hm, [h, w], method=tf.image.ResizeMethod.BICUBIC)
+        hm = tf.image.resize(hm, [224, 224], method=tf.image.ResizeMethod.BICUBIC)
         resized = np.squeeze(hm.numpy(), axis=-1)
     return np.clip(resized, 0.0, 1.0)
 
 
-def generate_heatmap_overlay(
-    original_rgb01: np.ndarray,
-    heatmap01: np.ndarray,
-    alpha: float = 0.38,
-    colormap_name: str = "jet",
-) -> Tuple[np.ndarray, np.ndarray]:
+def resize_original_rgb_to_224(original_rgb01: np.ndarray) -> np.ndarray:
     """
-    Generate colormapped heatmap and overlay onto original un-normalized RGB image.
-    original_rgb01: [H, W, 3] un-normalized original RGB image in range [0, 1].
-    heatmap01: [H, W] normalized CAM heatmap in range [0, 1].
-    Returns: (heat_rgb, overlay) both [H, W, 3] in [0, 1].
+    Resize un-normalized original RGB image [H, W, 3] to exactly 224x224 using cv2.INTER_CUBIC.
+    Returns: uint8 RGB numpy array of shape (224, 224, 3) in [0, 255].
     """
-    cmap = plt.get_cmap(colormap_name)
-    heat_rgba = cmap(np.clip(heatmap01, 0.0, 1.0))
-    heat_rgb = heat_rgba[..., :3]
-    
-    # Strictly overlay onto un-normalized original RGB image
-    orig_rgb = np.clip(original_rgb01, 0.0, 1.0)
-    overlay = np.clip((1.0 - alpha) * orig_rgb + alpha * heat_rgb, 0.0, 1.0)
-    return heat_rgb, overlay
+    orig_uint8 = np.uint8(np.clip(original_rgb01, 0.0, 1.0) * 255.0)
+    try:
+        resized = cv2.resize(orig_uint8, (224, 224), interpolation=cv2.INTER_CUBIC)
+    except Exception:
+        t = tf.convert_to_tensor(orig_uint8, dtype=tf.float32)
+        t = tf.image.resize(t, [224, 224], method=tf.image.ResizeMethod.BICUBIC)
+        resized = np.uint8(np.clip(t.numpy(), 0.0, 255.0))
+    return resized
+
+
+def apply_full_colormap_jet(heatmap01_224: np.ndarray) -> np.ndarray:
+    """
+    Apply cv2.COLORMAP_JET across the entire CAM [0, 1].
+    Low values show dark-blue/blue (no transparency).
+    High values show green -> yellow -> red.
+    Returns: uint8 RGB array of shape (224, 224, 3) in [0, 255].
+    """
+    heatmap_uint8 = np.uint8(np.clip(heatmap01_224, 0.0, 1.0) * 255.0)
+    try:
+        heatmap_bgr = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+        heatmap_rgb = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
+    except Exception:
+        cmap = plt.get_cmap("jet")
+        heat_rgba = cmap(heatmap01_224)
+        heatmap_rgb = np.uint8(np.clip(heat_rgba[..., :3], 0.0, 1.0) * 255.0)
+    return heatmap_rgb
+
+
+def generate_gradcam_overlay(
+    original_rgb_224: np.ndarray,
+    heatmap_rgb_224: np.ndarray,
+    orig_weight: float = 0.55,
+    heat_weight: float = 0.45,
+) -> np.ndarray:
+    """
+    Overlay original RGB image and heatmap using cv2.addWeighted:
+    original = 0.55
+    heatmap = 0.45
+    cv2.addWeighted(original, 0.55, heatmap, 0.45, 0)
+    Both inputs are uint8 RGB arrays of shape (224, 224, 3).
+    Returns: uint8 RGB array of shape (224, 224, 3) in [0, 255].
+    """
+    try:
+        overlay = cv2.addWeighted(original_rgb_224, float(orig_weight), heatmap_rgb_224, float(heat_weight), 0)
+    except Exception:
+        overlay = np.clip(
+            orig_weight * original_rgb_224.astype(np.float32) + heat_weight * heatmap_rgb_224.astype(np.float32),
+            0.0,
+            255.0,
+        ).astype(np.uint8)
+    return overlay
 
 
 # =========================================================================
@@ -592,7 +636,7 @@ def build_contact_sheet(
     if num_rows == 0:
         return
         
-    fig, axes = plt.subplots(num_rows, 3, figsize=(10.0, max(2.5 * num_rows, 4.0)), dpi=180)
+    fig, axes = plt.subplots(num_rows, 3, figsize=(10.0, max(2.5 * num_rows, 4.0)), dpi=200)
     if num_rows == 1:
         axes = np.expand_dims(axes, axis=0)
         
@@ -601,9 +645,9 @@ def build_contact_sheet(
         ax_base = axes[r_idx, 1]
         ax_ours = axes[r_idx, 2]
         
-        ax_orig.imshow(rec["original_img"])
-        ax_base.imshow(rec["baseline_overlay"])
-        ax_ours.imshow(rec["ours_overlay"])
+        ax_orig.imshow(rec["original_224"])
+        ax_base.imshow(rec["baseline_overlay_224"])
+        ax_ours.imshow(rec["ours_overlay_224"])
         
         for ax in (ax_orig, ax_base, ax_ours):
             ax.set_xticks([])
@@ -618,9 +662,9 @@ def build_contact_sheet(
         ax_orig.set_ylabel(row_label, rotation=0, labelpad=34, va="center", fontsize=8, fontweight="bold")
         
         if r_idx == 0:
-            ax_orig.set_title("Original Image", fontsize=11, fontweight="bold", pad=8)
+            ax_orig.set_title("Original (224x224)", fontsize=11, fontweight="bold", pad=8)
             ax_base.set_title("Baseline Grad-CAM", fontsize=11, fontweight="bold", pad=8)
-            ax_ours.set_title("Ours Grad-CAM", fontsize=11, fontweight="bold", pad=8)
+            ax_ours.set_title("AMGSA-FER (Ours)", fontsize=11, fontweight="bold", pad=8)
             
     fig.suptitle(f"Grad-CAM Candidates - Emotion: {emotion_name} ({num_rows} Samples)", fontsize=13, fontweight="bold", y=0.995)
     fig.tight_layout()
@@ -628,6 +672,73 @@ def build_contact_sheet(
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
     print(f"[{emotion_name}] Saved contact sheet: {output_path}")
+
+
+def create_publication_figure_3x7(
+    records_by_emotion: Dict[int, List[Dict[str, Any]]],
+    output_png: Path,
+    output_pdf: Path,
+    rank: int = 0,
+    include_labels: bool = True,
+):
+    """
+    Generate publication figure 3x7:
+                  Angry Disgust Fear Happy Sad Surprise Neutral
+       Original
+       Baseline
+       AMGSA-FER
+
+    - Square cells equal in size (each 224x224, 1:1 aspect ratio).
+    - wspace=0, hspace=0
+    - axis off
+    - No whitespace between images.
+    - Matplotlib savefig: bbox_inches='tight', pad_inches=0, dpi=600.
+    - Saved as both PNG (600 dpi) and PDF vector container.
+    """
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    output_pdf.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(3, 7, figsize=(14.0, 6.2))
+    fig.subplots_adjust(wspace=0, hspace=0)
+
+    col_labels = [name.title() for name in EMOTION_NAMES]
+    row_labels = ["Original", "Baseline", "AMGSA-FER"]
+
+    for c_idx in range(7):
+        samples = records_by_emotion.get(c_idx, [])
+        if not samples:
+            continue
+        sample = samples[rank] if len(samples) > rank else samples[0]
+
+        orig_img = sample["original_224"]
+        base_img = sample["baseline_overlay_224"]
+        ours_img = sample["ours_overlay_224"]
+
+        col_imgs = [orig_img, base_img, ours_img]
+
+        for r_idx in range(3):
+            ax = axes[r_idx, c_idx]
+            ax.imshow(col_imgs[r_idx], aspect="equal")
+            ax.axis("off")
+
+            if include_labels:
+                # Column titles on top row
+                if r_idx == 0:
+                    ax.set_title(col_labels[c_idx], fontsize=13, fontweight="bold", pad=8)
+                # Row labels on first column
+                if c_idx == 0:
+                    ax.text(
+                        -0.06, 0.5,
+                        row_labels[r_idx],
+                        va="center", ha="right",
+                        fontsize=12, fontweight="bold",
+                        transform=ax.transAxes,
+                    )
+
+    fig.savefig(output_png, dpi=600, bbox_inches="tight", pad_inches=0)
+    fig.savefig(output_pdf, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+    print(f"[PUBLICATION FIGURE] Saved 3x7 figure: {output_png} (600 DPI) & {output_pdf}")
 
 
 # =========================================================================
@@ -812,6 +923,7 @@ def main() -> int:
     # 7. Compute Grad-CAM for Selected Samples and Save Artifacts
     print("\n[GRAD-CAM] Computing Grad-CAM heatmaps and generating visualization candidates...")
     metadata_rows: List[Dict[str, Any]] = []
+    all_records_by_emotion: Dict[int, List[Dict[str, Any]]] = {}
     
     for cls_idx, cls_name in enumerate(EMOTION_NAMES):
         cls_title = cls_name.title()
@@ -839,33 +951,36 @@ def main() -> int:
             one_ds = make_dataset(one_sample_records, cfg_single, split="test", training=False, replicas=1)
             single_input, _ = next(iter(one_ds))
             
+            # Un-normalized original RGB image resized to 224x224
             image01 = denorm_images[sample_idx]
-            h_img, w_img = image01.shape[:2]
+            orig_224 = resize_original_rgb_to_224(image01)
             
             # Baseline Grad-CAM (Target = Ground Truth Class)
             base_cam_small, b_conf, b_pred = compute_gradcam(
                 base_model, single_input, base_target_layer, target_class_idx=cls_idx
             )
-            base_cam_full = resize_heatmap_to_image(base_cam_small, (h_img, w_img))
-            base_heat_rgb, base_overlay = generate_heatmap_overlay(
-                image01, base_cam_full, alpha=args.alpha, colormap_name=args.colormap
+            base_cam_224 = resize_heatmap_to_224(base_cam_small)
+            base_heat_rgb = apply_full_colormap_jet(base_cam_224)
+            base_overlay = generate_gradcam_overlay(
+                orig_224, base_heat_rgb, orig_weight=args.orig_weight, heat_weight=args.alpha
             )
             
             # Ours Grad-CAM (Target = Ground Truth Class)
             ours_cam_small, o_conf, o_pred = compute_gradcam(
                 ours_model, single_input, ours_target_layer, target_class_idx=cls_idx
             )
-            ours_cam_full = resize_heatmap_to_image(ours_cam_small, (h_img, w_img))
-            ours_heat_rgb, ours_overlay = generate_heatmap_overlay(
-                image01, ours_cam_full, alpha=args.alpha, colormap_name=args.colormap
+            ours_cam_224 = resize_heatmap_to_224(ours_cam_small)
+            ours_heat_rgb = apply_full_colormap_jet(ours_cam_224)
+            ours_overlay = generate_gradcam_overlay(
+                orig_224, ours_heat_rgb, orig_weight=args.orig_weight, heat_weight=args.alpha
             )
             
-            # Image numpy arrays (uint8)
-            img_orig_pil = Image.fromarray((np.clip(image01, 0.0, 1.0) * 255).astype(np.uint8))
-            img_base_heat_pil = Image.fromarray((np.clip(base_heat_rgb, 0.0, 1.0) * 255).astype(np.uint8))
-            img_base_over_pil = Image.fromarray((np.clip(base_overlay, 0.0, 1.0) * 255).astype(np.uint8))
-            img_ours_heat_pil = Image.fromarray((np.clip(ours_heat_rgb, 0.0, 1.0) * 255).astype(np.uint8))
-            img_ours_over_pil = Image.fromarray((np.clip(ours_overlay, 0.0, 1.0) * 255).astype(np.uint8))
+            # Image PIL objects directly from 224x224 uint8 arrays (no matplotlib, no border, no padding, no axis)
+            img_orig_pil = Image.fromarray(orig_224)
+            img_base_heat_pil = Image.fromarray(base_heat_rgb)
+            img_base_over_pil = Image.fromarray(base_overlay)
+            img_ours_heat_pil = Image.fromarray(ours_heat_rgb)
+            img_ours_over_pil = Image.fromarray(ours_overlay)
             
             # 1. Save in sample-dedicated folder: <Emotion>/<sample_id>/
             sample_sub_dir = cls_dir / sample_id_str
@@ -922,21 +1037,50 @@ def main() -> int:
                 "ours_correct": bool(o_pred == cls_idx),
                 "gradcam_layer_baseline": base_target_layer.name,
                 "gradcam_layer_ours": ours_target_layer.name,
-                "original_img": image01,
-                "baseline_overlay": base_overlay,
-                "ours_overlay": ours_overlay,
+                "original_224": orig_224,
+                "baseline_overlay_224": base_overlay,
+                "ours_overlay_224": ours_overlay,
+                "baseline_heat_224": base_heat_rgb,
+                "ours_heat_224": ours_heat_rgb,
             }
             sample_records_for_sheet.append(record_item)
             
             meta_row = dict(record_item)
-            meta_row.pop("original_img")
-            meta_row.pop("baseline_overlay")
-            meta_row.pop("ours_overlay")
+            meta_row.pop("original_224", None)
+            meta_row.pop("baseline_overlay_224", None)
+            meta_row.pop("ours_overlay_224", None)
+            meta_row.pop("baseline_heat_224", None)
+            meta_row.pop("ours_heat_224", None)
             metadata_rows.append(meta_row)
             
+        # Store records for global 3x7 figure
+        all_records_by_emotion[cls_idx] = sample_records_for_sheet
+        
         # Generate contact sheet for this emotion
         sheet_path = cls_dir / f"contact_sheet_{cls_name.lower()}.png"
         build_contact_sheet(sample_records_for_sheet, cls_title, sheet_path)
+        
+    # 8. Generate Publication 3x7 Figure (PNG 600 DPI and PDF Vector Container)
+    print("\n[PUBLICATION FIGURE] Generating 3x7 publication figures (Original | Baseline | AMGSA-FER)...")
+    pub_figure_png = output_dir / "publication_figure_3x7.png"
+    pub_figure_pdf = output_dir / "publication_figure_3x7.pdf"
+    create_publication_figure_3x7(
+        records_by_emotion=all_records_by_emotion,
+        output_png=pub_figure_png,
+        output_pdf=pub_figure_pdf,
+        rank=0,
+        include_labels=True,
+    )
+    
+    # Also save alternative candidate ranks (top-2, top-3) for additional figure options
+    for r_i in range(1, min(3, args.samples_per_class)):
+        create_publication_figure_3x7(
+            records_by_emotion=all_records_by_emotion,
+            output_png=output_dir / f"publication_figure_3x7_top{r_i + 1}.png",
+            output_pdf=output_dir / f"publication_figure_3x7_top{r_i + 1}.pdf",
+            rank=r_i,
+            include_labels=True,
+        )
         
     # 8. Save metadata_all.csv
     csv_path = output_dir / "metadata_all.csv"
@@ -978,8 +1122,12 @@ def main() -> int:
         f.write(f"Ours Grad-CAM Layer     : {ours_target_layer.name} (Tensor Shape: {ours_shape}, Spatial: {ours_shape[1]}x{ours_shape[2]}, Channels: {ours_shape[3]})\n\n")
         f.write(f"Both Correct Samples    : {both_correct_count}/{total_test_samples} ({both_correct_count / total_test_samples * 100:.2f}%)\n")
         f.write(f"Grad-CAM Target         : Last block of Stage 3 (14x14x512)\n")
-        f.write(f"Resize Method           : INTER_CUBIC (Bicubic)\n")
-        f.write(f"Colormap & Alpha        : {args.colormap} (alpha={args.alpha})\n")
+        f.write(f"CAM Resize Resolution   : 224x224 (cv2.INTER_CUBIC)\n")
+        f.write(f"Original Image Resized  : 224x224 (cv2.INTER_CUBIC)\n")
+        f.write(f"Colormap Style          : cv2.COLORMAP_JET full-face (dark-blue to red)\n")
+        f.write(f"Overlay Formulation     : cv2.addWeighted(original, 0.55, heatmap, 0.45, 0)\n")
+        f.write(f"Image Export Format     : Direct PIL/cv2 (224x224 raw pixels, no borders/axes)\n")
+        f.write(f"Publication Grid (3x7)  : publication_figure_3x7.png (600 DPI) & publication_figure_3x7.pdf\n")
         f.write(f"Target Samples per Class: {args.samples_per_class}\n\n")
         f.write("-" * 75 + "\n")
         f.write(f"{'Emotion':<12} {'Available Both Correct':<25} {'Selected Samples':<20} {'Status':<15}\n")
@@ -994,20 +1142,24 @@ def main() -> int:
         f.write("-" * 75 + "\n\n")
         f.write("Output Structure:\n")
         f.write(f"  {output_dir}/\n")
+        f.write("    publication_figure_3x7.png (600 DPI, Original | Baseline | AMGSA-FER, 7 emotions)\n")
+        f.write("    publication_figure_3x7.pdf (vector container for paper)\n")
+        f.write("    publication_figure_3x7_top2.png / .pdf\n")
+        f.write("    publication_figure_3x7_top3.png / .pdf\n")
         f.write("    metadata_all.csv\n")
         f.write("    summary.txt\n")
         for cls_name in EMOTION_NAMES:
             c_title = cls_name.title()
             f.write(f"    {c_title}/\n")
-            f.write(f"      001/ ... 020/ (contains original.png, heatmap.png, overlay.png)\n")
-            f.write(f"      001_original.png ... 020_original.png\n")
-            f.write(f"      001_heatmap.png ... 020_heatmap.png\n")
-            f.write(f"      001_overlay.png ... 020_overlay.png\n")
+            f.write(f"      001/ ... 020/ (224x224 raw: original.png, heatmap.png, overlay.png)\n")
+            f.write(f"      001_original.png ... 020_original.png (224x224)\n")
+            f.write(f"      001_heatmap.png ... 020_heatmap.png (224x224)\n")
+            f.write(f"      001_overlay.png ... 020_overlay.png (224x224)\n")
             f.write(f"      001_baseline_cam.png ... 020_baseline_cam.png\n")
             f.write(f"      001_ours_cam.png ... 020_ours_cam.png\n")
             f.write(f"      baseline/ (contains 001_original.png, heatmap.png, overlay.png)\n")
             f.write(f"      ours/ (contains 001_original.png, heatmap.png, overlay.png)\n")
-            f.write(f"      contact_sheet_{cls_name.lower()}.png (Original | Baseline Grad-CAM | Ours Grad-CAM)\n")
+            f.write(f"      contact_sheet_{cls_name.lower()}.png (20 rows x 3 cols)\n")
     print(f"[OUTPUT] Saved summary report: {summary_path}")
 
     # 10. Required Final Terminal Output
@@ -1031,8 +1183,10 @@ def main() -> int:
         note = "" if cnt >= args.samples_per_class else f" (Max found: {cnt} due to both-correct condition)"
         print(f"   - {c_title:<9}: {cnt}/{args.samples_per_class} selected (available: {avail}){note}")
     print()
-    print("4. FINAL OUTPUT DIRECTORY:")
-    print(f"   {output_dir.resolve()}")
+    print("4. FINAL OUTPUT DIRECTORY & ARTIFACTS:")
+    print(f"   - Output Directory       : {output_dir.resolve()}")
+    print(f"   - Publication Figure 3x7 : {output_dir.resolve() / 'publication_figure_3x7.png'} (600 DPI)")
+    print(f"   - Publication Vector PDF : {output_dir.resolve() / 'publication_figure_3x7.pdf'}")
     print("=" * 75 + "\n")
     
     return 0
