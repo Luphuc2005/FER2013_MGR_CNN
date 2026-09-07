@@ -234,6 +234,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         data_cfg = cfg.get("data", cfg)
         super().__init__(name=model_cfg.get("name", "convnext_base_ms1m_arcface_baseline"))
         self.num_classes = int(data_cfg.get("num_classes", 7))
+        self.class_names = list(data_cfg.get("class_names", []))
         self.ablation = model_cfg.get("ablation", "cnn_only")
         self.input_size = int(data_cfg.get("image_size", 112))
         self.channels = int(data_cfg.get("channels", 3))
@@ -325,9 +326,16 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         if hard_pairs_config:
             for c, hard_list in hard_pairs_config.items():
                 c_int = int(c)
+                if c_int < 0 or c_int >= self.num_classes:
+                    raise ValueError(f"hard_pairs class id {c_int} is outside num_classes={self.num_classes}.")
                 if isinstance(hard_list, (list, tuple)):
                     for j in hard_list:
-                        hard_matrix_np[c_int, int(j)] = 1.0
+                        j_int = int(j)
+                        if j_int < 0 or j_int >= self.num_classes:
+                            raise ValueError(
+                                f"hard_pairs target id {j_int} is outside num_classes={self.num_classes}."
+                            )
+                        hard_matrix_np[c_int, j_int] = 1.0
         self.hard_pairs_matrix = tf.constant(hard_matrix_np, dtype=tf.float32, name="hard_pairs_matrix")
 
         self.use_au_region_routed = bool(
@@ -393,7 +401,14 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 cache_path=cache_path,
                 embedding_dim=embed_dim,
                 multi_prototype=self.multi_prototype or self.use_adaptive_granularity,
+                num_classes=self.num_classes,
+                class_names=self.class_names or None,
             )
+            if int(text_proto_array.shape[0]) != self.num_classes:
+                raise ValueError(
+                    f"Text prototype class dimension {text_proto_array.shape[0]} "
+                    f"does not match num_classes={self.num_classes}."
+                )
             self.text_prototypes = tf.constant(text_proto_array, dtype=tf.float32, name="frozen_clip_text_prototypes")
         else:
             self.visual_projector = None
@@ -899,8 +914,8 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             total_params = int(np.sum([np.prod(v.shape) for v in self.trainable_variables]))
             if self.multi_prototype:
                 v_shape = endpoints.get("visual_projector", pooled).shape
-                r_shape = endpoints.get("raw_semantic_similarity", tf.zeros([1, 7, 5])).shape
-                s_shape = endpoints.get("semantic_logits", tf.zeros([1, 7])).shape
+                r_shape = endpoints.get("raw_semantic_similarity", tf.zeros([1, self.num_classes, 5])).shape
+                s_shape = endpoints.get("semantic_logits", tf.zeros([1, self.num_classes])).shape
                 print("MULTI_PROTOTYPE_CLIP_ENABLED", flush=True)
                 print(f"Text prototypes shape: {tuple(self.text_prototypes.shape)}", flush=True)
                 print(f"Visual embedding shape: ({v_shape[0]}, {v_shape[1]})", flush=True)
@@ -937,10 +952,14 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
 
         if self.use_semantic_branch and self.visual_projector is not None:
             text_protos = tf.cast(self.text_prototypes, dtype=tf.float32)
-            # Global mean-centering across all text prototypes (7 classes x 5 granularities) to remove shared template overhead
-            proto_mean = tf.reduce_mean(text_protos, axis=[0, 1], keepdims=True)
+            # Global mean-centering across class/granularity axes to remove shared template overhead.
+            proto_mean = (
+                tf.reduce_mean(text_protos, axis=[0, 1], keepdims=True)
+                if text_protos.shape.rank == 3
+                else tf.reduce_mean(text_protos, axis=0, keepdims=True)
+            )
             text_protos_centered = text_protos - proto_mean
-            t_norm = tf.math.l2_normalize(text_protos_centered, axis=-1)  # [7, 5, dim]
+            t_norm = tf.math.l2_normalize(text_protos_centered, axis=-1)
 
             if self.use_au_region_routed and self.visual_projector_upper is not None:
                 # Extract Stage 3 spatial feature maps [B, 14, 14, 512]
@@ -979,7 +998,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 s3 = tf.einsum("bd,cd->bc", v_lower_norm, t_norm[:, 3, :])
                 s4 = tf.einsum("bd,cd->bc", v_global_norm, t_norm[:, 4, :])
 
-                raw_sim = tf.stack([s0, s1, s2, s3, s4], axis=-1)  # [B, 7, 5]
+                raw_sim = tf.stack([s0, s1, s2, s3, s4], axis=-1)  # [B, C, 5]
             else:
                 v_proj = self.visual_projector(pooled, training=training)
                 v_norm = tf.math.l2_normalize(v_proj, axis=-1, epsilon=1e-5)
@@ -999,7 +1018,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     granularity_weights = self.granularity_gate(pooled, training=training)  # [B, 5]
                     granularity_weights_f32 = tf.cast(granularity_weights, tf.float32)
                     gw_exp = tf.expand_dims(granularity_weights_f32, axis=1)  # [B, 1, 5]
-                    agg_sim = tf.reduce_sum(gw_exp * raw_sim_f32, axis=-1)  # [B, 7]
+                    agg_sim = tf.reduce_sum(gw_exp * raw_sim_f32, axis=-1)  # [B, C]
                     endpoints["granularity_weights"] = granularity_weights
                 else:
                     if self.prototype_aggregation == "logsumexp":
@@ -1191,6 +1210,4 @@ class ConvNeXtBaseImageNetFERBaseline(tf.keras.Model):
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),
             "attention_logits": None,
         }
-
-
 

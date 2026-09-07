@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import gc
 import json
 import os
@@ -49,6 +50,47 @@ from datasets.fer2013 import EMOTION_NAMES, build_datasets
 from losses.classification import supervised_mgr_loss
 from metrics.classification import classification_metrics, save_metrics
 from models import ConvNeXtBaseFaceFERBaseline, ConvNeXtBaseImageNetFERBaseline, IR50FERBaseline, MGRConvNeXtFER
+
+
+def get_class_names(cfg: Dict) -> List[str]:
+    data_cfg = cfg.get("data", {})
+    configured = data_cfg.get("class_names") or data_cfg.get("emotion_names")
+    if configured:
+        class_names = [str(name) for name in configured]
+    else:
+        class_names = list(EMOTION_NAMES)
+    num_classes = int(data_cfg.get("num_classes", len(class_names)))
+    if len(class_names) != num_classes:
+        raise ValueError(
+            f"data.class_names has {len(class_names)} entries but data.num_classes={num_classes}."
+        )
+    return class_names
+
+
+def save_classification_artifacts(metrics: Dict[str, object], output_prefix: Path, class_names: Sequence[str]) -> None:
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    report = metrics.get("classification_report", {})
+    report_path = output_prefix.with_name(output_prefix.name + "_classification_report.csv")
+    with report_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["class", "precision", "recall", "f1-score", "support"])
+        for class_name in class_names:
+            row = report.get(class_name, {}) if isinstance(report, dict) else {}
+            writer.writerow([
+                class_name,
+                row.get("precision", ""),
+                row.get("recall", ""),
+                row.get("f1-score", ""),
+                row.get("support", ""),
+            ])
+
+    cm = np.asarray(metrics.get("confusion_matrix", []), dtype=np.int64)
+    cm_path = output_prefix.with_name(output_prefix.name + "_confusion_matrix.csv")
+    with cm_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["true\\pred", *class_names])
+        for class_name, row in zip(class_names, cm.tolist()):
+            writer.writerow([class_name, *row])
 
 
 class LegacyDecoupledAdamW(tf.keras.optimizers.Adam):
@@ -834,7 +876,9 @@ def evaluate_dataset(
 
     c_norm = max(total_count, 1)
 
-    metrics_tta = classification_metrics(y_true, y_pred_tta, EMOTION_NAMES)
+    class_names = get_class_names(cfg)
+    metrics_tta = classification_metrics(y_true, y_pred_tta, class_names)
+    metrics_tta["class_names"] = class_names
     metrics_tta["loss"] = total_loss_tta / c_norm
     metrics_tta["total_loss"] = total_loss_tta / c_norm
     metrics_tta["ce_loss"] = total_ce_tta / c_norm
@@ -844,7 +888,7 @@ def evaluate_dataset(
     metrics_tta["original_weight"] = w_orig
     metrics_tta["flip_weight"] = w_flip
 
-    metrics_no_tta = classification_metrics(y_true, y_pred_orig, EMOTION_NAMES)
+    metrics_no_tta = classification_metrics(y_true, y_pred_orig, class_names)
     metrics_tta["no_tta_accuracy"] = float(metrics_no_tta["accuracy"])
     metrics_tta["no_tta_macro_f1"] = float(metrics_no_tta["macro_f1"])
     metrics_tta["no_tta_weighted_f1"] = float(metrics_no_tta["weighted_f1"])
@@ -1280,11 +1324,13 @@ def main() -> int:
     print("\n" + "=" * 70, flush=True)
     print("  FINAL TEST EVALUATION", flush=True)
     print("=" * 70, flush=True)
+    final_class_names = get_class_names(cfg)
 
     # --- No-TTA evaluation ---
     print("\n[INFO] Running final test evaluation (No TTA)...", flush=True)
     no_tta_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=False)
     save_metrics(no_tta_metrics, run_dir / "test_metrics_no_tta.json")
+    save_classification_artifacts(no_tta_metrics, run_dir / "test_no_tta", final_class_names)
     no_tta_acc = float(no_tta_metrics['accuracy'])
     print(f"\n{'─' * 50}", flush=True)
     print(f"  TEST RESULTS (No TTA)", flush=True)
@@ -1302,6 +1348,7 @@ def main() -> int:
         tta_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=True)
         save_metrics(tta_metrics, run_dir / "test_metrics_tta_hflip.json")
         save_metrics(tta_metrics, run_dir / "test_metrics.json")
+        save_classification_artifacts(tta_metrics, run_dir / "test_tta_hflip", final_class_names)
         tta_acc = float(tta_metrics['accuracy'])
         print(f"\n{'─' * 50}", flush=True)
         print(f"  TEST RESULTS (TTA HFlip)", flush=True)

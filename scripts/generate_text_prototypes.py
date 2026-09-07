@@ -19,6 +19,8 @@ def main():
     parser.add_argument("--model", type=str, default="google/siglip2-base-patch16-224", help="HuggingFace model repo name")
     parser.add_argument("--dim", type=int, default=768, help="Embedding dimension")
     parser.add_argument("--multi", action="store_true", default=True, help="Generate 5-granularity prototypes")
+    parser.add_argument("--num-classes", type=int, default=7, help="Number of emotion classes in the prompt bank")
+    parser.add_argument("--cache-path", type=str, default=None, help="Optional output .npy cache path")
     args = parser.parse_args()
 
     # Import inside main after path setup
@@ -27,8 +29,10 @@ def main():
     print(f"[PRE-COMPUTE] Generating prototypes for {args.model} (dim={args.dim}, multi={args.multi})...")
     protos = get_or_compute_clip_text_prototypes(
         model_name=args.model,
+        cache_path=args.cache_path,
         embedding_dim=args.dim,
         multi_prototype=args.multi,
+        num_classes=args.num_classes,
     )
     print(f"[SUCCESS] Generated prototypes array with shape {protos.shape}!")
 

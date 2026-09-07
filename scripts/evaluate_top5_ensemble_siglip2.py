@@ -26,8 +26,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import load_config, resolve_auto_increment_output_dir
-from datasets.fer2013 import EMOTION_NAMES, build_datasets
-from train import build_model, build_optimizer, configure_gpus, configure_tensorflow_runtime
+from datasets.fer2013 import build_datasets
+from train import build_model, build_optimizer, configure_gpus, configure_tensorflow_runtime, get_class_names
 
 
 def parse_args():
@@ -91,6 +91,8 @@ def extract_probs(model, dataset, w_orig=0.40, w_flip=0.60):
 def main() -> int:
     args = parse_args()
     cfg = load_config(args.config)
+    class_names = get_class_names(cfg)
+    label_ids = list(range(len(class_names)))
     resolve_auto_increment_output_dir(cfg, for_eval=True)
     configure_tensorflow_runtime(cfg)
     configure_gpus(cfg)
@@ -176,10 +178,17 @@ def main() -> int:
     val_ens_acc = accuracy_score(val_labels, val_ens_preds)
     test_ens_acc = accuracy_score(test_labels, test_ens_preds)
 
-    test_macro_f1 = f1_score(test_labels, test_ens_preds, average="macro")
-    test_weighted_f1 = f1_score(test_labels, test_ens_preds, average="weighted")
-    test_report = classification_report(test_labels, test_ens_preds, target_names=EMOTION_NAMES, output_dict=True, zero_division=0)
-    test_cm = confusion_matrix(test_labels, test_ens_preds).tolist()
+    test_macro_f1 = f1_score(test_labels, test_ens_preds, average="macro", labels=label_ids, zero_division=0)
+    test_weighted_f1 = f1_score(test_labels, test_ens_preds, average="weighted", labels=label_ids, zero_division=0)
+    test_report = classification_report(
+        test_labels,
+        test_ens_preds,
+        labels=label_ids,
+        target_names=class_names,
+        output_dict=True,
+        zero_division=0,
+    )
+    test_cm = confusion_matrix(test_labels, test_ens_preds, labels=label_ids).tolist()
 
     print("\n" + "*" * 70)
     print(f" 🔥 TOP-{len(ckpt_prefixes)} ENSEMBLE + TTA FINAL RESULTS 🔥")
@@ -195,6 +204,7 @@ def main() -> int:
         "test_ensemble_acc": float(test_ens_acc),
         "test_macro_f1": float(test_macro_f1),
         "test_weighted_f1": float(test_weighted_f1),
+        "class_names": class_names,
         "test_classification_report": test_report,
         "test_confusion_matrix": test_cm,
         "checkpoints": [str(p) for p in ckpt_prefixes],

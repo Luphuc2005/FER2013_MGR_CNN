@@ -640,6 +640,9 @@ def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.D
     if dataset_type in ("expw", "expw_gdrive"):
         from .expw import build_expw_datasets
         return build_expw_datasets(cfg, replicas)
+    if dataset_type in ("ferplus", "ferplus_official", "ferplus_majority8"):
+        from .ferplus import build_ferplus_datasets
+        return build_ferplus_datasets(cfg, replicas)
     if dataset_type in ("affectnet", "affectnet7") or ("train_csv" in cfg.get("data", {}) and "expw" not in str(cfg.get("data", {}).get("train_csv", "")).lower()):
         from .affectnet import build_affectnet_datasets
         return build_affectnet_datasets(cfg, replicas)
