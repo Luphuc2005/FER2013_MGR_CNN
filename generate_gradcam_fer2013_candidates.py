@@ -38,7 +38,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
-import cv2
+
+# Gracefully handle environments where opencv-python (cv2) is not installed
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 # Force pure CPU execution by default before TensorFlow initializes
 if "CUDA_VISIBLE_DEVICES" not in os.environ:
@@ -454,49 +459,70 @@ def compute_gradcam(
 
 def resize_heatmap_to_224(heatmap: np.ndarray) -> np.ndarray:
     """
-    Resize 2D normalized CAM heatmap [H, W] to exactly 224x224 using cv2.INTER_CUBIC.
+    Resize 2D normalized CAM heatmap [H, W] to exactly 224x224 using Bicubic interpolation.
+    Uses cv2.INTER_CUBIC if available, or PIL.Image.BICUBIC / tf.image.ResizeMethod.BICUBIC.
     Preserves numerical values clipped strictly to [0.0, 1.0].
     """
+    if cv2 is not None:
+        try:
+            resized = cv2.resize(heatmap.astype(np.float32), (224, 224), interpolation=cv2.INTER_CUBIC)
+            return np.clip(resized, 0.0, 1.0)
+        except Exception:
+            pass
     try:
-        resized = cv2.resize(heatmap.astype(np.float32), (224, 224), interpolation=cv2.INTER_CUBIC)
+        im = Image.fromarray(heatmap.astype(np.float32))
+        resample_filter = getattr(Image, "Resampling", Image).BICUBIC
+        im_res = im.resize((224, 224), resample=resample_filter)
+        return np.clip(np.array(im_res, dtype=np.float32), 0.0, 1.0)
     except Exception:
         hm = tf.convert_to_tensor(heatmap[..., None], dtype=tf.float32)
         hm = tf.image.resize(hm, [224, 224], method=tf.image.ResizeMethod.BICUBIC)
         resized = np.squeeze(hm.numpy(), axis=-1)
-    return np.clip(resized, 0.0, 1.0)
+        return np.clip(resized, 0.0, 1.0)
 
 
 def resize_original_rgb_to_224(original_rgb01: np.ndarray) -> np.ndarray:
     """
-    Resize un-normalized original RGB image [H, W, 3] to exactly 224x224 using cv2.INTER_CUBIC.
+    Resize un-normalized original RGB image [H, W, 3] to exactly 224x224 using Bicubic interpolation.
+    Uses cv2.INTER_CUBIC if available, or PIL.Image.BICUBIC / tf.image.ResizeMethod.BICUBIC.
     Returns: uint8 RGB numpy array of shape (224, 224, 3) in [0, 255].
     """
     orig_uint8 = np.uint8(np.clip(original_rgb01, 0.0, 1.0) * 255.0)
+    if cv2 is not None:
+        try:
+            return cv2.resize(orig_uint8, (224, 224), interpolation=cv2.INTER_CUBIC)
+        except Exception:
+            pass
     try:
-        resized = cv2.resize(orig_uint8, (224, 224), interpolation=cv2.INTER_CUBIC)
+        im = Image.fromarray(orig_uint8)
+        resample_filter = getattr(Image, "Resampling", Image).BICUBIC
+        im_res = im.resize((224, 224), resample=resample_filter)
+        return np.array(im_res, dtype=np.uint8)
     except Exception:
         t = tf.convert_to_tensor(orig_uint8, dtype=tf.float32)
         t = tf.image.resize(t, [224, 224], method=tf.image.ResizeMethod.BICUBIC)
-        resized = np.uint8(np.clip(t.numpy(), 0.0, 255.0))
-    return resized
+        return np.uint8(np.clip(t.numpy(), 0.0, 255.0))
 
 
 def apply_full_colormap_jet(heatmap01_224: np.ndarray) -> np.ndarray:
     """
-    Apply cv2.COLORMAP_JET across the entire CAM [0, 1].
+    Apply cv2.COLORMAP_JET (or exact matplotlib 'jet') across the entire CAM [0, 1].
     Low values show dark-blue/blue (no transparency).
     High values show green -> yellow -> red.
     Returns: uint8 RGB array of shape (224, 224, 3) in [0, 255].
     """
-    heatmap_uint8 = np.uint8(np.clip(heatmap01_224, 0.0, 1.0) * 255.0)
-    try:
-        heatmap_bgr = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-        heatmap_rgb = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
-    except Exception:
-        cmap = plt.get_cmap("jet")
-        heat_rgba = cmap(heatmap01_224)
-        heatmap_rgb = np.uint8(np.clip(heat_rgba[..., :3], 0.0, 1.0) * 255.0)
-    return heatmap_rgb
+    heatmap01_clean = np.clip(heatmap01_224, 0.0, 1.0)
+    if cv2 is not None:
+        try:
+            heatmap_uint8 = np.uint8(heatmap01_clean * 255.0)
+            heatmap_bgr = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+            return cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
+        except Exception:
+            pass
+    # Exact Matplotlib 'jet' colormap: identical color response from dark-blue to red
+    cmap = plt.get_cmap("jet")
+    heat_rgba = cmap(heatmap01_clean)
+    return np.uint8(np.clip(heat_rgba[..., :3], 0.0, 1.0) * 255.0)
 
 
 def generate_gradcam_overlay(
@@ -506,21 +532,24 @@ def generate_gradcam_overlay(
     heat_weight: float = 0.45,
 ) -> np.ndarray:
     """
-    Overlay original RGB image and heatmap using cv2.addWeighted:
+    Overlay original RGB image and heatmap using cv2.addWeighted formulation:
     original = 0.55
     heatmap = 0.45
     cv2.addWeighted(original, 0.55, heatmap, 0.45, 0)
     Both inputs are uint8 RGB arrays of shape (224, 224, 3).
     Returns: uint8 RGB array of shape (224, 224, 3) in [0, 255].
     """
-    try:
-        overlay = cv2.addWeighted(original_rgb_224, float(orig_weight), heatmap_rgb_224, float(heat_weight), 0)
-    except Exception:
-        overlay = np.clip(
-            orig_weight * original_rgb_224.astype(np.float32) + heat_weight * heatmap_rgb_224.astype(np.float32),
-            0.0,
-            255.0,
-        ).astype(np.uint8)
+    if cv2 is not None:
+        try:
+            return cv2.addWeighted(original_rgb_224, float(orig_weight), heatmap_rgb_224, float(heat_weight), 0)
+        except Exception:
+            pass
+    # Pure NumPy mathematical equivalent: saturate(src1 * alpha + src2 * beta + gamma)
+    overlay = np.clip(
+        float(orig_weight) * original_rgb_224.astype(np.float32) + float(heat_weight) * heatmap_rgb_224.astype(np.float32),
+        0.0,
+        255.0,
+    ).astype(np.uint8)
     return overlay
 
 
