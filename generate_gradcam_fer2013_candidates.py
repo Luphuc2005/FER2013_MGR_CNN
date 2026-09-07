@@ -125,6 +125,13 @@ def parse_args():
         help="Colormap for Grad-CAM heatmap visualization",
     )
     parser.add_argument(
+        "--stage",
+        type=int,
+        default=4,
+        choices=[3, 4],
+        help="Target ConvNeXt stage for Grad-CAM (default: 4 for emotional AUs, 7x7x1024; 3 for 14x14x512)",
+    )
+    parser.add_argument(
         "--cpu",
         action="store_true",
         default=True,
