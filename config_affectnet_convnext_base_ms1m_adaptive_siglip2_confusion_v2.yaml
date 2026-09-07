@@ -48,28 +48,28 @@ data:
   mask_ablation: "none"
   sampling_strategy: "class_balanced"
   class_sampling_weights:
-    - 0.142857
-    - 0.142857
-    - 0.142857
-    - 0.142857
-    - 0.142857
-    - 0.142857
-    - 0.142857
+    - 0.1295
+    - 0.0506
+    - 0.0656
+    - 0.3011
+    - 0.1310
+    - 0.0975
+    - 0.2247
   shuffle_buffer: 283901
   cache: false
 
 augmentation:
   horizontal_flip: true
-  rotation_degrees: 15.0
-  brightness_delta: 0.15
-  contrast_lower: 0.85
-  contrast_upper: 1.15
-  gamma_prob: 0.5
-  gamma_min: 0.5
-  gamma_max: 2.0
-  random_erasing_prob: 0.40
+  rotation_degrees: 10.0
+  brightness_delta: 0.10
+  contrast_lower: 0.90
+  contrast_upper: 1.10
+  gamma_prob: 0.30
+  gamma_min: 0.8
+  gamma_max: 1.2
+  random_erasing_prob: 0.20
   random_erasing_area_min: 0.02
-  random_erasing_area_max: 0.15
+  random_erasing_area_max: 0.10
   random_erasing_value: "random"
 
 model:
@@ -133,7 +133,7 @@ model:
   logit_fusion: "single_head"
   finetune_logit_fusion: "single_head"
 
-  freeze_backbone_epochs: 1
+  freeze_backbone_epochs: 5
   unfreeze_backbone: true
   freeze_unfrozen_batchnorm: true
 
@@ -141,8 +141,8 @@ stage_transition:
   enable_2stage_switching: false
 
 training:
-  epochs: 100
-  patience: 200
+  epochs: 60
+  patience: 10
   warmup_epochs: 3
   loss: "cross_entropy"
   label_smoothing: 0.10
@@ -150,9 +150,9 @@ training:
   base_optimizer: "adamw"
   sam_rho: 0.03
   sam_adaptive: false
-  lr: 0.0003
-  finetune_lr: 0.0003
-  visual_extractor_lr: 0.00003
+  lr: 0.0001
+  finetune_lr: 0.0001
+  visual_extractor_lr: 0.000005
   weight_decay: 0.035
   scheduler: "cosine"
   grad_clip_norm: 1.0
