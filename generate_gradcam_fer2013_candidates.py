@@ -86,7 +86,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output-dir",
-        default="/home/ptbao/projects/FER2013_MGR_CNN/outputs/gradcam_fer2013_candidates",
+        default="/home/ptbao/projects/FER2013_MGR_CNN/outputs/gradcam_fer2013_stage3_candidates",
         help="Output directory for Grad-CAM images and metadata",
     )
     parser.add_argument(
@@ -104,8 +104,8 @@ def parse_args():
     parser.add_argument(
         "--alpha",
         type=float,
-        default=0.42,
-        help="Heatmap overlay alpha blending factor",
+        default=0.38,
+        help="Heatmap overlay alpha blending factor (0.35 - 0.40)",
     )
     parser.add_argument(
         "--colormap",
@@ -254,26 +254,23 @@ def inspect_and_find_gradcam_layer(
     model_name_tag: str,
 ) -> Tuple[tf.keras.layers.Layer, Tuple[int, ...]]:
     """
-    Inspect model to find the last spatial feature map of ConvNeXt before Global Average Pooling.
-    Verifies that layer produces a 4D tensor with H > 1, W > 1 and receives non-zero gradients.
+    Inspect model to find the last spatial block of Stage 3 (feature map 14x14x512).
+    Verifies that layer produces a 4D tensor with spatial shape (14, 14), 512 channels,
+    and receives non-zero gradients.
     """
-    print(f"\n[{model_name_tag}] Inspecting model to locate final spatial feature map before GAP...")
+    print(f"\n[{model_name_tag}] Inspecting model to locate Stage 3 last spatial block (14x14x512)...")
     
-    # 1. Primary architecture candidates based on ConvNeXtBaseFaceFERBaseline design:
-    # If ECA is enabled and present: stage4_eca feeds into GAP
-    # Otherwise: the last block of stage4 of backbone feeds into GAP
     candidate_layers: List[Tuple[str, tf.keras.layers.Layer]] = []
     
-    if getattr(model, "use_eca", False) and getattr(model, "stage4_eca", None) is not None:
-        candidate_layers.append(("model.stage4_eca", model.stage4_eca))
+    # 1. Primary architectural candidate: last block of Stage 3 in ConvNeXt backbone
+    if hasattr(model, "backbone") and hasattr(model.backbone, "stages"):
+        if len(model.backbone.stages) >= 3:
+            stage3_blocks = model.backbone.stages[2]
+            if stage3_blocks:
+                last_block = stage3_blocks[-1]
+                candidate_layers.append((f"backbone.stages[2][-1] ({last_block.name})", last_block))
     
-    if hasattr(model, "backbone") and hasattr(model.backbone, "stages") and len(model.backbone.stages) >= 4:
-        stage4_blocks = model.backbone.stages[3]
-        if stage4_blocks:
-            last_block = stage4_blocks[-1]
-            candidate_layers.append((f"backbone.stage4_blocks[-1] ({last_block.name})", last_block))
-    
-    # 2. General recursive search across all layers as fallback / verification
+    # 2. General recursive search across all layers for Stage 3 blocks
     def collect_layers(obj, seen=None):
         if seen is None:
             seen = set()
@@ -293,21 +290,21 @@ def inspect_and_find_gradcam_layer(
         return res
 
     all_layers = collect_layers(model)
-    exclude_types = (
-        tf.keras.layers.Dense,
-        tf.keras.layers.GlobalAveragePooling2D,
-        tf.keras.layers.GlobalMaxPooling2D,
-        tf.keras.layers.Dropout,
-        tf.keras.layers.Flatten,
-        tf.keras.layers.Softmax,
-    )
-    
+    stage3_named_candidates = []
+    import re
     for l in all_layers:
-        if not isinstance(l, exclude_types):
-            lname = str(getattr(l, "name", ""))
-            if "stage4" in lname or "block" in lname or "eca" in lname:
-                if (lname, l) not in candidate_layers:
-                    candidate_layers.append((lname, l))
+        lname = str(getattr(l, "name", "")).lower()
+        if ("stage3" in lname or "stage_3" in lname) and "downsample" not in lname and "adapter" not in lname:
+            stage3_named_candidates.append((lname, l))
+            
+    def block_sort_key(item):
+        m = re.search(r"block(\d+)", item[0])
+        return int(m.group(1)) if m else -1
+        
+    stage3_named_candidates.sort(key=block_sort_key, reverse=True)
+    for desc, l in stage3_named_candidates:
+        if not any(l is existing_l for _, existing_l in candidate_layers):
+            candidate_layers.append((desc, l))
     
     # Test candidate layers
     verified_candidates = []
@@ -318,26 +315,30 @@ def inspect_and_find_gradcam_layer(
             feat = cap["value"]
             if is_valid_4d_feature_map(feat):
                 shape = tuple(int(dim) if dim is not None else 1 for dim in feat.shape)
-                verified_candidates.append((layer, shape, desc))
+                h, w = shape[1], shape[2]
+                if h == 14 and w == 14:
+                    verified_candidates.append((layer, shape, desc))
         except Exception:
             continue
     
     if not verified_candidates:
         raise RuntimeError(
-            f"[{model_name_tag}] FATAL: Could not find any 4D feature map layer before GAP! "
-            f"Model inspection found 0 valid spatial layers."
+            f"[{model_name_tag}] FATAL: Could not find any Stage 3 spatial feature map layer with shape 14x14! "
+            f"Model inspection found 0 valid spatial layers matching (14, 14)."
         )
     
-    # The first candidate in verified_candidates is the primary architectural candidate before GAP
     selected_layer, selected_shape, selected_desc = verified_candidates[0]
+    h, w, c = selected_shape[1], selected_shape[2], (selected_shape[3] if len(selected_shape) > 3 else 0)
     
-    # Verify spatial dimension > 1
-    h, w = selected_shape[1], selected_shape[2]
-    if h <= 1 or w <= 1:
-        raise RuntimeError(
-            f"[{model_name_tag}] FATAL: Selected Grad-CAM layer '{selected_layer.name}' "
-            f"has invalid spatial dimensions ({h}x{w}). Must be > 1 to avoid fake heatmaps!"
-        )
+    # Strict assertions as required
+    assert (h, w) == (14, 14), (
+        f"[{model_name_tag}] ASSERTION FAILED: Spatial shape must be exactly (14, 14), "
+        f"but got ({h}, {w}) for layer '{selected_layer.name}'!"
+    )
+    assert c == 512, (
+        f"[{model_name_tag}] ASSERTION FAILED: Channel depth must be exactly 512, "
+        f"but got {c} for layer '{selected_layer.name}'!"
+    )
     
     # Verify GradientTape backpropagation on sample input
     with tf.GradientTape() as tape:
@@ -354,10 +355,14 @@ def inspect_and_find_gradcam_layer(
             f"Gradients cannot backpropagate from classifier to this layer!"
         )
     
-    print(f"[{model_name_tag}] Selected Grad-CAM Layer: '{selected_layer.name}'")
-    print(f"[{model_name_tag}]   Type: {type(selected_layer).__name__}")
-    print(f"[{model_name_tag}]   Feature Map Tensor Shape: {selected_shape} (Spatial: {h}x{w}, Channels: {selected_shape[3]})")
-    print(f"[{model_name_tag}]   Gradient Verification: PASSED (grad shape: {tuple(grads.shape)})")
+    print(f"\n[{model_name_tag}] ===================================================================")
+    print(f"[{model_name_tag}] Target Grad-CAM Layer : '{selected_layer.name}' ({selected_desc})")
+    print(f"[{model_name_tag}] Layer Class Type     : {type(selected_layer).__name__}")
+    print(f"[{model_name_tag}] Tensor Output Shape  : {selected_shape}")
+    print(f"[{model_name_tag}] Spatial Dimensions   : ({h}, {w})  -> ASSERTION PASSED: spatial shape == (14, 14)")
+    print(f"[{model_name_tag}] Channel Dimension   : {c}  -> ASSERTION PASSED: channels == 512")
+    print(f"[{model_name_tag}] Gradient Verification: PASSED (gradient shape: {tuple(grads.shape)})")
+    print(f"[{model_name_tag}] ===================================================================\n")
     
     return selected_layer, selected_shape
 
@@ -441,30 +446,37 @@ def compute_gradcam(
 
 
 def resize_heatmap_to_image(heatmap: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
-    """Resize 2D heatmap [H, W] to target image dimensions using bilinear interpolation."""
+    """Resize 2D heatmap [H, W] to target image dimensions using BICUBIC (INTER_CUBIC) interpolation."""
     h, w = target_hw
-    hm = tf.convert_to_tensor(heatmap[..., None], dtype=tf.float32)
-    hm = tf.image.resize(hm, [h, w], method="bilinear")
-    hm = tf.clip_by_value(hm, 0.0, 1.0)
-    return np.squeeze(hm.numpy(), axis=-1)
+    try:
+        import cv2
+        resized = cv2.resize(heatmap.astype(np.float32), (w, h), interpolation=cv2.INTER_CUBIC)
+    except ImportError:
+        hm = tf.convert_to_tensor(heatmap[..., None], dtype=tf.float32)
+        hm = tf.image.resize(hm, [h, w], method=tf.image.ResizeMethod.BICUBIC)
+        resized = np.squeeze(hm.numpy(), axis=-1)
+    return np.clip(resized, 0.0, 1.0)
 
 
 def generate_heatmap_overlay(
-    image01: np.ndarray,
+    original_rgb01: np.ndarray,
     heatmap01: np.ndarray,
-    alpha: float = 0.42,
+    alpha: float = 0.38,
     colormap_name: str = "jet",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Generate colormapped heatmap and overlay on original image.
-    image01: [H, W, 3] in [0, 1]
-    heatmap01: [H, W] in [0, 1]
-    Returns: (heat_rgb, overlay) both [H, W, 3] in [0, 1]
+    Generate colormapped heatmap and overlay onto original un-normalized RGB image.
+    original_rgb01: [H, W, 3] un-normalized original RGB image in range [0, 1].
+    heatmap01: [H, W] normalized CAM heatmap in range [0, 1].
+    Returns: (heat_rgb, overlay) both [H, W, 3] in [0, 1].
     """
     cmap = plt.get_cmap(colormap_name)
     heat_rgba = cmap(np.clip(heatmap01, 0.0, 1.0))
     heat_rgb = heat_rgba[..., :3]
-    overlay = np.clip((1.0 - alpha) * image01 + alpha * heat_rgb, 0.0, 1.0)
+    
+    # Strictly overlay onto un-normalized original RGB image
+    orig_rgb = np.clip(original_rgb01, 0.0, 1.0)
+    overlay = np.clip((1.0 - alpha) * orig_rgb + alpha * heat_rgb, 0.0, 1.0)
     return heat_rgb, overlay
 
 
@@ -835,7 +847,7 @@ def main() -> int:
                 base_model, single_input, base_target_layer, target_class_idx=cls_idx
             )
             base_cam_full = resize_heatmap_to_image(base_cam_small, (h_img, w_img))
-            _, base_overlay = generate_heatmap_overlay(
+            base_heat_rgb, base_overlay = generate_heatmap_overlay(
                 image01, base_cam_full, alpha=args.alpha, colormap_name=args.colormap
             )
             
@@ -844,19 +856,51 @@ def main() -> int:
                 ours_model, single_input, ours_target_layer, target_class_idx=cls_idx
             )
             ours_cam_full = resize_heatmap_to_image(ours_cam_small, (h_img, w_img))
-            _, ours_overlay = generate_heatmap_overlay(
+            ours_heat_rgb, ours_overlay = generate_heatmap_overlay(
                 image01, ours_cam_full, alpha=args.alpha, colormap_name=args.colormap
             )
             
-            # File paths
-            orig_img_path = cls_dir / f"{sample_id_str}_original.png"
-            base_cam_path = cls_dir / f"{sample_id_str}_baseline_cam.png"
-            ours_cam_path = cls_dir / f"{sample_id_str}_ours_cam.png"
+            # Image numpy arrays (uint8)
+            img_orig_pil = Image.fromarray((np.clip(image01, 0.0, 1.0) * 255).astype(np.uint8))
+            img_base_heat_pil = Image.fromarray((np.clip(base_heat_rgb, 0.0, 1.0) * 255).astype(np.uint8))
+            img_base_over_pil = Image.fromarray((np.clip(base_overlay, 0.0, 1.0) * 255).astype(np.uint8))
+            img_ours_heat_pil = Image.fromarray((np.clip(ours_heat_rgb, 0.0, 1.0) * 255).astype(np.uint8))
+            img_ours_over_pil = Image.fromarray((np.clip(ours_overlay, 0.0, 1.0) * 255).astype(np.uint8))
             
-            # Save individual PNGs pixel-for-pixel (lossless PNG)
-            Image.fromarray((np.clip(image01, 0.0, 1.0) * 255).astype(np.uint8)).save(orig_img_path)
-            Image.fromarray((np.clip(base_overlay, 0.0, 1.0) * 255).astype(np.uint8)).save(base_cam_path)
-            Image.fromarray((np.clip(ours_overlay, 0.0, 1.0) * 255).astype(np.uint8)).save(ours_cam_path)
+            # 1. Save in sample-dedicated folder: <Emotion>/<sample_id>/
+            sample_sub_dir = cls_dir / sample_id_str
+            sample_sub_dir.mkdir(parents=True, exist_ok=True)
+            img_orig_pil.save(sample_sub_dir / "original.png")
+            img_ours_heat_pil.save(sample_sub_dir / "heatmap.png")
+            img_ours_over_pil.save(sample_sub_dir / "overlay.png")
+            img_base_heat_pil.save(sample_sub_dir / "baseline_heatmap.png")
+            img_base_over_pil.save(sample_sub_dir / "baseline_overlay.png")
+            img_ours_heat_pil.save(sample_sub_dir / "ours_heatmap.png")
+            img_ours_over_pil.save(sample_sub_dir / "ours_overlay.png")
+            
+            # 2. Save in model-specific subfolders: <Emotion>/baseline/ and <Emotion>/ours/
+            base_model_dir = cls_dir / "baseline"
+            base_model_dir.mkdir(parents=True, exist_ok=True)
+            img_orig_pil.save(base_model_dir / f"{sample_id_str}_original.png")
+            img_base_heat_pil.save(base_model_dir / f"{sample_id_str}_heatmap.png")
+            img_base_over_pil.save(base_model_dir / f"{sample_id_str}_overlay.png")
+            
+            ours_model_dir = cls_dir / "ours"
+            ours_model_dir.mkdir(parents=True, exist_ok=True)
+            img_orig_pil.save(ours_model_dir / f"{sample_id_str}_original.png")
+            img_ours_heat_pil.save(ours_model_dir / f"{sample_id_str}_heatmap.png")
+            img_ours_over_pil.save(ours_model_dir / f"{sample_id_str}_overlay.png")
+            
+            # 3. Save flat in emotion folder: <Emotion>/
+            img_orig_pil.save(cls_dir / f"{sample_id_str}_original.png")
+            img_ours_heat_pil.save(cls_dir / f"{sample_id_str}_heatmap.png")
+            img_ours_over_pil.save(cls_dir / f"{sample_id_str}_overlay.png")
+            img_base_over_pil.save(cls_dir / f"{sample_id_str}_baseline_cam.png")
+            img_base_heat_pil.save(cls_dir / f"{sample_id_str}_baseline_heatmap.png")
+            img_base_over_pil.save(cls_dir / f"{sample_id_str}_baseline_overlay.png")
+            img_ours_over_pil.save(cls_dir / f"{sample_id_str}_ours_cam.png")
+            img_ours_heat_pil.save(cls_dir / f"{sample_id_str}_ours_heatmap.png")
+            img_ours_over_pil.save(cls_dir / f"{sample_id_str}_ours_overlay.png")
             
             # Get original image path or identifier if available
             orig_path_str = ""
@@ -928,11 +972,13 @@ def main() -> int:
         f.write(f"Total Test Samples      : {total_test_samples}\n")
         f.write(f"Baseline Checkpoint     : {base_ckpt_prefix}\n")
         f.write(f"Baseline Accuracy       : {base_acc:.2f}%\n")
-        f.write(f"Baseline Grad-CAM Layer : {base_target_layer.name} (Tensor Shape: {base_shape})\n\n")
+        f.write(f"Baseline Grad-CAM Layer : {base_target_layer.name} (Tensor Shape: {base_shape}, Spatial: {base_shape[1]}x{base_shape[2]}, Channels: {base_shape[3]})\n\n")
         f.write(f"Ours Checkpoint         : {ours_ckpt_prefix}\n")
         f.write(f"Ours Accuracy           : {ours_acc:.2f}%\n")
-        f.write(f"Ours Grad-CAM Layer     : {ours_target_layer.name} (Tensor Shape: {ours_shape})\n\n")
+        f.write(f"Ours Grad-CAM Layer     : {ours_target_layer.name} (Tensor Shape: {ours_shape}, Spatial: {ours_shape[1]}x{ours_shape[2]}, Channels: {ours_shape[3]})\n\n")
         f.write(f"Both Correct Samples    : {both_correct_count}/{total_test_samples} ({both_correct_count / total_test_samples * 100:.2f}%)\n")
+        f.write(f"Grad-CAM Target         : Last block of Stage 3 (14x14x512)\n")
+        f.write(f"Resize Method           : INTER_CUBIC (Bicubic)\n")
         f.write(f"Colormap & Alpha        : {args.colormap} (alpha={args.alpha})\n")
         f.write(f"Target Samples per Class: {args.samples_per_class}\n\n")
         f.write("-" * 75 + "\n")
@@ -953,10 +999,15 @@ def main() -> int:
         for cls_name in EMOTION_NAMES:
             c_title = cls_name.title()
             f.write(f"    {c_title}/\n")
+            f.write(f"      001/ ... 020/ (contains original.png, heatmap.png, overlay.png)\n")
             f.write(f"      001_original.png ... 020_original.png\n")
+            f.write(f"      001_heatmap.png ... 020_heatmap.png\n")
+            f.write(f"      001_overlay.png ... 020_overlay.png\n")
             f.write(f"      001_baseline_cam.png ... 020_baseline_cam.png\n")
             f.write(f"      001_ours_cam.png ... 020_ours_cam.png\n")
-            f.write(f"      contact_sheet_{cls_name.lower()}.png\n")
+            f.write(f"      baseline/ (contains 001_original.png, heatmap.png, overlay.png)\n")
+            f.write(f"      ours/ (contains 001_original.png, heatmap.png, overlay.png)\n")
+            f.write(f"      contact_sheet_{cls_name.lower()}.png (Original | Baseline Grad-CAM | Ours Grad-CAM)\n")
     print(f"[OUTPUT] Saved summary report: {summary_path}")
 
     # 10. Required Final Terminal Output
@@ -967,9 +1018,9 @@ def main() -> int:
     print(f"   - Baseline : {base_ckpt_prefix} (STATUS: OK)")
     print(f"   - Ours     : {ours_ckpt_prefix} (STATUS: OK)")
     print()
-    print("2. GRAD-CAM LAYERS & TENSOR SHAPES:")
-    print(f"   - Baseline Layer : '{base_target_layer.name}' (Shape: {base_shape}, Spatial: {base_shape[1]}x{base_shape[2]})")
-    print(f"   - Ours Layer     : '{ours_target_layer.name}' (Shape: {ours_shape}, Spatial: {ours_shape[1]}x{ours_shape[2]})")
+    print("2. GRAD-CAM LAYERS & TENSOR SHAPES (STAGE 3 LAST BLOCK):")
+    print(f"   - Baseline Layer : '{base_target_layer.name}' (Shape: {base_shape}, Spatial: {base_shape[1]}x{base_shape[2]}, Channels: {base_shape[3]}) -> ASSERTION (14, 14): PASSED")
+    print(f"   - Ours Layer     : '{ours_target_layer.name}' (Shape: {ours_shape}, Spatial: {ours_shape[1]}x{ours_shape[2]}, Channels: {ours_shape[3]}) -> ASSERTION (14, 14): PASSED")
     print()
     print("3. SAMPLES FOUND & SELECTED PER EMOTION:")
     for cls_name in EMOTION_NAMES:

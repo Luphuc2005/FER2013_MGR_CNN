@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT=/home/ptbao/projects/FER2013_MGR_CNN
 cd "$ROOT"
 
-mkdir -p logs outputs/gradcam_fer2013_candidates
+mkdir -p logs outputs/gradcam_fer2013_stage3_candidates
 
 # Ép chặt chạy CPU thuần túy, tuyệt đối không cấp phát VRAM hay ảnh hưởng job training GPU
 export CUDA_VISIBLE_DEVICES="-1"
