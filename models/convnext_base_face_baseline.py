@@ -314,6 +314,24 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         self.semantic_logit_scale = float(
             clip_sem_cfg.get("semantic_logit_scale", model_cfg.get("semantic_logit_scale", 20.0))
         )
+        self.semantic_fusion_alpha = float(
+            model_cfg.get(
+                "semantic_fusion_alpha",
+                clip_sem_cfg.get("semantic_fusion_alpha", 0.0),
+            )
+        )
+        self.semantic_fusion_training = bool(
+            model_cfg.get(
+                "semantic_fusion_training",
+                clip_sem_cfg.get("semantic_fusion_training", False),
+            )
+        )
+        if self.semantic_fusion_alpha > 0.0:
+            print(
+                f"[ConvNeXtBaseFace] Semantic Logit Fusion enabled: alpha={self.semantic_fusion_alpha:.3f} "
+                f"(inference_only={not self.semantic_fusion_training})",
+                flush=True,
+            )
 
         default_hard_pairs = {
             0: [4, 2],    # angry -> sad, fear
@@ -1063,9 +1081,17 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             semantic_logits = tf.where(tf.math.is_finite(semantic_logits), semantic_logits, tf.zeros_like(semantic_logits))
             endpoints["semantic_logits"] = semantic_logits
 
+        visual_logits = tf.cast(logits, tf.float32)
+        should_fuse = (self.semantic_fusion_alpha > 0.0) and (not training or self.semantic_fusion_training)
+        if should_fuse and semantic_logits is not None:
+            fused_logits = (1.0 - self.semantic_fusion_alpha) * visual_logits + self.semantic_fusion_alpha * tf.cast(semantic_logits, tf.float32)
+        else:
+            fused_logits = visual_logits
+
         self._log_shapes_once(image, endpoints, pooled, dropped, logits)
         return {
-            "logits": tf.cast(logits, tf.float32),
+            "logits": fused_logits,
+            "visual_logits": visual_logits,
             "semantic_logits": semantic_logits,
             "agg_sim": agg_sim,
             "granularity_weights": granularity_weights,
