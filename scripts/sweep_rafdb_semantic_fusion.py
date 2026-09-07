@@ -97,6 +97,45 @@ def find_checkpoint(cfg: Dict, args: argparse.Namespace) -> Optional[Path]:
     return None
 
 
+def restore_model_weights(model: tf.keras.Model, prefix: Union[str, Path]) -> None:
+    prefix_str = str(prefix)
+    errors = []
+
+    # 1. Try tf.train.Checkpoint(model=model) - standard for train.py RankedCheckpointManager
+    try:
+        ckpt = tf.train.Checkpoint(model=model)
+        status = ckpt.restore(prefix_str)
+        status.expect_partial()
+        status.assert_nontrivial_match()
+        return
+    except Exception as e:
+        errors.append(f"tf.train.Checkpoint(model=model): {e}")
+
+    # 2. Try direct model.load_weights
+    try:
+        status = model.load_weights(prefix_str)
+        status.expect_partial()
+        status.assert_nontrivial_match()
+        return
+    except Exception as e:
+        errors.append(f"model.load_weights: {e}")
+
+    # 3. Try tf.train.Checkpoint(root=model)
+    try:
+        ckpt = tf.train.Checkpoint(root=model)
+        status = ckpt.restore(prefix_str)
+        status.expect_partial()
+        status.assert_nontrivial_match()
+        return
+    except Exception as e:
+        errors.append(f"tf.train.Checkpoint(root=model): {e}")
+
+    raise RuntimeError(
+        f"Failed to restore weights from {prefix_str} using all strategies:\n" + "\n".join(errors)
+    )
+
+
+
 def extract_logits(
     model: tf.keras.Model,
     dataset: tf.data.Dataset,
@@ -195,8 +234,7 @@ def main() -> int:
     dummy_input = {"image": tf.zeros([1, img_size, img_size, 3], dtype=tf.float32)}
     model(dummy_input, training=False)
 
-    status = model.load_weights(str(ckpt_prefix))
-    status.expect_partial()
+    restore_model_weights(model, ckpt_prefix)
     print(f"[INFO] Successfully loaded weights from {ckpt_prefix}")
 
     replicas = strategy.num_replicas_in_sync if strategy else 1

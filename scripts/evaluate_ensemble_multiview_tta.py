@@ -78,6 +78,44 @@ def _extract_epoch_num(path: Path) -> int:
     return int(digits[-1]) if digits else 0
 
 
+def restore_model_weights(model: tf.keras.Model, prefix: Union[str, Path]) -> None:
+    prefix_str = str(prefix)
+    errors = []
+
+    # 1. Try tf.train.Checkpoint(model=model) - standard for train.py RankedCheckpointManager
+    try:
+        ckpt = tf.train.Checkpoint(model=model)
+        status = ckpt.restore(prefix_str)
+        status.expect_partial()
+        status.assert_nontrivial_match()
+        return
+    except Exception as e:
+        errors.append(f"tf.train.Checkpoint(model=model): {e}")
+
+    # 2. Try direct model.load_weights
+    try:
+        status = model.load_weights(prefix_str)
+        status.expect_partial()
+        status.assert_nontrivial_match()
+        return
+    except Exception as e:
+        errors.append(f"model.load_weights: {e}")
+
+    # 3. Try tf.train.Checkpoint(root=model)
+    try:
+        ckpt = tf.train.Checkpoint(root=model)
+        status = ckpt.restore(prefix_str)
+        status.expect_partial()
+        status.assert_nontrivial_match()
+        return
+    except Exception as e:
+        errors.append(f"tf.train.Checkpoint(root=model): {e}")
+
+    raise RuntimeError(
+        f"Failed to restore weights from {prefix_str} using all strategies:\n" + "\n".join(errors)
+    )
+
+
 def get_checkpoint_list(ckpt_dir: Path, explicit_ckpts: Optional[List[str]] = None) -> List[Path]:
     if explicit_ckpts:
         prefixes = []
@@ -261,15 +299,17 @@ def main() -> int:
     print(f" Target Split:   {args.split.upper()}")
     print("=" * 90 + "\n")
 
-    model = build_model(cfg)
-    img_size = int(cfg["data"]["image_size"])
-    dummy_input = {"image": tf.zeros([1, img_size, img_size, 3], dtype=tf.float32)}
-    model(dummy_input, training=False)
-
     replicas = strategy.num_replicas_in_sync if strategy else 1
     _, val_ds, test_ds = build_datasets(cfg, replicas=replicas)
     dataset = test_ds if args.split == "test" else val_ds
     class_names = get_class_names(cfg)
+
+    first_batch = next(iter(dataset.take(1)))
+    first_inputs = first_batch[0] if isinstance(first_batch, (tuple, list)) else first_batch
+
+    with strategy.scope():
+        model = build_model(cfg)
+        _ = model(first_inputs, training=False)
 
     all_models_view_probs: List[Dict[str, np.ndarray]] = []
     y_true: Optional[np.ndarray] = None
@@ -277,8 +317,7 @@ def main() -> int:
     # Step 1: Extract view probabilities for each checkpoint
     for idx, prefix in enumerate(ckpt_prefixes, 1):
         print(f"[MODEL {idx}/{len(ckpt_prefixes)}] Loading weights: {prefix.name} ...")
-        status = model.load_weights(str(prefix))
-        status.expect_partial()
+        restore_model_weights(model, prefix)
 
         probs_dict, labels = extract_view_probs_single_model(
             model, dataset, crop_fraction=args.crop_fraction, rot_deg=args.rot_deg
