@@ -290,30 +290,35 @@ def _decode_pixels(pixels: tf.Tensor, image_size: int, channels: int) -> tf.Tens
 
     def _read_image_or_pixels(p_tensor):
         p_str = p_tensor.numpy().decode("utf-8") if hasattr(p_tensor, "numpy") else str(p_tensor)
-        p_path = Path(p_str)
-        if not p_path.is_absolute():
-            p_path = Path(__file__).resolve().parents[1] / p_str
-        if p_path.exists() and p_path.is_file():
+        # Avoid OSError: [Errno 36] File name too long when p_str is a pixel string
+        if len(p_str) <= 255 and not (" " in p_str.strip() and p_str.strip().count(" ") > 3):
+            p_path = Path(p_str)
+            if not p_path.is_absolute():
+                p_path = Path(__file__).resolve().parents[1] / p_str
             try:
-                from PIL import Image
-                with Image.open(p_path) as pil_img:
-                    if channels == 3 and pil_img.mode != "RGB":
-                        pil_img = pil_img.convert("RGB")
-                    elif channels == 1 and pil_img.mode != "L":
-                        pil_img = pil_img.convert("L")
-                    pil_img = pil_img.resize((target_w, target_h), Image.BILINEAR)
-                    arr = np.array(pil_img, dtype=np.float32)
-                    if arr.ndim == 2:
-                        arr = np.expand_dims(arr, axis=-1)
-                    return arr
-            except Exception:
+                if p_path.exists() and p_path.is_file():
+                    try:
+                        from PIL import Image
+                        with Image.open(p_path) as pil_img:
+                            if channels == 3 and pil_img.mode != "RGB":
+                                pil_img = pil_img.convert("RGB")
+                            elif channels == 1 and pil_img.mode != "L":
+                                pil_img = pil_img.convert("L")
+                            pil_img = pil_img.resize((target_w, target_h), Image.BILINEAR)
+                            arr = np.array(pil_img, dtype=np.float32)
+                            if arr.ndim == 2:
+                                arr = np.expand_dims(arr, axis=-1)
+                            return arr
+                    except Exception:
+                        pass
+                    img_raw = tf.io.read_file(str(p_path))
+                    img = tf.io.decode_image(img_raw, channels=channels, expand_animations=False)
+                    img = tf.cast(img, tf.float32)
+                    if img.shape[-1] == 1 and channels == 3:
+                        img = tf.image.grayscale_to_rgb(img)
+                    return tf.image.resize(img, [target_h, target_w], method="bilinear")
+            except OSError:
                 pass
-            img_raw = tf.io.read_file(str(p_path))
-            img = tf.io.decode_image(img_raw, channels=channels, expand_animations=False)
-            img = tf.cast(img, tf.float32)
-            if img.shape[-1] == 1 and channels == 3:
-                img = tf.image.grayscale_to_rgb(img)
-            return tf.image.resize(img, [target_h, target_w], method="bilinear")
         
         # Fallback to space-separated pixel string
         vals = np.fromstring(p_str, sep=" ", dtype=np.float32)

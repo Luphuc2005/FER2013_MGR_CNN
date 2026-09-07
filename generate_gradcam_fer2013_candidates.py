@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import copy
 import csv
 import json
 import os
@@ -697,7 +698,7 @@ def main() -> int:
         use_clean_filter=False,
         bad_row_indices_path=None,
         mask_ablation="none",
-        predecode_pixels=False,
+        predecode_pixels=True,
         preload_masks=False,
         allow_missing_masks=True,
     )
@@ -820,7 +821,10 @@ def main() -> int:
                 masks=None if test_records.masks is None else test_records.masks[sample_idx : sample_idx + 1],
                 bboxes=None if test_records.bboxes is None else test_records.bboxes[sample_idx : sample_idx + 1],
             )
-            one_ds = make_dataset(one_sample_records, base_cfg, split="test", training=False, replicas=1)
+            cfg_single = copy.deepcopy(base_cfg)
+            cfg_single["runtime"]["batch_size_per_gpu"] = 1
+            cfg_single["runtime"]["prefetch_buffer"] = 1
+            one_ds = make_dataset(one_sample_records, cfg_single, split="test", training=False, replicas=1)
             single_input, _ = next(iter(one_ds))
             
             image01 = denorm_images[sample_idx]
