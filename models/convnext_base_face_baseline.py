@@ -376,6 +376,16 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             self.soft_pool_lower = SoftRegionalPooling(name="soft_pool_lower")
             self.soft_pool_au = SoftRegionalPooling(name="soft_pool_au")
 
+        self.use_dynamic_part_attention = bool(model_cfg.get("use_dynamic_part_attention", False))
+        if self.use_dynamic_part_attention:
+            if not self.use_semantic_branch or not self.use_au_region_routed:
+                raise ValueError("Dynamic part attention requires routed semantic branches.")
+            from .dynamic_part_attention import DynamicPartAttention
+            bottleneck = int(model_cfg.get("dynamic_part_bottleneck", 128))
+            self.dynamic_part_attn = DynamicPartAttention(channels=512, bottleneck=bottleneck, name="dynamic_part_attn")
+        else:
+            self.dynamic_part_attn = None
+
         if self.use_semantic_branch:
             embed_dim = int(clip_sem_cfg.get("clip_embedding_dim", model_cfg.get("clip_embedding_dim", 512)))
             self.visual_projector = tf.keras.Sequential([
@@ -446,6 +456,17 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             self.visual_projector = None
             self.granularity_gate = None
             self.text_prototypes = None
+
+        self.use_adaptive_fusion_gate = bool(
+            model_cfg.get("use_adaptive_fusion_gate", False)
+            or clip_sem_cfg.get("use_adaptive_fusion_gate", False)
+        )
+        if self.use_adaptive_fusion_gate:
+            from .adaptive_fusion_gate import SampleAdaptiveFusionGate
+            max_alpha = float(model_cfg.get("adaptive_fusion_max_alpha", clip_sem_cfg.get("adaptive_fusion_max_alpha", 0.20)))
+            self.adaptive_fusion_gate = SampleAdaptiveFusionGate(max_alpha=max_alpha, name="adaptive_fusion_gate")
+        else:
+            self.adaptive_fusion_gate = None
 
         self.pretrained_load_status = "not_requested"
         pretrained_path = model_cfg.get("convnext_base_pretrained_path") or model_cfg.get("pretrained_path")
@@ -996,7 +1017,10 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             if self.use_au_region_routed and self.visual_projector_upper is not None:
                 # Extract Stage 3 spatial feature maps [B, 14, 14, 512]
                 stage3_feat = endpoints.get("stage3_adapter", endpoints.get("stage3"))
-                if self.use_soft_regional_pooling:
+                if self.use_dynamic_part_attention and self.dynamic_part_attn is not None:
+                    z_upper, z_lower, z_au, attn_maps = self.dynamic_part_attn(stage3_feat, training=training)
+                    endpoints["part_attention_maps"] = attn_maps
+                elif self.use_soft_regional_pooling:
                     # Retain the original 112px/14x14 region supports so only
                     # pooling changes. Reject unsupported resolutions explicitly.
                     tf.debugging.assert_equal(tf.shape(stage3_feat)[1:3], [14, 14])
@@ -1082,11 +1106,16 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             endpoints["semantic_logits"] = semantic_logits
 
         visual_logits = tf.cast(logits, tf.float32)
-        should_fuse = (self.semantic_fusion_alpha > 0.0) and (not training or self.semantic_fusion_training)
-        if should_fuse and semantic_logits is not None:
-            fused_logits = (1.0 - self.semantic_fusion_alpha) * visual_logits + self.semantic_fusion_alpha * tf.cast(semantic_logits, tf.float32)
+        if self.use_adaptive_fusion_gate and self.adaptive_fusion_gate is not None and semantic_logits is not None:
+            alpha = self.adaptive_fusion_gate(pooled, training=training)  # [B, 1]
+            endpoints["adaptive_fusion_alpha"] = alpha
+            fused_logits = (1.0 - alpha) * visual_logits + alpha * tf.cast(semantic_logits, tf.float32)
         else:
-            fused_logits = visual_logits
+            should_fuse = (self.semantic_fusion_alpha > 0.0) and (not training or self.semantic_fusion_training)
+            if should_fuse and semantic_logits is not None:
+                fused_logits = (1.0 - self.semantic_fusion_alpha) * visual_logits + self.semantic_fusion_alpha * tf.cast(semantic_logits, tf.float32)
+            else:
+                fused_logits = visual_logits
 
         self._log_shapes_once(image, endpoints, pooled, dropped, logits)
         return {
