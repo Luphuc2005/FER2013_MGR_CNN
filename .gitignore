@@ -33,3 +33,4 @@ MISSING_PACKAGES.txt
 *.md
 /checkpoints-down
 *.ipynb
+*.png
