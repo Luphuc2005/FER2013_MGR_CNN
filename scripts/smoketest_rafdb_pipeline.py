@@ -21,7 +21,8 @@ import tensorflow as tf
 
 from config import load_config
 from datasets.fer2013 import build_datasets, collect_split_records
-from train import build_model, compute_loss
+from train import build_model, compute_loss, evaluate_dataset
+from utils.semantic_schedule import resolve_lambda_sem
 
 def main():
     config_file = "config_rafdb_convnext_base_ms1m_adaptive_siglip2_confusion.yaml"
@@ -120,6 +121,7 @@ def main():
         print("[2/5] Skipping live RAF-DB CSV reading (Directory not found on local machine, will run on server).")
         batch_images = tf.random.normal([16, 112, 112, 3])
         batch_labels = tf.random.uniform([16], minval=0, maxval=7, dtype=tf.int32)
+        batch_feat = {"image": batch_images}
         
     print(f"[4/5] Model & SigLIP2 Prototypes Initialization:")
     model = build_model(cfg)
@@ -143,6 +145,54 @@ def main():
     if isinstance(loss_dict, dict):
         for k, v in loss_dict.items():
             print(f"        * {k}: {float(v):.4f}")
+
+    lambda_epoch_1 = resolve_lambda_sem(cfg, 1)
+    lambda_epoch_5 = resolve_lambda_sem(cfg, 5)
+    lambda_epoch_10 = resolve_lambda_sem(cfg, 10)
+    lambda_epoch_11 = resolve_lambda_sem(cfg, 11)
+    weighted_sem_loss = lambda_epoch_1 * float(loss_dict["semantic"])
+    print(
+        "      - lambda_sem schedule: "
+        f"ep1={lambda_epoch_1:.2f}, ep5={lambda_epoch_5:.2f}, "
+        f"ep10={lambda_epoch_10:.2f}, ep11={lambda_epoch_11:.2f}"
+    )
+    print(f"      - weighted_sem_loss (epoch 1): {weighted_sem_loss:.4f}")
+
+    smoke_eval_ds = tf.data.Dataset.from_tensors((batch_feat, batch_labels))
+    smoke_eval = evaluate_dataset(
+        model,
+        smoke_eval_ds,
+        cfg,
+        use_tta_hflip=False,
+        lambda_sem_override=lambda_epoch_1,
+    )
+    eval_outputs = model(batch_feat, training=False)
+    expected_semantic_accuracy = float(
+        tf.reduce_mean(
+            tf.cast(
+                tf.equal(
+                    tf.argmax(eval_outputs["semantic_logits"], axis=-1, output_type=tf.int32),
+                    batch_labels,
+                ),
+                tf.float32,
+            )
+        ).numpy()
+    )
+    assert "semantic_accuracy" in smoke_eval, "Validation semantic_accuracy was not returned."
+    assert np.isclose(smoke_eval["semantic_accuracy"], expected_semantic_accuracy), (
+        f"semantic_accuracy mismatch: evaluate_dataset={smoke_eval['semantic_accuracy']} "
+        f"direct={expected_semantic_accuracy}"
+    )
+    assert np.isclose(
+        smoke_eval["weighted_sem_loss"],
+        lambda_epoch_1 * smoke_eval["semantic_loss"],
+    ), "weighted_sem_loss does not equal lambda_sem * semantic_loss."
+    print(
+        "      - VAL_SEMANTIC_METRICS_OK: "
+        f"semantic_accuracy={smoke_eval['semantic_accuracy']:.4f}, "
+        f"semantic_loss={smoke_eval['semantic_loss']:.4f}, "
+        f"weighted_sem_loss={smoke_eval['weighted_sem_loss']:.4f}"
+    )
             
     print("=" * 60)
     print(" [SUCCESS] RAF-DB SMOKE TEST PASSED SUCCESSFULLY!")

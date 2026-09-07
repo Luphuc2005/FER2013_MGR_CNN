@@ -50,6 +50,7 @@ from datasets.fer2013 import EMOTION_NAMES, build_datasets
 from losses.classification import supervised_mgr_loss
 from metrics.classification import classification_metrics, save_metrics
 from models import ConvNeXtBaseFaceFERBaseline, ConvNeXtBaseImageNetFERBaseline, IR50FERBaseline, MGRConvNeXtFER
+from utils.semantic_schedule import configured_lambda_sem, resolve_lambda_sem
 
 
 def get_class_names(cfg: Dict) -> List[str]:
@@ -566,6 +567,7 @@ def make_step_function(
     optimizer_head,
     optimizer_backbone=None,
     loss_scale: float = 1.0,
+    lambda_sem_runtime: Optional[tf.Variable] = None,
 ):
     loss_cfg = cfg["training"]
     label_smoothing = float(loss_cfg.get("label_smoothing", 0.0))
@@ -625,9 +627,12 @@ def make_step_function(
     def _step_impl(features, labels, trainable_vars):
         with tf.GradientTape() as tape:
             outputs = model(features, training=True)
+            loss_outputs = dict(outputs)
+            if lambda_sem_runtime is not None and outputs.get("semantic_logits") is not None:
+                loss_outputs["lambda_sem"] = lambda_sem_runtime.read_value()
             raw_loss, parts = supervised_mgr_loss(
                 labels,
-                outputs,
+                loss_outputs,
                 num_classes=cfg["data"]["num_classes"],
                 label_smoothing=label_smoothing,
                 ortho_weight=ortho_weight,
@@ -666,9 +671,12 @@ def make_step_function(
 
         with tf.GradientTape() as tape2:
             outputs_2 = model(features, training=True)
+            loss_outputs_2 = dict(outputs_2)
+            if lambda_sem_runtime is not None and outputs_2.get("semantic_logits") is not None:
+                loss_outputs_2["lambda_sem"] = lambda_sem_runtime.read_value()
             raw_loss_2, _ = supervised_mgr_loss(
                 labels,
-                outputs_2,
+                loss_outputs_2,
                 num_classes=cfg["data"]["num_classes"],
                 label_smoothing=label_smoothing,
                 ortho_weight=ortho_weight,
@@ -729,6 +737,7 @@ def evaluate_dataset(
     use_tta_hflip: Optional[bool] = None,
     original_weight: Optional[float] = None,
     flip_weight: Optional[float] = None,
+    lambda_sem_override: Optional[float] = None,
 ) -> Dict[str, object]:
     tta_cfg = cfg.get("tta", {})
     if use_tta_hflip is None:
@@ -738,6 +747,9 @@ def evaluate_dataset(
 
     w_orig = float(original_weight if original_weight is not None else tta_cfg.get("original_weight", 0.5))
     w_flip = float(flip_weight if flip_weight is not None else tta_cfg.get("flip_weight", 0.5))
+    eval_lambda_sem = float(
+        configured_lambda_sem(cfg) if lambda_sem_override is None else lambda_sem_override
+    )
 
     if use_tta:
         total_w = w_orig + w_flip
@@ -752,6 +764,9 @@ def evaluate_dataset(
 
     def _forward_outputs(inputs):
         outputs_orig = model(inputs, training=False)
+        if outputs_orig.get("semantic_logits") is not None:
+            outputs_orig = dict(outputs_orig)
+            outputs_orig["lambda_sem"] = tf.constant(eval_lambda_sem, dtype=tf.float32)
         if not use_tta:
             return outputs_orig, outputs_orig
 
@@ -760,6 +775,9 @@ def evaluate_dataset(
         if "mask" in inputs:
             flipped_inputs["mask"] = tf.image.flip_left_right(inputs["mask"])
         outputs_flip = model(flipped_inputs, training=False)
+        if outputs_flip.get("semantic_logits") is not None:
+            outputs_flip = dict(outputs_flip)
+            outputs_flip["lambda_sem"] = tf.constant(eval_lambda_sem, dtype=tf.float32)
 
         outputs_tta = dict(outputs_orig)
         outputs_tta["logits"] = w_orig * outputs_orig["logits"] + w_flip * outputs_flip["logits"]
@@ -789,10 +807,21 @@ def evaluate_dataset(
         )
         fer_preds_orig = tf.argmax(outputs_orig["logits"], axis=-1, output_type=tf.int32)
         fer_preds_tta = tf.argmax(outputs_tta["logits"], axis=-1, output_type=tf.int32)
+        semantic_logits_orig = outputs_orig.get("semantic_logits")
+        semantic_logits_tta = outputs_tta.get("semantic_logits")
+        if semantic_logits_orig is not None and semantic_logits_tta is not None:
+            semantic_preds_orig = tf.argmax(semantic_logits_orig, axis=-1, output_type=tf.int32)
+            semantic_preds_tta = tf.argmax(semantic_logits_tta, axis=-1, output_type=tf.int32)
+            semantic_correct_orig = tf.reduce_sum(tf.cast(tf.equal(semantic_preds_orig, labels), tf.int32))
+            semantic_correct_tta = tf.reduce_sum(tf.cast(tf.equal(semantic_preds_tta, labels), tf.int32))
+        else:
+            semantic_correct_orig = tf.constant(0, dtype=tf.int32)
+            semantic_correct_tta = tf.constant(0, dtype=tf.int32)
 
         return (
             total_l_orig, parts_orig["ce"], parts_orig["semantic"], parts_orig.get("hard_semantic", tf.constant(0.0, tf.float32)), fer_preds_orig,
             total_l_tta, parts_tta["ce"], parts_tta["semantic"], parts_tta.get("hard_semantic", tf.constant(0.0, tf.float32)), fer_preds_tta,
+            semantic_correct_orig, semantic_correct_tta,
             tf.shape(labels)[0], labels
         )
 
@@ -810,6 +839,8 @@ def evaluate_dataset(
     total_sem_tta = 0.0
     total_hard_tta = 0.0
     total_count = 0
+    total_semantic_correct_orig = 0
+    total_semantic_correct_tta = 0
 
     if strategy is not None and strategy.num_replicas_in_sync > 1:
         dist_dataset = strategy.experimental_distribute_dataset(dataset)
@@ -818,10 +849,11 @@ def evaluate_dataset(
             (
                 loc_tot_o, loc_ce_o, loc_sem_o, loc_hd_o, loc_p_o,
                 loc_tot_t, loc_ce_t, loc_sem_t, loc_hd_t, loc_p_t,
+                loc_sem_correct_o, loc_sem_correct_t,
                 loc_cnts, loc_lbs
             ) = strategy.run(_eval_step, args=batch)
 
-            for l_tot_o, l_ce_o, l_sem_o, l_hd_o, l_p_o, l_tot_t, l_ce_t, l_sem_t, l_hd_t, l_p_t, l_cnt, l_lb in zip(
+            for l_tot_o, l_ce_o, l_sem_o, l_hd_o, l_p_o, l_tot_t, l_ce_t, l_sem_t, l_hd_t, l_p_t, l_sem_correct_o, l_sem_correct_t, l_cnt, l_lb in zip(
                 strategy.experimental_local_results(loc_tot_o),
                 strategy.experimental_local_results(loc_ce_o),
                 strategy.experimental_local_results(loc_sem_o),
@@ -832,6 +864,8 @@ def evaluate_dataset(
                 strategy.experimental_local_results(loc_sem_t),
                 strategy.experimental_local_results(loc_hd_t),
                 strategy.experimental_local_results(loc_p_t),
+                strategy.experimental_local_results(loc_sem_correct_o),
+                strategy.experimental_local_results(loc_sem_correct_t),
                 strategy.experimental_local_results(loc_cnts),
                 strategy.experimental_local_results(loc_lbs),
             ):
@@ -847,6 +881,8 @@ def evaluate_dataset(
                 total_ce_tta += float(l_ce_t.numpy()) * count
                 total_sem_tta += float(l_sem_t.numpy()) * count
                 total_hard_tta += float(l_hd_t.numpy()) * count
+                total_semantic_correct_orig += int(l_sem_correct_o.numpy())
+                total_semantic_correct_tta += int(l_sem_correct_t.numpy())
 
                 total_count += count
                 y_true.extend(l_lb.numpy().tolist())
@@ -856,7 +892,7 @@ def evaluate_dataset(
     else:
         for batch in dataset:
             inputs, labels = batch
-            tot_o, ce_o, sem_o, hd_o, p_o, tot_t, ce_t, sem_t, hd_t, p_t, count, _ = _eval_step(inputs, labels)
+            tot_o, ce_o, sem_o, hd_o, p_o, tot_t, ce_t, sem_t, hd_t, p_t, sem_correct_o, sem_correct_t, count, _ = _eval_step(inputs, labels)
             c = int(count.numpy())
             y_true.extend(labels.numpy().tolist())
             y_pred_orig.extend(p_o.numpy().tolist())
@@ -871,6 +907,8 @@ def evaluate_dataset(
             total_ce_tta += float(ce_t.numpy()) * c
             total_sem_tta += float(sem_t.numpy()) * c
             total_hard_tta += float(hd_t.numpy()) * c
+            total_semantic_correct_orig += int(sem_correct_o.numpy())
+            total_semantic_correct_tta += int(sem_correct_t.numpy())
 
             total_count += c
 
@@ -883,6 +921,9 @@ def evaluate_dataset(
     metrics_tta["total_loss"] = total_loss_tta / c_norm
     metrics_tta["ce_loss"] = total_ce_tta / c_norm
     metrics_tta["semantic_loss"] = total_sem_tta / c_norm
+    metrics_tta["weighted_sem_loss"] = eval_lambda_sem * metrics_tta["semantic_loss"]
+    metrics_tta["semantic_accuracy"] = total_semantic_correct_tta / c_norm
+    metrics_tta["lambda_sem"] = eval_lambda_sem
     metrics_tta["hard_semantic_loss"] = total_hard_tta / c_norm
     metrics_tta["tta_hflip"] = bool(use_tta)
     metrics_tta["original_weight"] = w_orig
@@ -893,6 +934,9 @@ def evaluate_dataset(
     metrics_tta["no_tta_macro_f1"] = float(metrics_no_tta["macro_f1"])
     metrics_tta["no_tta_weighted_f1"] = float(metrics_no_tta["weighted_f1"])
     metrics_tta["no_tta_loss"] = total_loss_orig / c_norm
+    metrics_tta["no_tta_semantic_loss"] = total_sem_orig / c_norm
+    metrics_tta["no_tta_weighted_sem_loss"] = eval_lambda_sem * metrics_tta["no_tta_semantic_loss"]
+    metrics_tta["no_tta_semantic_accuracy"] = total_semantic_correct_orig / c_norm
     metrics_tta["no_tta_hard_semantic_loss"] = total_hard_orig / c_norm
 
     print(f"[EVALUATION SUMMARY]", flush=True)
@@ -984,6 +1028,12 @@ def main() -> int:
         print(f"Smoke logits shape: {smoke['logits'].shape}")
         optimizer_head = build_optimizer(cfg, float(cfg["training"]["lr"]))
         optimizer_backbone = build_optimizer(cfg, float(cfg["training"].get("visual_extractor_lr", cfg["training"]["lr"])))
+        lambda_sem_runtime = tf.Variable(
+            configured_lambda_sem(cfg),
+            dtype=tf.float32,
+            trainable=False,
+            name="lambda_sem_runtime",
+        )
         backbone_vars_for_optimizer, head_vars_for_optimizer = split_variables(model)
         ensure_optimizer_built(optimizer_head, head_vars_for_optimizer, strategy)
         ensure_optimizer_built(optimizer_backbone, backbone_vars_for_optimizer, strategy)
@@ -1047,6 +1097,7 @@ def main() -> int:
         optimizer_head,
         optimizer_backbone,
         loss_scale=loss_scale,
+        lambda_sem_runtime=lambda_sem_runtime,
     )
     distributed_train_step_head = make_distributed_train_step(strategy, train_step_head)
     distributed_train_step_full = make_distributed_train_step(strategy, train_step_full)
@@ -1079,6 +1130,13 @@ def main() -> int:
     best_val_loss_tracked = float("inf")
     for epoch in range(start_epoch, int(cfg["training"]["epochs"])):
         epoch_start_time = time.time()
+        epoch_number = epoch + 1
+        current_lambda_sem = resolve_lambda_sem(cfg, epoch_number)
+        lambda_sem_runtime.assign(current_lambda_sem)
+        print(
+            f"[SEMANTIC_SCHEDULE] Epoch {epoch_number}: lambda_sem={current_lambda_sem:.4f}",
+            flush=True,
+        )
         train_backbone = bool(cfg["model"].get("unfreeze_backbone", True)) and epoch >= freeze_epochs
         phase_transitioned = bool(train_backbone and epoch == freeze_epochs)
         if phase_transitioned:
@@ -1155,6 +1213,7 @@ def main() -> int:
                     f"total_loss={float(loss.numpy()):.4f} "
                     f"ce_loss={float(ce_l.numpy()):.4f} "
                     f"sem_loss={float(sem_l.numpy()):.4f} "
+                    f"weighted_sem_loss={current_lambda_sem * float(sem_l.numpy()):.4f} "
                     f"hard_loss={float(hard_l.numpy()):.4f} "
                     f"fer_acc={fer_correct / max(seen, 1):.4f} "
                     f"sem_acc={sem_correct / max(seen, 1):.4f} "
@@ -1194,6 +1253,7 @@ def main() -> int:
             cfg,
             strategy=eval_strategy,
             use_tta_hflip=bool(cfg["runtime"].get("train_val_tta_hflip", False)),
+            lambda_sem_override=current_lambda_sem,
         )
         print(f"[INFO] Epoch {epoch+1}: validation finished", flush=True)
         # --- LR Escape State Update ---
@@ -1253,6 +1313,7 @@ def main() -> int:
             "train_loss": train_loss,
             "train_ce_loss": train_ce_loss,
             "train_semantic_loss": train_sem_loss,
+            "train_weighted_sem_loss": current_lambda_sem * train_sem_loss,
             "train_hard_semantic_loss": train_hard_loss,
             "train_accuracy": train_acc,
             "train_fer_accuracy": train_acc,
@@ -1260,10 +1321,12 @@ def main() -> int:
             "val_loss": float(val_metrics.get("loss", 0.0)),
             "val_ce_loss": float(val_metrics.get("ce_loss", 0.0)),
             "val_semantic_loss": float(val_metrics.get("semantic_loss", 0.0)),
+            "val_weighted_sem_loss": float(val_metrics.get("weighted_sem_loss", 0.0)),
             "val_hard_semantic_loss": float(val_metrics.get("hard_semantic_loss", 0.0)),
             "val_accuracy": float(val_metrics.get("accuracy", 0.0)),
             "val_fer_accuracy": float(val_metrics.get("fer_accuracy", val_metrics.get("accuracy", 0.0))),
             "val_semantic_accuracy": float(val_metrics.get("semantic_accuracy", 0.0)),
+            "lambda_sem": current_lambda_sem,
             "val_macro_f1": float(val_metrics.get("macro_f1", 0.0)),
             "val_weighted_f1": float(val_metrics.get("weighted_f1", 0.0)),
             "gw_mean_0": float(gw_means[0]),
@@ -1293,8 +1356,11 @@ def main() -> int:
         gw_means_str = ",".join([f"{m:.3f}" for m in gw_means])
         print(
             f"Epoch {epoch+1}/{cfg['training']['epochs']} [{time_str}] "
-            f"loss={train_loss:.4f} sem_loss={train_sem_loss:.4f} hard_loss={train_hard_loss:.4f} acc={train_acc:.4f} "
+            f"loss={train_loss:.4f} sem_loss={train_sem_loss:.4f} weighted_sem_loss={row['train_weighted_sem_loss']:.4f} "
+            f"hard_loss={train_hard_loss:.4f} acc={train_acc:.4f} sem_acc={train_sem_acc:.4f} "
             f"val_loss={row['val_loss']:.4f} val_acc={row['val_accuracy']:.4f} "
+            f"val_sem_loss={row['val_semantic_loss']:.4f} val_weighted_sem_loss={row['val_weighted_sem_loss']:.4f} "
+            f"val_sem_acc={row['val_semantic_accuracy']:.4f} lambda_sem={current_lambda_sem:.4f} "
             f"val_macro_f1={row['val_macro_f1']:.4f} "
             f"gw_means=[{gw_means_str}] ent={gate_entropy:.3f} "
             f"throughput={train_samples_per_sec:.1f} samples/s "
@@ -1325,10 +1391,24 @@ def main() -> int:
     print("  FINAL TEST EVALUATION", flush=True)
     print("=" * 70, flush=True)
     final_class_names = get_class_names(cfg)
+    final_lambda_epoch = best_epoch if best_epoch >= 1 else max(int(ckpt_epoch.numpy()), 1)
+    final_lambda_sem = resolve_lambda_sem(cfg, final_lambda_epoch)
+    print(
+        f"[SEMANTIC_SCHEDULE] Final checkpoint epoch {final_lambda_epoch}: "
+        f"lambda_sem={final_lambda_sem:.4f}",
+        flush=True,
+    )
 
     # --- No-TTA evaluation ---
     print("\n[INFO] Running final test evaluation (No TTA)...", flush=True)
-    no_tta_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=False)
+    no_tta_metrics = evaluate_dataset(
+        model,
+        test_ds,
+        cfg,
+        strategy=eval_strategy,
+        use_tta_hflip=False,
+        lambda_sem_override=final_lambda_sem,
+    )
     save_metrics(no_tta_metrics, run_dir / "test_metrics_no_tta.json")
     save_classification_artifacts(no_tta_metrics, run_dir / "test_no_tta", final_class_names)
     no_tta_acc = float(no_tta_metrics['accuracy'])
@@ -1345,7 +1425,14 @@ def main() -> int:
     use_final_tta = bool(cfg["runtime"].get("eval_tta_hflip", False))
     if use_final_tta:
         print("[INFO] Running final test evaluation (TTA HFlip)...", flush=True)
-        tta_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=True)
+        tta_metrics = evaluate_dataset(
+            model,
+            test_ds,
+            cfg,
+            strategy=eval_strategy,
+            use_tta_hflip=True,
+            lambda_sem_override=final_lambda_sem,
+        )
         save_metrics(tta_metrics, run_dir / "test_metrics_tta_hflip.json")
         save_metrics(tta_metrics, run_dir / "test_metrics.json")
         save_classification_artifacts(tta_metrics, run_dir / "test_tta_hflip", final_class_names)

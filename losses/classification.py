@@ -94,8 +94,8 @@ def supervised_mgr_loss(
             sem = tf.keras.losses.sparse_categorical_crossentropy(labels, semantic_logits, from_logits=True)
         sem_loss = tf.reduce_mean(sem)
         sem_loss = tf.cast(sem_loss, tf.float32)
-        lambda_sem = float(outputs.get("lambda_sem", 0.1))
-        total = total + tf.cast(lambda_sem, tf.float32) * sem_loss
+        lambda_sem = tf.cast(outputs.get("lambda_sem", 0.1), tf.float32)
+        total = total + lambda_sem * sem_loss
     else:
         sem_loss = tf.constant(0.0, dtype=tf.float32)
 
