@@ -38,9 +38,19 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 
+# Force pure CPU execution by default before TensorFlow initializes
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
 # Suppress noisy TF logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 import tensorflow as tf
+
+# Ensure no GPU devices are visible to TensorFlow
+try:
+    tf.config.set_visible_devices([], "GPU")
+except Exception:
+    pass
 
 from config import load_config
 from datasets.fer2013 import EMOTION_NAMES, SplitRecords, collect_split_records, make_dataset
@@ -104,7 +114,14 @@ def parse_args():
     parser.add_argument(
         "--cpu",
         action="store_true",
-        help="Force CPU execution",
+        default=True,
+        help="Force pure CPU execution (default: True)",
+    )
+    parser.add_argument(
+        "--gpu",
+        action="store_true",
+        default=False,
+        help="Enable GPU execution if explicitly requested",
     )
     return parser.parse_args()
 
@@ -612,14 +629,22 @@ def main() -> int:
     print(" Baseline vs Ours (Adaptive SigLIP2 Confusion-Aware)")
     print("=" * 75)
     
-    # 0. Runtime Environment Configuration
-    if args.cpu or os.environ.get("CUDA_VISIBLE_DEVICES") == "-1":
+    # 0. Runtime Environment Configuration (Default: 100% Pure CPU)
+    use_cpu = not args.gpu or args.cpu or os.environ.get("CUDA_VISIBLE_DEVICES") == "-1"
+    if use_cpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
         try:
             tf.config.set_visible_devices([], "GPU")
         except Exception:
             pass
-        print("[INFO] Running in CPU mode.")
+        cpu_threads = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 4))
+        try:
+            tf.config.threading.set_intra_op_parallelism_threads(cpu_threads)
+            tf.config.threading.set_inter_op_parallelism_threads(max(1, cpu_threads // 2))
+        except Exception:
+            pass
+        print(f"[INFO] Running in 100% pure CPU mode (CUDA_VISIBLE_DEVICES=-1, threads={cpu_threads}).")
+        print("[INFO] GPU allocations: NONE (No VRAM consumed, zero conflict with running GPU jobs).")
     else:
         gpus = tf.config.list_physical_devices("GPU")
         print(f"[INFO] Detected {len(gpus)} GPU(s): {[g.name for g in gpus]}")

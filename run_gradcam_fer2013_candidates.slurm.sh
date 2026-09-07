@@ -1,13 +1,16 @@
 #!/bin/bash
-#SBATCH --job-name=FER_GRADCAM_CANDIDATES
+#SBATCH --job-name=FER_GRADCAM_CPU
 #SBATCH --partition=gpu-queue
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
-#SBATCH --gres=gpu:v100:1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_GRADCAM_CANDIDATES_%j.out
-#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_GRADCAM_CANDIDATES_%j.err
+#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_GRADCAM_CPU_%j.out
+#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_GRADCAM_CPU_%j.err
+
+# GHI CHÚ: Nếu cluster yêu cầu bắt buộc phải có --gres=gpu mới submit được vào gpu-queue,
+# hãy bỏ comment dòng dưới. Script bên dưới vẫn ép CUDA_VISIBLE_DEVICES="-1" để chạy 100% CPU.
+# #SBATCH --gres=gpu:v100:1
 
 set -euo pipefail
 
@@ -16,6 +19,8 @@ cd "$ROOT"
 
 mkdir -p logs outputs/gradcam_fer2013_candidates
 
+# Ép chặt chạy CPU thuần túy, tuyệt đối không cấp phát VRAM hay ảnh hưởng job training GPU
+export CUDA_VISIBLE_DEVICES="-1"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 
@@ -26,21 +31,16 @@ if [ ! -x "$FER_PY" ]; then
     FER_PY="python"
 fi
 
-export NVIDIA_LIB=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/lib/python3.9/site-packages/nvidia
-if [ -d "$NVIDIA_LIB" ]; then
-    export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVIDIA_LIB/cudnn/lib:$NVIDIA_LIB/cufft/lib:$NVIDIA_LIB/curand/lib:$NVIDIA_LIB/cusolver/lib:$NVIDIA_LIB/cusparse/lib:${LD_LIBRARY_PATH:-}"
-fi
-
 echo "============================================================"
-echo " Starting Grad-CAM Candidate Generation (SLURM Job: ${SLURM_JOB_ID:-standalone})"
-echo " Node: $(hostname)"
-echo " CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}"
-echo " Time: $(date)"
+echo " Starting Grad-CAM Candidate Generation on FER2013 (100% CPU)"
+echo " Job ID              : ${SLURM_JOB_ID:-standalone}"
+echo " Node                : $(hostname)"
+echo " Allocated CPUs      : ${SLURM_CPUS_PER_TASK:-8}"
+echo " CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+echo " Start Time          : $(date)"
 echo "============================================================"
 
-nvidia-smi || true
-
-"$FER_PY" -u generate_gradcam_fer2013_candidates.py "$@"
+"$FER_PY" -u generate_gradcam_fer2013_candidates.py --cpu "$@"
 
 echo "============================================================"
 echo " Grad-CAM Candidate Generation Finished: $(date)"
