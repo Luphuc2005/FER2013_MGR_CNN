@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Sweep semantic fusion weight (alpha) for RAF-DB inference logit ensembling.
 Formula: Logits_final = (1 - alpha) * Logits_ConvNeXt + alpha * Logits_SigLIP2

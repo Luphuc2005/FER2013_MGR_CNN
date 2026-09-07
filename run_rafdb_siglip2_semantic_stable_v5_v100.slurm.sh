@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 #SBATCH --job-name=RAFDB_SEM_STABLE_V5
 #SBATCH --partition=gpu-queue
 #SBATCH --account=sokhcn
