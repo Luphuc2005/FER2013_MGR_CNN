@@ -35,6 +35,17 @@ echo "============================================================"
 
 nvidia-smi
 
+echo ""
+echo ">>> [PHASE 1: NO-TTA (Ảnh gốc thuần túy, xuất phát điểm 90.97%)] <<<"
+"$FER_PY" scripts/sweep_rafdb_semantic_fusion.py \
+  --config "$CONFIG" \
+  --checkpoint "$CHECKPOINT" \
+  --split "$SPLIT" \
+  --no-tta \
+  --alphas 0.0 0.02 0.05 0.08 0.10 0.12 0.15 0.18 0.20 0.25 0.30
+
+echo ""
+echo ">>> [PHASE 2: WITH TTA (Ảnh gốc + Lật ngang)] <<<"
 "$FER_PY" scripts/sweep_rafdb_semantic_fusion.py \
   --config "$CONFIG" \
   --checkpoint "$CHECKPOINT" \
