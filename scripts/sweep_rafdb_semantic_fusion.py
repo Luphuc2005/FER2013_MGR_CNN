@@ -239,7 +239,8 @@ def main() -> int:
 
     replicas = strategy.num_replicas_in_sync if strategy else 1
     _, val_ds, test_ds = build_datasets(cfg, replicas=replicas)
-    dataset = test_ds if args.split == "test" else val_ds
+    target_split = str(args.split).lower()
+    dataset = test_ds if target_split == "test" else val_ds
     use_tta = not args.no_tta and bool(cfg.get("tta", {}).get("enabled", True))
     w_orig = float(cfg.get("tta", {}).get("original_weight", 0.50))
     w_flip = float(cfg.get("tta", {}).get("flip_weight", 0.50))
