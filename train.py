@@ -50,6 +50,7 @@ from datasets.fer2013 import EMOTION_NAMES, build_datasets
 from losses.classification import supervised_mgr_loss
 from metrics.classification import classification_metrics, save_metrics
 from models import ConvNeXtBaseFaceFERBaseline, ConvNeXtBaseImageNetFERBaseline, IR50FERBaseline, MGRConvNeXtFER
+from utils.ranked_checkpoint_manager import RankedCheckpointManager
 from utils.semantic_schedule import configured_lambda_sem, resolve_lambda_sem
 
 
@@ -1053,16 +1054,6 @@ def main() -> int:
         )
         max_to_keep_acc = int(cfg["training"].get("max_to_keep_acc", 5))
         max_to_keep_loss = int(cfg["training"].get("max_to_keep_loss", 5))
-        best_manager = tf.train.CheckpointManager(
-            checkpoint,
-            directory=str(checkpoint_root / "best"),
-            max_to_keep=max_to_keep_acc,
-        )
-        best_loss_manager = tf.train.CheckpointManager(
-            checkpoint,
-            directory=str(checkpoint_root / "best_loss"),
-            max_to_keep=max_to_keep_loss,
-        )
         periodic_manager = tf.train.CheckpointManager(
             checkpoint,
             directory=str(checkpoint_root / "periodic"),
@@ -1109,6 +1100,22 @@ def main() -> int:
     patience_anchor_epoch = best_epoch if best_score >= 0.0 else max(start_epoch, best_checkpoint_start_epoch - 1)
     history = []
     csv_path = run_dir / "training_history.csv"
+    best_manager = RankedCheckpointManager(
+        checkpoint=checkpoint,
+        directory=checkpoint_root / "best",
+        max_to_keep=max_to_keep_acc,
+        metric_name="val_accuracy",
+        mode="max",
+        history_csv=csv_path,
+    )
+    best_loss_manager = RankedCheckpointManager(
+        checkpoint=checkpoint,
+        directory=checkpoint_root / "best_loss",
+        max_to_keep=max_to_keep_loss,
+        metric_name="val_loss",
+        mode="min",
+        history_csv=csv_path,
+    )
     progress_interval = int(cfg["training"].get("progress_interval", 0) or 0)
     periodic_interval = int(cfg["training"].get("periodic_checkpoint_interval", 10) or 0)
     eval_strategy = strategy if bool(cfg["runtime"].get("distributed_eval", False)) else None
@@ -1127,7 +1134,10 @@ def main() -> int:
         "cooldown_remaining": 0,
         "snapshot": None,
     }
-    best_val_loss_tracked = float("inf")
+    best_val_loss_tracked = (
+        float(best_loss_manager.entries[0]["metric"])
+        if best_loss_manager.entries else float("inf")
+    )
     for epoch in range(start_epoch, int(cfg["training"]["epochs"])):
         epoch_start_time = time.time()
         epoch_number = epoch + 1
@@ -1265,35 +1275,67 @@ def main() -> int:
             )
         monitor = resolve_monitor_value(val_metrics, monitor_name)
         checkpoint_eligible = (epoch + 1) >= best_checkpoint_start_epoch
+        val_loss_val = float(val_metrics['loss'])
+        val_acc_val = float(val_metrics['accuracy'])
+        ckpt_epoch.assign(epoch + 1)
         improved = bool(checkpoint_eligible and monitor > best_score)
         if improved:
             best_score = monitor
             best_epoch = epoch + 1
             patience_anchor_epoch = epoch + 1
             ckpt_best_metric.assign(best_score)
-            val_loss_val = float(val_metrics['loss'])
-            val_acc_val = float(val_metrics['accuracy'])
             print(
-                f"[INFO] Save best at ep {epoch+1}, val_loss: {val_loss_val:.4f}, val_accuracy: {val_acc_val:.4f}, monitor: {monitor_name}",
+                f"[INFO] New all-time best at ep {epoch+1}, val_loss: {val_loss_val:.4f}, "
+                f"val_accuracy: {val_acc_val:.4f}, monitor: {monitor_name}",
                 flush=True,
             )
-            best_manager.save(checkpoint_number=epoch + 1)
         elif not checkpoint_eligible:
             print(
                 f"[INFO] Epoch {epoch+1}: best checkpoint is not considered before epoch "
                 f"{best_checkpoint_start_epoch}",
                 flush=True,
             )
-        val_loss_val = float(val_metrics['loss'])
-        val_acc_val = float(val_metrics['accuracy'])
         if checkpoint_eligible and val_loss_val < best_val_loss_tracked:
             best_val_loss_tracked = val_loss_val
             print(
-                f"[INFO] Save best_loss at ep {epoch+1}, val_loss: {val_loss_val:.4f}, val_accuracy: {val_acc_val:.4f}",
+                f"[INFO] New all-time lowest val_loss at ep {epoch+1}: "
+                f"val_loss={val_loss_val:.4f}, val_accuracy={val_acc_val:.4f}",
                 flush=True,
             )
-            best_loss_manager.save(checkpoint_number=epoch + 1)
-        ckpt_epoch.assign(epoch + 1)
+        if checkpoint_eligible:
+            acc_decision = best_manager.consider(
+                epoch=epoch + 1,
+                metric=val_acc_val,
+                metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
+            )
+            loss_decision = best_loss_manager.consider(
+                epoch=epoch + 1,
+                metric=val_loss_val,
+                metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
+            )
+            for label, metric_value, decision in (
+                ("TOP5_ACC", val_acc_val, acc_decision),
+                ("TOP5_LOSS", val_loss_val, loss_decision),
+            ):
+                if decision["saved"]:
+                    removed = decision.get("removed")
+                    removed_text = (
+                        f", removed={removed['checkpoint']} ({removed['metric']:.6f})"
+                        if removed else ""
+                    )
+                    print(
+                        f"[{label}] Saved ckpt-{epoch+1} at rank {decision['rank']}: "
+                        f"metric={metric_value:.6f}{removed_text}",
+                        flush=True,
+                    )
+                else:
+                    threshold = decision.get("threshold")
+                    threshold_text = f"{threshold:.6f}" if threshold is not None else "N/A"
+                    print(
+                        f"[{label}] Skipped ckpt-{epoch+1}: metric={metric_value:.6f}, "
+                        f"rank-5 threshold={threshold_text}, reason={decision['reason']}",
+                        flush=True,
+                    )
         print(f"[INFO] Epoch {epoch+1}: saving last checkpoint", flush=True)
         last_manager.save(checkpoint_number=epoch + 1)
         if periodic_interval and (epoch + 1) % periodic_interval == 0:
