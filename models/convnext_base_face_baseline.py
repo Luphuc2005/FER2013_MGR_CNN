@@ -344,13 +344,27 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             or model_cfg.get("ablation") in ("au_region_routed", "adaptive_clip_confusion", "au_routed_clip")
         )
 
+        self.use_soft_regional_pooling = bool(model_cfg.get("use_soft_regional_pooling", False))
+        self.semantic_projector_dropout = float(model_cfg.get(
+            "semantic_projector_dropout", model_cfg.get("classifier_dropout1", 0.35)
+        ))
+        if not 0.0 <= self.semantic_projector_dropout < 1.0:
+            raise ValueError("semantic_projector_dropout must be in [0, 1).")
+        if self.use_soft_regional_pooling:
+            if not self.use_semantic_branch or not self.use_au_region_routed:
+                raise ValueError("Soft regional pooling requires routed semantic branches.")
+            from .soft_regional_pooling import SoftRegionalPooling
+            self.soft_pool_upper = SoftRegionalPooling(name="soft_pool_upper")
+            self.soft_pool_lower = SoftRegionalPooling(name="soft_pool_lower")
+            self.soft_pool_au = SoftRegionalPooling(name="soft_pool_au")
+
         if self.use_semantic_branch:
             embed_dim = int(clip_sem_cfg.get("clip_embedding_dim", model_cfg.get("clip_embedding_dim", 512)))
             self.visual_projector = tf.keras.Sequential([
                 tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
                 tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
                 tf.keras.layers.Activation("gelu", name="gelu"),
-                tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                tf.keras.layers.Dropout(self.semantic_projector_dropout, name="drop"),
                 tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
             ], name="visual_semantic_projector")
 
@@ -359,7 +373,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
                     tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
                     tf.keras.layers.Activation("gelu", name="gelu"),
-                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dropout(self.semantic_projector_dropout, name="drop"),
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
                 ], name="visual_projector_upper")
 
@@ -367,7 +381,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
                     tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
                     tf.keras.layers.Activation("gelu", name="gelu"),
-                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dropout(self.semantic_projector_dropout, name="drop"),
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
                 ], name="visual_projector_lower")
 
@@ -375,7 +389,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
                     tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
                     tf.keras.layers.Activation("gelu", name="gelu"),
-                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dropout(self.semantic_projector_dropout, name="drop"),
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
                 ], name="visual_projector_au")
             else:
@@ -964,9 +978,17 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             if self.use_au_region_routed and self.visual_projector_upper is not None:
                 # Extract Stage 3 spatial feature maps [B, 14, 14, 512]
                 stage3_feat = endpoints.get("stage3_adapter", endpoints.get("stage3"))
-                z_upper = tf.reduce_mean(stage3_feat[:, 0:8, :, :], axis=[1, 2])
-                z_lower = tf.reduce_mean(stage3_feat[:, 5:14, :, :], axis=[1, 2])
-                z_au = tf.reduce_mean(stage3_feat[:, 3:11, :, :], axis=[1, 2])
+                if self.use_soft_regional_pooling:
+                    # Retain the original 112px/14x14 region supports so only
+                    # pooling changes. Reject unsupported resolutions explicitly.
+                    tf.debugging.assert_equal(tf.shape(stage3_feat)[1:3], [14, 14])
+                    z_upper = self.soft_pool_upper(stage3_feat[:, 0:8, :, :])
+                    z_lower = self.soft_pool_lower(stage3_feat[:, 5:14, :, :])
+                    z_au = self.soft_pool_au(stage3_feat[:, 3:11, :, :])
+                else:
+                    z_upper = tf.reduce_mean(stage3_feat[:, 0:8, :, :], axis=[1, 2])
+                    z_lower = tf.reduce_mean(stage3_feat[:, 5:14, :, :], axis=[1, 2])
+                    z_au = tf.reduce_mean(stage3_feat[:, 3:11, :, :], axis=[1, 2])
 
                 v_global_proj = self.visual_projector(pooled, training=training)
                 v_upper_proj = self.visual_projector_upper(z_upper, training=training)
@@ -1210,4 +1232,3 @@ class ConvNeXtBaseImageNetFERBaseline(tf.keras.Model):
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),
             "attention_logits": None,
         }
-
