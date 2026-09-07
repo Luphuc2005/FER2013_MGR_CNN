@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=AFFECTNET_SIGLIP2_V2
+#SBATCH --job-name=AFFECTNET_SIGLIP2_V2_1GPU
 #SBATCH --partition=gpu-queue
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
-#SBATCH --gres=gpu:v100:2
-#SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:v100:1
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/AFFECTNET_SIGLIP2_V2_%j.out
-#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/AFFECTNET_SIGLIP2_V2_%j.err
+#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/AFFECTNET_SIGLIP2_V2_1GPU_%j.out
+#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/AFFECTNET_SIGLIP2_V2_1GPU_%j.err
 
 set -euo pipefail
 
@@ -17,7 +17,7 @@ cd "$ROOT"
 mkdir -p logs outputs/papers/affectnet_siglip2_confusion_v2
 rm -rf "$ROOT/outputs/papers/affectnet_siglip2_confusion_v2/checkpoints"
 
-# Fast sync dataset to RAM disk (/dev/shm) to unleash 32 CPUs at 100% speed
+# Fast sync dataset to RAM disk (/dev/shm)
 RAM_DIR="/dev/shm/data/affectnet"
 mkdir -p "$RAM_DIR"
 if [ ! -d "$RAM_DIR/Manually_Annotated_Images" ]; then
