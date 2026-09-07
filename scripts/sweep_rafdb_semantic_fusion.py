@@ -177,6 +177,10 @@ def main() -> int:
 
     if not is_cpu:
         configure_gpus(cfg)
+        visible_gpu_count = len(tf.config.list_logical_devices("GPU"))
+        strategy = tf.distribute.MirroredStrategy(devices=[f"/GPU:{i}" for i in range(max(visible_gpu_count, 1))])
+    else:
+        strategy = tf.distribute.MirroredStrategy(devices=["/CPU:0"])
 
     ckpt_prefix = find_checkpoint(cfg, args)
     if not ckpt_prefix:
@@ -195,13 +199,9 @@ def main() -> int:
     status.expect_partial()
     print(f"[INFO] Successfully loaded weights from {ckpt_prefix}")
 
-    datasets = build_datasets(cfg)
-    target_split = args.split
-    if target_split not in datasets:
-        print(f"[ERROR] Split {target_split} not found in datasets")
-        return 1
-
-    dataset = datasets[target_split]
+    replicas = strategy.num_replicas_in_sync if strategy else 1
+    _, val_ds, test_ds = build_datasets(cfg, replicas=replicas)
+    dataset = test_ds if args.split == "test" else val_ds
     use_tta = not args.no_tta and bool(cfg.get("tta", {}).get("enabled", True))
     w_orig = float(cfg.get("tta", {}).get("original_weight", 0.50))
     w_flip = float(cfg.get("tta", {}).get("flip_weight", 0.50))

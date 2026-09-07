@@ -231,6 +231,10 @@ def main() -> int:
 
     if not is_cpu:
         configure_gpus(cfg)
+        visible_gpu_count = len(tf.config.list_logical_devices("GPU"))
+        strategy = tf.distribute.MirroredStrategy(devices=[f"/GPU:{i}" for i in range(max(visible_gpu_count, 1))])
+    else:
+        strategy = tf.distribute.MirroredStrategy(devices=["/CPU:0"])
 
     out_dir = Path(cfg["paths"]["output_dir"])
     if not out_dir.is_absolute():
@@ -262,12 +266,9 @@ def main() -> int:
     dummy_input = {"image": tf.zeros([1, img_size, img_size, 3], dtype=tf.float32)}
     model(dummy_input, training=False)
 
-    datasets = build_datasets(cfg)
-    if args.split not in datasets:
-        print(f"[ERROR] Split {args.split} not found in datasets")
-        return 1
-
-    dataset = datasets[args.split]
+    replicas = strategy.num_replicas_in_sync if strategy else 1
+    _, val_ds, test_ds = build_datasets(cfg, replicas=replicas)
+    dataset = test_ds if args.split == "test" else val_ds
     class_names = get_class_names(cfg)
 
     all_models_view_probs: List[Dict[str, np.ndarray]] = []
