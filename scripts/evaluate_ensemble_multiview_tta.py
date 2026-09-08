@@ -458,9 +458,28 @@ def evaluate_checkpoint_group(
     print(f" {'Cảm xúc':<14} | {'Recall Đơn lẻ':^16} | {'Recall Ensemble Best':^24} | {'Tăng trưởng':^14}")
     print("-" * 72)
     single_no_tta_m = classification_metrics(y_true.tolist(), np.argmax(group_probs[0]["orig"], axis=-1).tolist(), class_names)
+    
+    def _get_recalls(m_dict: Dict[str, Any]) -> List[float]:
+        if "per_class_accuracy" in m_dict:
+            return [float(x) for x in m_dict["per_class_accuracy"]]
+        if "per_class_recall" in m_dict:
+            return [float(x) for x in m_dict["per_class_recall"]]
+        if "classification_report" in m_dict:
+            rep = m_dict["classification_report"]
+            return [float(rep.get(c, {}).get("recall", 0.0)) for c in class_names]
+        if "confusion_matrix" in m_dict:
+            cm = np.array(m_dict["confusion_matrix"])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rec = np.true_divide(cm.diagonal(), cm.sum(axis=1))
+                return [float(x) for x in np.nan_to_num(rec, nan=0.0)]
+        return [0.0] * len(class_names)
+
+    r_base_list = _get_recalls(single_no_tta_m)
+    r_best_list = _get_recalls(best_m)
+
     for c_idx, c_name in enumerate(class_names):
-        r_base = float(single_no_tta_m["per_class_accuracy"][c_idx]) * 100.0
-        r_best = float(best_m["per_class_accuracy"][c_idx]) * 100.0
+        r_base = float(r_base_list[c_idx]) * 100.0
+        r_best = float(r_best_list[c_idx]) * 100.0
         diff = r_best - r_base
         diff_str = f"{diff:+.2f}%" if diff != 0 else "="
         print(f" {c_name:<14} | {r_base:^14.2f}% | {r_best:^22.2f}% | {diff_str:^14}")
@@ -474,7 +493,7 @@ def evaluate_checkpoint_group(
         "best_combination": f"Ensemble Top-{len(prefixes)} + {best_strat_name}",
         "best_accuracy": best_acc / 100.0,
         "best_macro_f1": float(best_m["macro_f1"]),
-        "best_per_class_recall": [float(v) for v in best_m["per_class_accuracy"]],
+        "best_per_class_recall": [float(v) for v in r_best_list],
     }
 
 

@@ -345,9 +345,28 @@ def main() -> int:
     print(f"\n[BẢNG SO SÁNH RECALL TỪNG LỚP: GỐC vs TỐT NHẤT ({best_strategy[0]})]")
     print(f" {'Cảm xúc (Class)':<16} | {'Recall Gốc':^14} | {'Recall Best TTA':^18} | {'Chênh lệch':^12}")
     print("-" * 68)
+
+    def _get_recalls(m_dict):
+        if "per_class_accuracy" in m_dict:
+            return [float(x) for x in m_dict["per_class_accuracy"]]
+        if "per_class_recall" in m_dict:
+            return [float(x) for x in m_dict["per_class_recall"]]
+        if "classification_report" in m_dict:
+            rep = m_dict["classification_report"]
+            return [float(rep.get(c, {}).get("recall", 0.0)) for c in class_names]
+        if "confusion_matrix" in m_dict:
+            cm = np.array(m_dict["confusion_matrix"])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rec = np.true_divide(cm.diagonal(), cm.sum(axis=1))
+                return [float(x) for x in np.nan_to_num(rec, nan=0.0)]
+        return [0.0] * len(class_names)
+
+    r_base_list = _get_recalls(m_s1)
+    r_best_list = _get_recalls(best_strategy[1])
+
     for c_idx, c_name in enumerate(class_names):
-        r_base = float(m_s1["per_class_accuracy"][c_idx]) * 100.0
-        r_best = float(best_strategy[1]["per_class_accuracy"][c_idx]) * 100.0
+        r_base = float(r_base_list[c_idx]) * 100.0
+        r_best = float(r_best_list[c_idx]) * 100.0
         d = r_best - r_base
         d_str = f"{d:+.2f}%" if d != 0.0 else "="
         print(f" {c_name:<16} | {r_base:^12.2f}% | {r_best:^16.2f}% | {d_str:^12}")
@@ -365,8 +384,8 @@ def main() -> int:
             "best_strategy": best_strategy[0],
             "best_accuracy": float(best_strategy[1]["accuracy"]),
             "best_macro_f1": float(best_strategy[1]["macro_f1"]),
-            "per_class_recall_baseline": [float(v) for v in m_s1["per_class_accuracy"]],
-            "per_class_recall_best_tta": [float(v) for v in best_strategy[1]["per_class_accuracy"]],
+            "per_class_recall_baseline": [float(v) for v in r_base_list],
+            "per_class_recall_best_tta": [float(v) for v in r_best_list],
         }
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)
