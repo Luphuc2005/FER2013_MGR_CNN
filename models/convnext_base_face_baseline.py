@@ -412,6 +412,27 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 dtype="float32", name="global_regional_fusion",
             )
 
+        self.use_multistage_adaptive_fusion = bool(model_cfg.get("use_multistage_adaptive_fusion", False))
+        self.multistage_fusion = None
+        if self.use_multistage_adaptive_fusion:
+            if not (self.use_dynamic_part_attention and self.use_semantic_branch and self.use_au_region_routed):
+                raise ValueError("Multi-stage fusion requires dynamic parts and routed semantics.")
+            if self.use_global_regional_fusion or self.use_stage3_eca or self.use_eca or self.use_soft_regional_pooling:
+                raise ValueError("Use the isolated multi-stage fusion config without other fusion/ECA variants.")
+            if model_cfg.get("checkpoint_path"):
+                raise ValueError("Initialize multi-stage fusion from MS1M; no FER checkpoint_path.")
+            from .multistage_adaptive_fusion import MultiStageAdaptiveFusion
+            from utils.stage_fusion_metrics import StageFusionMetrics
+            self.multistage_fusion = MultiStageAdaptiveFusion(
+                projection_dim=int(model_cfg.get("multistage_projection_dim", 256)),
+                output_dim=int(model_cfg.get("multistage_output_dim", 512)),
+                gate_hidden_dim=int(model_cfg.get("multistage_gate_hidden_dim", 128)),
+                name="multistage_adaptive_fusion",
+            )
+            # Updated explicitly by train.py, once per original SAM/eval forward.
+            self.stage_fusion_train_metrics = StageFusionMetrics("stage_fusion_train")
+            self.stage_fusion_eval_metrics = StageFusionMetrics("stage_fusion_eval")
+
         if self.use_semantic_branch:
             embed_dim = int(clip_sem_cfg.get("clip_embedding_dim", model_cfg.get("clip_embedding_dim", 512)))
             self.visual_projector = tf.keras.Sequential([
@@ -1028,7 +1049,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             feat = self.stage4_eca(feat, training=training)
             endpoints["stage4_eca"] = feat
         pooled = self.gap(feat)
-        if not self.use_global_regional_fusion:
+        if not (self.use_global_regional_fusion or self.use_multistage_adaptive_fusion):
             dropped = self.head_dropout(pooled, training=training)
             logits = self.classifier(dropped)
 
@@ -1068,7 +1089,16 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     z_lower = tf.reduce_mean(stage3_feat[:, 5:14, :, :], axis=[1, 2])
                     z_au = tf.reduce_mean(stage3_feat[:, 3:11, :, :], axis=[1, 2])
 
-                v_global_proj = self.visual_projector(pooled, training=training)
+                semantic_source = pooled
+                if self.use_multistage_adaptive_fusion:
+                    head_features, stage_weights = self.multistage_fusion(
+                        (endpoints["stage2"], z_upper, z_lower, z_au, pooled),
+                        training=training,
+                    )
+                    semantic_source = head_features
+                    endpoints["stage_fusion_weights"] = stage_weights
+                    endpoints["multistage_features"] = head_features
+                v_global_proj = self.visual_projector(semantic_source, training=training)
                 v_upper_proj = self.visual_projector_upper(z_upper, training=training)
                 v_lower_proj = self.visual_projector_lower(z_lower, training=training)
                 v_au_proj = self.visual_projector_au(z_au, training=training)
@@ -1155,6 +1185,18 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     f"concat={head_features.shape} logits={logits.shape}", flush=True,
                 )
 
+        if self.use_multistage_adaptive_fusion:
+            dropped = self.head_dropout(head_features, training=training)
+            logits = self.classifier(dropped)
+            if not self._shape_logged:
+                print(
+                    f"[MultiStageFusion] S2={endpoints['stage2'].shape} "
+                    f"S3-parts=3x{z_upper.shape} S4={pooled.shape} "
+                    f"fused={head_features.shape} weights={stage_weights.shape} "
+                    "order=[S2,S3,S4]; initial softmax=[1/3,1/3,1/3]",
+                    flush=True,
+                )
+
         visual_logits = tf.cast(logits, tf.float32)
         if self.use_adaptive_fusion_gate and self.adaptive_fusion_gate is not None and semantic_logits is not None:
             alpha = self.adaptive_fusion_gate(pooled, training=training)  # [B, 1]
@@ -1195,6 +1237,13 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         if self.use_stage3_eca:
             outputs["part_attention_maps"] = attn_maps
             outputs["regional_features"] = (z_upper, z_lower, z_au)
+            if "adaptive_fusion_alpha" in endpoints:
+                outputs["adaptive_fusion_alpha"] = endpoints["adaptive_fusion_alpha"]
+        if self.use_multistage_adaptive_fusion:
+            outputs["stage_fusion_weights"] = stage_weights
+            outputs["multistage_features"] = head_features
+            outputs["regional_features"] = (z_upper, z_lower, z_au)
+            outputs["part_attention_maps"] = attn_maps
             if "adaptive_fusion_alpha" in endpoints:
                 outputs["adaptive_fusion_alpha"] = endpoints["adaptive_fusion_alpha"]
         return outputs

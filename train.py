@@ -608,6 +608,8 @@ def make_step_function(
             ent = -tf.reduce_sum(gw_f32 * tf.math.log(gw_f32 + 1e-9), axis=-1)
             entropy_sum = tf.reduce_sum(ent)
 
+        if outputs.get("stage_fusion_weights") is not None:
+            model.stage_fusion_train_metrics.update_state(outputs)
         return correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum
 
     def _clip_gradients(grads):
@@ -763,6 +765,10 @@ def evaluate_dataset(
     else:
         print(f"[TTA] Horizontal Flip: DISABLED", flush=True)
 
+    fusion_eval_tracker = getattr(model, "stage_fusion_eval_metrics", None)
+    if fusion_eval_tracker is not None:
+        fusion_eval_tracker.reset_state()
+
     def _forward_outputs(inputs):
         outputs_orig = model(inputs, training=False)
         if outputs_orig.get("semantic_logits") is not None:
@@ -790,6 +796,8 @@ def evaluate_dataset(
     @tf.function(reduce_retracing=True, jit_compile=False)
     def _eval_step(inputs, labels):
         outputs_orig, outputs_tta = _forward_outputs(inputs)
+        if fusion_eval_tracker is not None:
+            fusion_eval_tracker.update_state(outputs_orig)
         total_l_orig, parts_orig = supervised_mgr_loss(
             labels,
             outputs_orig,
@@ -954,6 +962,13 @@ def evaluate_dataset(
             f"Weighted F1: {metrics_tta['weighted_f1']:.4f}",
             flush=True,
         )
+
+    if fusion_eval_tracker is not None:
+        from utils.stage_fusion_metrics import format_stage_fusion
+        fusion_values = fusion_eval_tracker.snapshot()
+        metrics_tta.update(fusion_values)
+        metrics_tta["stage_fusion_view"] = "original"
+        print("[STAGE_FUSION][eval original] " + format_stage_fusion(fusion_values), flush=True)
 
     gc.collect()
     return metrics_tta
@@ -1194,6 +1209,9 @@ def main() -> int:
         ce_losses = []
         sem_losses = []
         hard_losses = []
+        fusion_train_tracker = getattr(model, "stage_fusion_train_metrics", None)
+        if fusion_train_tracker is not None:
+            fusion_train_tracker.reset_state()
         total_gw_sum = np.zeros(5, dtype=np.float64)
         total_gw_sq_sum = np.zeros(5, dtype=np.float64)
         total_entropy_sum = 0.0
@@ -1230,6 +1248,12 @@ def main() -> int:
                     f"lr_head={lr:.6f} lr_backbone={backbone_lr:.2e}",
                     flush=True,
                 )
+                if fusion_train_tracker is not None:
+                    from utils.stage_fusion_metrics import format_stage_fusion
+                    print(
+                        f"[STAGE_FUSION][train running][epoch={epoch+1} step={step_index}] "
+                        + format_stage_fusion(fusion_train_tracker.snapshot()), flush=True,
+                    )
         train_time_sec = time.time() - epoch_start_time
         train_steps = len(total_losses)
         train_samples_per_sec = float(seen) / max(train_time_sec, 1e-9)
@@ -1255,6 +1279,15 @@ def main() -> int:
                     f"[WARNING] Granularity weight {k_idx} mean ({gw_m:.4f}) > 0.90 at Epoch {epoch+1}! Gate may be collapsing.",
                     flush=True,
                 )
+
+        fusion_train_values = None
+        if fusion_train_tracker is not None:
+            from utils.stage_fusion_metrics import format_stage_fusion
+            fusion_train_values = fusion_train_tracker.snapshot()
+            print(
+                f"[STAGE_FUSION][train epoch={epoch+1}] "
+                + format_stage_fusion(fusion_train_values), flush=True,
+            )
 
         print(f"[INFO] Epoch {epoch+1}: starting validation", flush=True)
         val_metrics = evaluate_dataset(
@@ -1394,6 +1427,15 @@ def main() -> int:
             "phase_transitioned": int(phase_transitioned),
             "improved": int(improved),
         }
+        if fusion_train_values is not None:
+            from utils.stage_fusion_metrics import append_fusion_epoch
+            fusion_val_values = {key: val_metrics[key] for key in fusion_train_values}
+            row.update({f"train_{key}": value for key, value in fusion_train_values.items()})
+            row.update({f"val_orig_{key}": value for key, value in fusion_val_values.items()})
+            append_fusion_epoch(
+                run_dir / "fusion_weights.csv", epoch + 1,
+                fusion_train_values, fusion_val_values,
+            )
         history.append(row)
         gw_means_str = ",".join([f"{m:.3f}" for m in gw_means])
         print(
