@@ -190,16 +190,27 @@ def configure_gpus(cfg: Dict) -> None:
 
 
 def build_optimizer(cfg: Dict, learning_rate: float):
-    weight_decay = float(cfg["training"].get("weight_decay", 0.0))
-    adamw = getattr(tf.keras.optimizers, "AdamW", None)
-    if adamw is None:
-        adamw = getattr(getattr(tf.keras.optimizers, "experimental", object()), "AdamW", None)
-    if adamw is not None:
+    from utils.optimizer_config import resolve_base_optimizer
+    name, weight_decay = resolve_base_optimizer(cfg["training"])
+    if name == "adam":
         try:
-            return adamw(learning_rate=learning_rate, weight_decay=weight_decay, jit_compile=False)
+            optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate, jit_compile=False)
         except (TypeError, ValueError):
-            return adamw(learning_rate=learning_rate, weight_decay=weight_decay)
-    return LegacyDecoupledAdamW(learning_rate=learning_rate, weight_decay=weight_decay)
+            optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    else:
+        adamw = getattr(tf.keras.optimizers, "AdamW", None)
+        if adamw is None:
+            adamw = getattr(getattr(tf.keras.optimizers, "experimental", object()), "AdamW", None)
+        if adamw is not None:
+            try:
+                optimizer = adamw(learning_rate=learning_rate, weight_decay=weight_decay, jit_compile=False)
+            except (TypeError, ValueError):
+                optimizer = adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+        else:
+            optimizer = LegacyDecoupledAdamW(learning_rate=learning_rate, weight_decay=weight_decay)
+    print(f"[OPTIMIZER] base={name} class={type(optimizer).__name__} "
+          f"lr={learning_rate:g} weight_decay={weight_decay:g}", flush=True)
+    return optimizer
 
 
 def get_param_count(model: tf.keras.Model) -> Tuple[int, int]:
@@ -572,8 +583,11 @@ def make_step_function(
     loss_scale: float = 1.0,
     lambda_sem_runtime: Optional[tf.Variable] = None,
     rdrop_metrics=None,
+    vlm_kd_metrics=None,
 ):
     loss_cfg = cfg["training"]
+    from losses.vlm_kd import validate_kd_settings
+    lambda_vlm_kd, kd_temperature = validate_kd_settings(loss_cfg)
     lambda_rdrop = float(loss_cfg.get("lambda_rdrop", 0.0))
     if not np.isfinite(lambda_rdrop) or lambda_rdrop < 0:
         raise ValueError("training.lambda_rdrop must be finite and >= 0.")
@@ -617,6 +631,8 @@ def make_step_function(
 
         if rdrop_metrics is not None and lambda_rdrop > 0.0:
             rdrop_metrics.update_state(parts, count)
+        if vlm_kd_metrics is not None and lambda_vlm_kd > 0.0:
+            vlm_kd_metrics.update_state(parts, count)
         if outputs.get("stage_fusion_weights") is not None:
             model.stage_fusion_train_metrics.update_state(outputs)
         return correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum
@@ -641,6 +657,7 @@ def make_step_function(
             outputs, raw_loss, parts = forward_training_loss(
                 model, features, labels,
                 lambda_rdrop=lambda_rdrop,
+                lambda_vlm_kd=lambda_vlm_kd, kd_temperature=kd_temperature,
                 lambda_sem_runtime=lambda_sem_runtime,
                 **ce_kwargs,
                 num_classes=cfg["data"]["num_classes"],
@@ -683,6 +700,7 @@ def make_step_function(
             _, raw_loss_2, _ = forward_training_loss(
                 model, features, labels,
                 lambda_rdrop=lambda_rdrop,
+                lambda_vlm_kd=lambda_vlm_kd, kd_temperature=kd_temperature,
                 lambda_sem_runtime=lambda_sem_runtime,
                 **ce_kwargs,
                 num_classes=cfg["data"]["num_classes"],
@@ -1034,6 +1052,15 @@ def main() -> int:
     logs_dir = Path(cfg["paths"]["logs_dir"])
     logs_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_root = run_dir / "checkpoints"
+    if float(cfg["training"].get("lambda_vlm_kd", 0.0)) > 0:
+        from utils.vlm_teacher_cache import resolve as resolve_teacher_path, sha256
+        teacher_path = resolve_teacher_path(cfg["vlm_teacher"]["cache_path"])
+        with np.load(teacher_path, allow_pickle=False) as teacher_cache:
+            teacher_manifest = json.loads(str(teacher_cache["metadata"].item()))
+        teacher_manifest.update(cache_path=str(teacher_path), cache_sha256=sha256(teacher_path))
+        (run_dir / "teacher_cache_manifest.json").write_text(
+            json.dumps(teacher_manifest, indent=2), encoding="utf-8")
+        (run_dir / "effective_config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     if cfg["training"].get("weighted_ce", {}).get("enabled", False):
         (run_dir / "ce_class_weights.json").write_text(
             json.dumps(cfg["training"]["resolved_ce_weight_report"], indent=2), encoding="utf-8"
@@ -1072,6 +1099,13 @@ def main() -> int:
         )
         # Metrics live in the strategy scope but outside the model/checkpoint.
         rdrop_train_tracker = None
+        from losses.vlm_kd import validate_kd_settings, VLMKDMetrics
+        lambda_vlm_kd, kd_temperature = validate_kd_settings(cfg["training"])
+        vlm_kd_tracker = VLMKDMetrics() if lambda_vlm_kd > 0 else None
+        if vlm_kd_tracker is not None:
+            print(f"[VLM_KD] lambda={lambda_vlm_kd} T={kd_temperature}; "
+                  "frozen cached clean-224 teacher -> V5 fused logits; "
+                  "both SAM passes; no R-Drop/feature cosine; inference unchanged.", flush=True)
         lambda_rdrop = float(cfg["training"].get("lambda_rdrop", 0.0))
         if not np.isfinite(lambda_rdrop) or lambda_rdrop < 0:
             raise ValueError("training.lambda_rdrop must be finite and >= 0.")
@@ -1139,6 +1173,7 @@ def main() -> int:
         loss_scale=loss_scale,
         lambda_sem_runtime=lambda_sem_runtime,
         rdrop_metrics=rdrop_train_tracker,
+        vlm_kd_metrics=vlm_kd_tracker,
     )
     distributed_train_step_head = make_distributed_train_step(strategy, train_step_head)
     distributed_train_step_full = make_distributed_train_step(strategy, train_step_full)
@@ -1248,6 +1283,8 @@ def main() -> int:
             )
         if rdrop_train_tracker is not None:
             rdrop_train_tracker.reset_state()
+        if vlm_kd_tracker is not None:
+            vlm_kd_tracker.reset_state()
         total_losses = []
         ce_losses = []
         sem_losses = []
@@ -1294,6 +1331,8 @@ def main() -> int:
                 if rdrop_train_tracker is not None:
                     from utils.rdrop_metrics import format_rdrop
                     print("[RDROP][train running] " + format_rdrop(rdrop_train_tracker.snapshot()), flush=True)
+                if vlm_kd_tracker is not None:
+                    print("[VLM_KD][train running] " + json.dumps(vlm_kd_tracker.snapshot()), flush=True)
                 if fusion_train_tracker is not None:
                     from utils.stage_fusion_metrics import format_stage_fusion
                     print(
@@ -1501,6 +1540,11 @@ def main() -> int:
             row.update(rdrop_values)
             row["lambda_rdrop"] = lambda_rdrop
             print("[RDROP][train epoch] " + format_rdrop(rdrop_values), flush=True)
+        if vlm_kd_tracker is not None:
+            kd_values = vlm_kd_tracker.snapshot()
+            row.update(kd_values)
+            row.update(lambda_vlm_kd=lambda_vlm_kd, kd_temperature=kd_temperature)
+            print("[VLM_KD][train epoch] " + json.dumps(kd_values), flush=True)
         history.append(row)
         gw_means_str = ",".join([f"{m:.3f}" for m in gw_means])
         print(

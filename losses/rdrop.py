@@ -25,7 +25,7 @@ def symmetric_kl(logits_a, logits_b):
 
 def forward_training_loss(
     model, features, labels, *, lambda_rdrop=0.0,
-    lambda_sem_runtime=None, **loss_kwargs,
+    lambda_sem_runtime=None, lambda_vlm_kd=0.0, kd_temperature=2.0, **loss_kwargs,
 ):
     """One stochastic forward when disabled; two at the SAME weights when enabled.
 
@@ -38,12 +38,26 @@ def forward_training_loss(
     if not math.isfinite(weight) or weight < 0:
         raise ValueError("lambda_rdrop must be finite and >= 0.")
 
+    from .vlm_kd import validate_kd_settings
+    kd_weight, temperature = validate_kd_settings(dict(
+        lambda_vlm_kd=lambda_vlm_kd, kd_temperature=kd_temperature, lambda_rdrop=weight))
+    student_features = features
+    if kd_weight > 0:
+        if not isinstance(features, dict) or "teacher_logits" not in features:
+            raise ValueError("VLM-KD requires verified teacher_logits in the training batch")
+        student_features = {k: v for k, v in features.items() if k != "teacher_logits"}
+
     def forward_once():
-        outputs = model(features, training=True)
+        outputs = model(student_features, training=True)
         loss_outputs = dict(outputs)
         if lambda_sem_runtime is not None and outputs.get("semantic_logits") is not None:
             loss_outputs["lambda_sem"] = lambda_sem_runtime.read_value()
         loss, parts = supervised_mgr_loss(labels, loss_outputs, **loss_kwargs)
+        if kd_weight > 0:
+            from .vlm_kd import classification_kd
+            kd = classification_kd(outputs["logits"], features["teacher_logits"], temperature)
+            parts = dict(parts, vlm_kd=kd, weighted_vlm_kd=kd_weight * kd)
+            loss = loss + parts["weighted_vlm_kd"]
         return outputs, loss, parts
 
     first, loss_a, parts_a = forward_once()

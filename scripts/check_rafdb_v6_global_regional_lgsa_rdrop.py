@@ -111,19 +111,21 @@ def smoke_model(cfg):
                                  (1 - alpha) * out["visual_logits"] + alpha * out["semantic_logits"])
         # Visual CE alone must reach DPA and the fusion projections. This checks
         # the new path without any gradient supplied by semantic/LGSA losses.
-        variables = (model.dynamic_part_attn.trainable_variables
-                     + model.global_regional_fusion.trainable_variables)
-        raw_variables = [v.values[0] if hasattr(v, "values") else v for v in variables]
-        with tf.GradientTape(watch_accessed_variables=False) as tape:
-            tape.watch(raw_variables)
-            outputs = model(images, training=False)
-            visual_ce = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(
-                tf.constant([1, 4]), outputs["visual_logits"], from_logits=True,
-            ))
-        gradients = tape.gradient(visual_ce, raw_variables)
-        count = len(model.dynamic_part_attn.trainable_variables)
-        check_gradients(tf, gradients[:count], "Visual CE -> DPA")
-        check_gradients(tf, gradients[count:], "Visual CE -> fusion")
+        def check_direct_gradients():
+            variables = (model.dynamic_part_attn.trainable_variables
+                         + model.global_regional_fusion.trainable_variables)
+            with tf.GradientTape(watch_accessed_variables=False) as tape:
+                tape.watch(variables)
+                outputs = model(images, training=False)
+                visual_ce = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(
+                    tf.constant([1, 4]), outputs["visual_logits"], from_logits=True,
+                ))
+            gradients = tape.gradient(visual_ce, variables)
+            count = len(model.dynamic_part_attn.trainable_variables)
+            check_gradients(tf, gradients[:count], "Visual CE -> DPA")
+            check_gradients(tf, gradients[count:], "Visual CE -> fusion")
+
+        tf.distribute.get_strategy().run(check_direct_gradients)
         print("DIRECT_LOCAL_TO_VISUAL_HEAD_OK: shapes, fusion params, "
               "visual-CE-only gradients to DPA/fusion, adaptive semantic fusion", flush=True)
         return model

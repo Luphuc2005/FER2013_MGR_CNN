@@ -592,6 +592,10 @@ def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool
             tensors["mask_paths"] = tf.convert_to_tensor(records.mask_paths.astype(str))
         if records.masks is not None:
             tensors["masks"] = tf.convert_to_tensor(records.masks)
+        if training and float(cfg.get("training", {}).get("lambda_vlm_kd", 0.0)) > 0:
+            from utils.vlm_teacher_cache import load_teacher_logits
+            tensors["teacher_logits"] = tf.convert_to_tensor(
+                load_teacher_logits(cfg, records, split), dtype=tf.float32)
     sampling_strategy = str(cfg["data"].get("sampling_strategy", "")).lower()
     use_class_balanced = training and sampling_strategy in {
         "class_balanced",
@@ -614,7 +618,7 @@ def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool
         options.threading.max_intra_op_parallelism = 1
     ds = ds.with_options(options)
     def mapper(item):
-        return _parse_example(
+        features, label = _parse_example(
             item["pixels"],
             item["labels"],
             item["sample_ids"],
@@ -623,6 +627,9 @@ def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool
             cfg=cfg,
             split=split,
         )
+        if "teacher_logits" in item:
+            features["teacher_logits"] = item["teacher_logits"]
+        return features, label
     parallel_calls = runtime_cfg.get("tf_data_num_parallel_calls")
     if parallel_calls in (None, "", 0):
         parallel_calls = tf.data.AUTOTUNE

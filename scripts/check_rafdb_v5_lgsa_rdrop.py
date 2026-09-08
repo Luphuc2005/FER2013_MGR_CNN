@@ -274,26 +274,29 @@ def smoke_model(cfg):
 
     # Explicit local-gradient check before optimizers: catch disconnected LGSA
     # rather than merely observing a positive total loss.
-    with tf.GradientTape(watch_accessed_variables=False) as tape:
-        tape.watch(heads)
-        _, loss, parts = forward_training_loss(
-            model, features, labels, lambda_rdrop=cfg["training"]["lambda_rdrop"],
-            lambda_sem_runtime=schedule, num_classes=7,
-            label_smoothing=cfg["training"]["label_smoothing"],
-            ortho_weight=0., cnn_aux_weight=0.,
-        )
-        local_loss = parts["local_semantic"]
-    local_vars = (model.visual_projector_upper.trainable_variables
-                  + model.visual_projector_lower.trainable_variables
-                  + model.visual_projector_au.trainable_variables
-                  + model.dynamic_part_attn.trainable_variables)
-    grads = tape.gradient(local_loss, local_vars)
-    assert float(local_loss) > 0
-    assert all(g is not None for g in grads), "LGSA disconnected from local branches."
-    for grad in grads:
-        tf.debugging.assert_all_finite(grad, "LGSA gradient")
-    assert float(tf.linalg.global_norm(grads)) > 0
-    tf.debugging.assert_all_finite(loss, "R-Drop objective")
+    def check_local_gradients():
+        with tf.GradientTape(watch_accessed_variables=False) as tape:
+            tape.watch(heads)
+            _, loss, parts = forward_training_loss(
+                model, features, labels, lambda_rdrop=cfg["training"]["lambda_rdrop"],
+                lambda_sem_runtime=schedule, num_classes=7,
+                label_smoothing=cfg["training"]["label_smoothing"],
+                ortho_weight=0., cnn_aux_weight=0.,
+            )
+            local_loss = parts["local_semantic"]
+        local_vars = (model.visual_projector_upper.trainable_variables
+                      + model.visual_projector_lower.trainable_variables
+                      + model.visual_projector_au.trainable_variables
+                      + model.dynamic_part_attn.trainable_variables)
+        grads = tape.gradient(local_loss, local_vars)
+        assert float(local_loss) > 0
+        assert all(g is not None for g in grads), "LGSA disconnected from local branches."
+        for grad in grads:
+            tf.debugging.assert_all_finite(grad, "LGSA gradient")
+        assert float(tf.linalg.global_norm(grads)) > 0
+        tf.debugging.assert_all_finite(loss, "R-Drop objective")
+
+    strategy.run(check_local_gradients)
 
     # Fail on nonfinite gradients in the throwaway smoke rather than masking
     # them. The saved experiment config and production skip setting stay intact.
