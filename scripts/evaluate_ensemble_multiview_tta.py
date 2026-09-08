@@ -75,6 +75,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only evaluate Original and Horizontal Flip (skip multi-scale zoom and rotation for max speed)",
     )
+    parser.add_argument(
+        "--sweep-ratio",
+        action="store_true",
+        default=True,
+        help="Sweep TTA weights between Origin and Flip (default: True)",
+    )
+    parser.add_argument(
+        "--sweep-step",
+        type=float,
+        default=0.05,
+        help="Step size for TTA weight ratio sweep (default: 0.05, i.e. 5% increments)",
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU evaluation")
     parser.add_argument("--output", type=str, default=None, help="Save JSON report path")
     return parser.parse_args()
@@ -275,6 +287,43 @@ def compute_tta_strategies(probs_dict: Dict[str, np.ndarray]) -> Dict[str, np.nd
         res["6-View Toàn diện"] = 0.25 * p_orig + 0.25 * p_hflip + 0.15 * p_zoom + 0.15 * p_hfzoom + 0.10 * p_rneg + 0.10 * p_rpos
 
     return res
+
+
+def sweep_origin_flip_ratios(
+    p_orig: np.ndarray,
+    p_hflip: np.ndarray,
+    y_true: np.ndarray,
+    class_names: List[str],
+    step: float = 0.05,
+) -> Dict[str, Any]:
+    weights = np.linspace(0.0, 1.0, int(round(1.0 / step)) + 1)
+    best_acc = -1.0
+    best_w = 0.5
+    best_m = None
+    table_rows = []
+
+    for w in weights:
+        w_orig = float(w)
+        w_flip = float(1.0 - w)
+        p_mix = w_orig * p_orig + w_flip * p_hflip
+        preds = np.argmax(p_mix, axis=-1)
+        m = classification_metrics(y_true.tolist(), preds.tolist(), class_names)
+        acc = float(m["accuracy"]) * 100.0
+        mf1 = float(m["macro_f1"])
+        wf1 = float(m["weighted_f1"])
+        table_rows.append((w_orig, w_flip, acc, mf1, wf1, m))
+        if acc > best_acc or (acc == best_acc and abs(w_orig - 0.5) < abs(best_w - 0.5)):
+            best_acc = acc
+            best_w = w_orig
+            best_m = m
+
+    return {
+        "best_w_orig": best_w,
+        "best_w_flip": 1.0 - best_w,
+        "best_acc": best_acc,
+        "best_metrics": best_m,
+        "table_rows": table_rows,
+    }
 
 
 def main() -> int:
@@ -592,6 +641,38 @@ def evaluate_checkpoint_group(
         print(f" {c_name:<14} | {r_base:^14.2f}% | {r_best:^22.2f}% | {diff_str:^14}")
     print("-" * 72 + "\n")
 
+    sw_result = None
+    if getattr(args, "sweep_ratio", True) and "orig" in ensemble_view_probs and "hflip" in ensemble_view_probs:
+        step_val = getattr(args, "sweep_step", 0.05)
+        sw_res = sweep_origin_flip_ratios(
+            ensemble_view_probs["orig"], ensemble_view_probs["hflip"], y_true, class_names, step=step_val
+        )
+        sw_result = {
+            "best_w_orig": sw_res["best_w_orig"],
+            "best_w_flip": sw_res["best_w_flip"],
+            "best_accuracy": sw_res["best_acc"] / 100.0,
+            "best_macro_f1": float(sw_res["best_metrics"]["macro_f1"]),
+        }
+        print(f"[SWEEP TỈ LỆ TRỌNG SỐ TTA (GỐC vs LẬT) CHO {group_title.upper()}]:")
+        sw_header = f" {'Tỉ lệ (Orig : Flip)':^22} | {'Accuracy':^12} | {'Macro F1':^12} | {'Weighted F1':^13} | {'Ghi chú':<16}"
+        sw_sep = "-" * len(sw_header)
+        print(sw_sep)
+        print(sw_header)
+        print(sw_sep)
+        for w_o, w_f, s_acc, s_mf1, s_wf1, _ in sw_res["table_rows"]:
+            note = ""
+            if np.isclose(w_o, sw_res["best_w_orig"]):
+                note = "⭐ TỐI ƯU NHẤT"
+            elif np.isclose(w_o, 0.50):
+                note = "Tiêu chuẩn (50:50)"
+            elif np.isclose(w_o, 1.00):
+                note = "Chỉ ảnh Gốc"
+            elif np.isclose(w_o, 0.00):
+                note = "Chỉ ảnh Lật"
+            print(f" {w_o*100:5.1f}% : {w_f*100:5.1f}%{'':<6} | {s_acc:^10.2f}% | {s_mf1:^12.4f} | {s_wf1:^13.4f} | {note:<16}")
+        print(sw_sep)
+        print(f"  -> Tỉ lệ tối ưu: {sw_res['best_w_orig']*100:.1f}% Gốc + {sw_res['best_w_flip']*100:.1f}% Lật đạt {sw_res['best_acc']:.2f}% Accuracy!\n")
+
     return {
         "group_title": group_title,
         "prefixes": [p.name for p in prefixes],
@@ -601,6 +682,7 @@ def evaluate_checkpoint_group(
         "best_accuracy": best_acc / 100.0,
         "best_macro_f1": float(best_m["macro_f1"]),
         "best_per_class_recall": [float(v) for v in r_best_list],
+        "sweep_ratio_result": sw_result,
     }
 
 
