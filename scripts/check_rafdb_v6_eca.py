@@ -82,9 +82,21 @@ def smoke_components():
             assert eca.k_size == 5 and eca.count_params() == 5
             # Zero channel scores imply sigmoid(0)=0.5, testing channel axis/broadcast.
             eca.conv1d.kernel.assign(tf.zeros_like(eca.conv1d.kernel))
+            channel_half = eca(features)
+            assert channel_half.dtype == dtype
+            # Round the reference to the layer's compute dtype as well. FP16
+            # halving near zero can differ from an FP32 reference by 2**-25.
+            expected_half = tf.cast(
+                0.5 * tf.cast(features, tf.float32), channel_half.dtype,
+            )
+            # Allow one FP16 subnormal step; retain exact comparison for FP32.
+            half_atol = (
+                float(np.nextafter(np.float16(0), np.float16(1)))
+                if dtype == tf.float16 else 0.0
+            )
             np.testing.assert_allclose(
-                tf.cast(eca(features), tf.float32).numpy(),
-                0.5 * tf.cast(features, tf.float32).numpy(), rtol=0, atol=0,
+                tf.cast(channel_half, tf.float32).numpy(),
+                tf.cast(expected_half, tf.float32).numpy(), rtol=0, atol=half_atol,
             )
             parts(eca(features))
 
