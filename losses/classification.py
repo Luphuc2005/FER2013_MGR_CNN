@@ -120,10 +120,39 @@ def supervised_mgr_loss(
         )
         total = total + tf.cast(lambda_hard, tf.float32) * hard_loss
 
+    # Explicit Local Semantic Alignment Loss (LGSA)
+    local_sem_loss = tf.constant(0.0, dtype=tf.float32)
+    lambda_local_sem = tf.cast(outputs.get("lambda_local_sem", 0.0), tf.float32)
+    s_upper = outputs.get("s_upper")
+    s_lower = outputs.get("s_lower")
+    s_au = outputs.get("s_au")
+    if s_upper is None and "local_semantic_logits" in outputs and isinstance(outputs["local_semantic_logits"], dict):
+        s_upper = outputs["local_semantic_logits"].get("upper")
+        s_lower = outputs["local_semantic_logits"].get("lower")
+        s_au = outputs["local_semantic_logits"].get("au")
+
+    if s_upper is not None and s_lower is not None and s_au is not None:
+        s_upper_f32 = tf.cast(s_upper, tf.float32)
+        s_lower_f32 = tf.cast(s_lower, tf.float32)
+        s_au_f32 = tf.cast(s_au, tf.float32)
+        if label_smoothing > 0.0:
+            targets = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
+            targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
+            loss_upper = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(targets, s_upper_f32, from_logits=True))
+            loss_lower = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(targets, s_lower_f32, from_logits=True))
+            loss_au = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(targets, s_au_f32, from_logits=True))
+        else:
+            loss_upper = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(labels, s_upper_f32, from_logits=True))
+            loss_lower = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(labels, s_lower_f32, from_logits=True))
+            loss_au = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(labels, s_au_f32, from_logits=True))
+        local_sem_loss = (loss_upper + loss_lower + loss_au) / 3.0
+        total = total + lambda_local_sem * local_sem_loss
+
     return total, {
         "ce": ce,
         "ortho": ortho,
         "cnn_aux": aux,
         "semantic": sem_loss,
         "hard_semantic": hard_loss,
+        "local_semantic": local_sem_loss,
     }

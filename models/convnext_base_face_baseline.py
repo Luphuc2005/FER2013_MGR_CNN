@@ -362,6 +362,10 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             or model_cfg.get("ablation") in ("au_region_routed", "adaptive_clip_confusion", "au_routed_clip")
         )
 
+        self.lambda_local_sem = float(
+            model_cfg.get("lambda_local_sem", clip_sem_cfg.get("lambda_local_sem", 0.02))
+        )
+
         self.use_soft_regional_pooling = bool(model_cfg.get("use_soft_regional_pooling", False))
         self.semantic_projector_dropout = float(model_cfg.get(
             "semantic_projector_dropout", model_cfg.get("classifier_dropout1", 0.35)
@@ -1129,6 +1133,18 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 s4 = tf.einsum("bd,cd->bc", v_global_norm, t_norm[:, 4, :])
 
                 raw_sim = tf.stack([s0, s1, s2, s3, s4], axis=-1)  # [B, C, 5]
+
+                # Explicit Local Semantic Logits (scaled for Cross-Entropy loss)
+                scale_f32 = tf.cast(self.semantic_logit_scale, tf.float32)
+                endpoints["s_au"] = tf.cast(s1, tf.float32) * scale_f32
+                endpoints["s_upper"] = tf.cast(s2, tf.float32) * scale_f32
+                endpoints["s_lower"] = tf.cast(s3, tf.float32) * scale_f32
+                endpoints["local_semantic_logits"] = {
+                    "au": endpoints["s_au"],
+                    "upper": endpoints["s_upper"],
+                    "lower": endpoints["s_lower"],
+                }
+                endpoints["lambda_local_sem"] = tf.constant(self.lambda_local_sem, dtype=tf.float32)
             else:
                 v_proj = self.visual_projector(pooled, training=training)
                 v_norm = tf.math.l2_normalize(v_proj, axis=-1, epsilon=1e-5)
