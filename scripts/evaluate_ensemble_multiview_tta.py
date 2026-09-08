@@ -70,6 +70,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crop-fraction", type=float, default=0.92, help="Central crop fraction for zoom (default: 0.92)")
     parser.add_argument("--rot-deg", type=float, default=3.0, help="Rotation angle in degrees (default: 3.0)")
     parser.add_argument("--batch-size", type=int, default=None, help="Inference batch size per GPU (default: from config, e.g. 16 or 32)")
+    parser.add_argument(
+        "--two-view-only",
+        action="store_true",
+        help="Only evaluate Original and Horizontal Flip (skip multi-scale zoom and rotation for max speed)",
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU evaluation")
     parser.add_argument("--output", type=str, default=None, help="Save JSON report path")
     return parser.parse_args()
@@ -178,6 +183,7 @@ def extract_view_probs_single_model(
     dataset: tf.data.Dataset,
     crop_fraction: float = 0.92,
     rot_deg: float = 3.0,
+    two_view_only: bool = False,
     predict_fn: Optional[Any] = None,
     total_batches: Optional[int] = None,
 ) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
@@ -187,7 +193,11 @@ def extract_view_probs_single_model(
             return model(batch_input, training=False)["logits"]
         predict_fn = _default_predict_fn
 
-    view_names = ["orig", "hflip", "zoom", "hflip_zoom", "rot_neg", "rot_pos"]
+    if two_view_only:
+        view_names = ["orig", "hflip"]
+    else:
+        view_names = ["orig", "hflip", "zoom", "hflip_zoom", "rot_neg", "rot_pos"]
+
     view_logits: Dict[str, List[np.ndarray]] = {k: [] for k in view_names}
     all_labels = []
 
@@ -199,25 +209,38 @@ def extract_view_probs_single_model(
 
         img_orig = inputs["image"]
         img_hflip = tf.image.flip_left_right(img_orig)
-        img_zoom = zoom_crop_batch(img_orig, fraction=crop_fraction)
-        img_hflip_zoom = tf.image.flip_left_right(img_zoom)
-        img_rot_neg = rotate_batch(img_orig, degrees=-rot_deg)
-        img_rot_pos = rotate_batch(img_orig, degrees=rot_deg)
 
-        # Concatenate 6 views into 1 batch: [6*B, 112, 112, 3] for single high-speed GPU execution
-        all_imgs = tf.concat([img_orig, img_hflip, img_zoom, img_hflip_zoom, img_rot_neg, img_rot_pos], axis=0)
-        v_input = {"image": all_imgs}
-        if "mask" in inputs and inputs["mask"] is not None:
-            m_orig = inputs["mask"]
-            m_hflip = tf.image.flip_left_right(m_orig)
-            m_zoom = zoom_crop_batch(m_orig, fraction=crop_fraction)
-            m_hfzoom = tf.image.flip_left_right(m_zoom)
-            m_rot_neg = rotate_batch(m_orig, degrees=-rot_deg)
-            m_rot_pos = rotate_batch(m_orig, degrees=rot_deg)
-            v_input["mask"] = tf.concat([m_orig, m_hflip, m_zoom, m_hfzoom, m_rot_neg, m_rot_pos], axis=0)
+        if two_view_only:
+            # Only 2 views: [2*B, 112, 112, 3]
+            all_imgs = tf.concat([img_orig, img_hflip], axis=0)
+            v_input = {"image": all_imgs}
+            if "mask" in inputs and inputs["mask"] is not None:
+                m_orig = inputs["mask"]
+                m_hflip = tf.image.flip_left_right(m_orig)
+                v_input["mask"] = tf.concat([m_orig, m_hflip], axis=0)
+            all_logits = predict_fn(v_input)
+            chunks = tf.split(all_logits, num_or_size_splits=2, axis=0)
+        else:
+            img_zoom = zoom_crop_batch(img_orig, fraction=crop_fraction)
+            img_hflip_zoom = tf.image.flip_left_right(img_zoom)
+            img_rot_neg = rotate_batch(img_orig, degrees=-rot_deg)
+            img_rot_pos = rotate_batch(img_orig, degrees=rot_deg)
 
-        all_logits = predict_fn(v_input)
-        chunks = tf.split(all_logits, num_or_size_splits=6, axis=0)
+            # Concatenate 6 views into 1 batch: [6*B, 112, 112, 3] for single high-speed GPU execution
+            all_imgs = tf.concat([img_orig, img_hflip, img_zoom, img_hflip_zoom, img_rot_neg, img_rot_pos], axis=0)
+            v_input = {"image": all_imgs}
+            if "mask" in inputs and inputs["mask"] is not None:
+                m_orig = inputs["mask"]
+                m_hflip = tf.image.flip_left_right(m_orig)
+                m_zoom = zoom_crop_batch(m_orig, fraction=crop_fraction)
+                m_hfzoom = tf.image.flip_left_right(m_zoom)
+                m_rot_neg = rotate_batch(m_orig, degrees=-rot_deg)
+                m_rot_pos = rotate_batch(m_orig, degrees=rot_deg)
+                v_input["mask"] = tf.concat([m_orig, m_hflip, m_zoom, m_hfzoom, m_rot_neg, m_rot_pos], axis=0)
+
+            all_logits = predict_fn(v_input)
+            chunks = tf.split(all_logits, num_or_size_splits=6, axis=0)
+
         for v_name, chunk in zip(view_names, chunks):
             view_logits[v_name].append(chunk.numpy())
 
@@ -235,33 +258,23 @@ def extract_view_probs_single_model(
 def compute_tta_strategies(probs_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
     p_orig = probs_dict["orig"]
     p_hflip = probs_dict["hflip"]
-    p_zoom = probs_dict["zoom"]
-    p_hfzoom = probs_dict["hflip_zoom"]
-    p_rneg = probs_dict["rot_neg"]
-    p_rpos = probs_dict["rot_pos"]
 
-    # 1. No-TTA
-    s1 = p_orig
-
-    # 2. 2-View TTA (50% Orig + 50% Flip)
-    s2 = 0.50 * p_orig + 0.50 * p_hflip
-
-    # 3. 4-View Multi-Scale TTA
-    s3 = 0.35 * p_orig + 0.35 * p_hflip + 0.15 * p_zoom + 0.15 * p_hfzoom
-
-    # 4. 5-View Multi-Scale & Angle TTA
-    s4 = 0.30 * p_orig + 0.30 * p_hflip + 0.20 * p_zoom + 0.10 * p_rneg + 0.10 * p_rpos
-
-    # 5. 6-View Comprehensive TTA
-    s5 = 0.25 * p_orig + 0.25 * p_hflip + 0.15 * p_zoom + 0.15 * p_hfzoom + 0.10 * p_rneg + 0.10 * p_rpos
-
-    return {
-        "No-TTA": s1,
-        "2-View TTA": s2,
-        "4-View Multi-Scale": s3,
-        "5-View Multi-Scale & Góc": s4,
-        "6-View Toàn diện": s5,
+    res = {
+        "No-TTA": p_orig,
+        "2-View TTA": 0.50 * p_orig + 0.50 * p_hflip,
     }
+
+    if "zoom" in probs_dict and "rot_neg" in probs_dict:
+        p_zoom = probs_dict["zoom"]
+        p_hfzoom = probs_dict["hflip_zoom"]
+        p_rneg = probs_dict["rot_neg"]
+        p_rpos = probs_dict["rot_pos"]
+
+        res["4-View Multi-Scale"] = 0.35 * p_orig + 0.35 * p_hflip + 0.15 * p_zoom + 0.15 * p_hfzoom
+        res["5-View Multi-Scale & Góc"] = 0.30 * p_orig + 0.30 * p_hflip + 0.20 * p_zoom + 0.10 * p_rneg + 0.10 * p_rpos
+        res["6-View Toàn diện"] = 0.25 * p_orig + 0.25 * p_hflip + 0.15 * p_zoom + 0.15 * p_hfzoom + 0.10 * p_rneg + 0.10 * p_rpos
+
+    return res
 
 
 def main() -> int:
@@ -349,22 +362,29 @@ def main() -> int:
 
     # Graph warmup on GPU
     try:
-        w_imgs = tf.concat([first_inputs["image"][:min(len(first_inputs["image"]), 16)]] * 6, axis=0)
+        n_views = 2 if args.two_view_only else 6
+        w_imgs = tf.concat([first_inputs["image"][:min(len(first_inputs["image"]), 16)]] * n_views, axis=0)
         w_dict = {"image": w_imgs}
         if "mask" in first_inputs and first_inputs["mask"] is not None:
-            w_dict["mask"] = tf.concat([first_inputs["mask"][:min(len(first_inputs["mask"]), 16)]] * 6, axis=0)
+            w_dict["mask"] = tf.concat([first_inputs["mask"][:min(len(first_inputs["mask"]), 16)]] * n_views, axis=0)
         _ = predict_fn(w_dict)
-        print(f"[INFO] GPU Graph compiled and warmed up. Dataset cached in RAM ({total_batches} batches).", flush=True)
+        print(f"[INFO] GPU Graph compiled and warmed up ({n_views} views). Dataset cached in RAM ({total_batches} batches).", flush=True)
     except Exception as e:
         print(f"[INFO] Graph notice: {e}", flush=True)
 
-    strategy_names = [
-        "No-TTA",
-        "2-View TTA",
-        "4-View Multi-Scale",
-        "5-View Multi-Scale & Góc",
-        "6-View Toàn diện",
-    ]
+    if args.two_view_only:
+        strategy_names = [
+            "No-TTA",
+            "2-View TTA",
+        ]
+    else:
+        strategy_names = [
+            "No-TTA",
+            "2-View TTA",
+            "4-View Multi-Scale",
+            "5-View Multi-Scale & Góc",
+            "6-View Toàn diện",
+        ]
 
     probs_cache: Dict[str, Dict[str, np.ndarray]] = {}
     y_true_holder: List[np.ndarray] = []
@@ -476,6 +496,7 @@ def evaluate_checkpoint_group(
                 dataset,
                 crop_fraction=args.crop_fraction,
                 rot_deg=args.rot_deg,
+                two_view_only=args.two_view_only,
                 predict_fn=predict_fn,
                 total_batches=total_batches,
             )
@@ -488,13 +509,19 @@ def evaluate_checkpoint_group(
 
     # Compute Ensemble View Probabilities for this group
     ensemble_view_probs: Dict[str, np.ndarray] = {}
-    for v_name in ["orig", "hflip", "zoom", "hflip_zoom", "rot_neg", "rot_pos"]:
+    for v_name in group_probs[0].keys():
         stacked = np.stack([m[v_name] for m in group_probs], axis=0)
         ensemble_view_probs[v_name] = np.mean(stacked, axis=0)
 
-    print("\n" + "=" * 105)
-    print(f" {'Mô hình / Checkpoint':<25} | {'No-TTA':^13} | {'2-View TTA':^13} | {'4-View MS':^13} | {'5-View Góc':^13} | {'6-View All':^13}")
-    print("-" * 105)
+    col_w = 16
+    header_cols = " | ".join(f"{s:^{col_w}}" for s in strategy_names)
+    header_str = f" {'Mô hình / Checkpoint':<25} | {header_cols}"
+    border_line = "=" * len(header_str)
+    sep_line = "-" * len(header_str)
+
+    print("\n" + border_line)
+    print(header_str)
+    print(sep_line)
 
     all_table_data = []
     for prefix, m_probs in zip(prefixes, group_probs):
@@ -505,7 +532,8 @@ def evaluate_checkpoint_group(
             acc = float(classification_metrics(y_true.tolist(), preds.tolist(), class_names)["accuracy"]) * 100.0
             row_accs[s_name] = acc
         all_table_data.append((prefix.name, row_accs))
-        print(f" {prefix.name:<25} | {row_accs['No-TTA']:^11.2f}% | {row_accs['2-View TTA']:^11.2f}% | {row_accs['4-View Multi-Scale']:^11.2f}% | {row_accs['5-View Multi-Scale & Góc']:^11.2f}% | {row_accs['6-View Toàn diện']:^11.2f}%")
+        row_cols = " | ".join(f"{row_accs[s]:^{col_w-1}.2f}%" for s in strategy_names)
+        print(f" {prefix.name:<25} | {row_cols}")
 
     ens_strats = compute_tta_strategies(ensemble_view_probs)
     ens_accs = {}
@@ -516,9 +544,11 @@ def evaluate_checkpoint_group(
         ens_accs[s_name] = float(m["accuracy"]) * 100.0
         ens_metrics[s_name] = m
 
-    print("-" * 105)
-    print(f" ⭐ {'ENSEMBLE TOP-' + str(len(prefixes)):<22} | {ens_accs['No-TTA']:^11.2f}% | {ens_accs['2-View TTA']:^11.2f}% | {ens_accs['4-View Multi-Scale']:^11.2f}% | {ens_accs['5-View Multi-Scale & Góc']:^11.2f}% | {ens_accs['6-View Toàn diện']:^11.2f}%")
-    print("=" * 105)
+    print(sep_line)
+    ens_cols = " | ".join(f"{ens_accs[s]:^{col_w-1}.2f}%" for s in strategy_names)
+    ens_title = f"⭐ ENSEMBLE TOP-{len(prefixes)}"
+    print(f" {ens_title:<25} | {ens_cols}")
+    print(border_line)
 
     best_strat_name = max(ens_accs, key=ens_accs.get)
     best_acc = ens_accs[best_strat_name]
