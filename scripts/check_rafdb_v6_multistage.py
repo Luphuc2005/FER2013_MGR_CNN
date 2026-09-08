@@ -217,7 +217,7 @@ def smoke_model(tf, cfg):
     assert model.stage_fusion_train_metrics.snapshot()["stage_fusion_samples"] == 0
     print(f"V6_MULTISTAGE_MODEL_SMOKE_OK synthetic_batch=2 loss={float(loss):.6f}; "
           "real pretrained/prototypes loaded; head gradients finite. "
-          "Full batch32 SAM VRAM and dataset remain untested.", flush=True)
+          f"Full batch{cfg['runtime']['batch_size_per_gpu']} SAM VRAM and dataset remain untested.", flush=True)
 
 
 def main():

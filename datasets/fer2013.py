@@ -703,6 +703,11 @@ def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.D
                 )
                 print(f"[Synthetic Diffusion] Successfully injected {len(syn_imgs)} accepted synthetic samples into TRAIN dataset.")
 
+    if (cfg.get("training", {}).get("weighted_ce", {}).get("enabled", False)
+            or cfg.get("training", {}).get("loss") == "weighted_cross_entropy"):
+        from utils.ce_class_weights import configure_training_ce_weights
+        configure_training_ce_weights(cfg, records["train"].labels)
+
     return (
         make_dataset(records["train"], cfg, split="train", training=True, replicas=replicas),
         make_dataset(records["val"], cfg, split="val", training=False, replicas=replicas),

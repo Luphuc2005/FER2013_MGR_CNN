@@ -51,6 +51,7 @@ from losses.classification import supervised_mgr_loss
 from metrics.classification import classification_metrics, save_metrics
 from models import ConvNeXtBaseFaceFERBaseline, ConvNeXtBaseImageNetFERBaseline, IR50FERBaseline, MGRConvNeXtFER
 from utils.ranked_checkpoint_manager import RankedCheckpointManager
+from utils.ce_class_weights import training_ce_kwargs
 from utils.semantic_schedule import configured_lambda_sem, resolve_lambda_sem
 
 
@@ -571,6 +572,7 @@ def make_step_function(
     lambda_sem_runtime: Optional[tf.Variable] = None,
 ):
     loss_cfg = cfg["training"]
+    ce_kwargs = training_ce_kwargs(cfg)
     label_smoothing = float(loss_cfg.get("label_smoothing", 0.0))
     ortho_weight = float(cfg["model"].get("ortho_loss_weight", 0.003))
     cnn_aux_weight = float(cfg["model"].get("cnn_aux_loss_weight", 0.4))
@@ -636,6 +638,7 @@ def make_step_function(
             raw_loss, parts = supervised_mgr_loss(
                 labels,
                 loss_outputs,
+                **ce_kwargs,
                 num_classes=cfg["data"]["num_classes"],
                 label_smoothing=label_smoothing,
                 ortho_weight=ortho_weight,
@@ -680,6 +683,7 @@ def make_step_function(
             raw_loss_2, _ = supervised_mgr_loss(
                 labels,
                 loss_outputs_2,
+                **ce_kwargs,
                 num_classes=cfg["data"]["num_classes"],
                 label_smoothing=label_smoothing,
                 ortho_weight=ortho_weight,
@@ -1029,6 +1033,13 @@ def main() -> int:
     logs_dir = Path(cfg["paths"]["logs_dir"])
     logs_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_root = run_dir / "checkpoints"
+    if cfg["training"].get("weighted_ce", {}).get("enabled", False):
+        (run_dir / "ce_class_weights.json").write_text(
+            json.dumps(cfg["training"]["resolved_ce_weight_report"], indent=2), encoding="utf-8"
+        )
+        (run_dir / "effective_config.json").write_text(
+            json.dumps(cfg, indent=2), encoding="utf-8"
+        )
 
     with strategy.scope():
         model = build_model(cfg)
@@ -1090,6 +1101,7 @@ def main() -> int:
     first_loss, _ = supervised_mgr_loss(
         first_labels,
         first_outputs,
+        **training_ce_kwargs(cfg),
         num_classes=cfg["data"]["num_classes"],
         label_smoothing=float(cfg["training"].get("label_smoothing", 0.0)),
         ortho_weight=float(cfg["model"].get("ortho_loss_weight", 0.003)),
@@ -1139,6 +1151,12 @@ def main() -> int:
         mode="min",
         history_csv=csv_path,
     )
+    macro_manager = None
+    if cfg["training"].get("weighted_ce", {}).get("enabled", False) and monitor_name == "val_macro_f1":
+        macro_manager = RankedCheckpointManager(
+            checkpoint=checkpoint, directory=checkpoint_root / "best_macro_f1",
+            max_to_keep=1, metric_name="val_macro_f1", mode="max", history_csv=csv_path,
+        )
     progress_interval = int(cfg["training"].get("progress_interval", 0) or 0)
     periodic_interval = int(cfg["training"].get("periodic_checkpoint_interval", 10) or 0)
     eval_strategy = strategy if bool(cfg["runtime"].get("distributed_eval", False)) else None
@@ -1344,6 +1362,13 @@ def main() -> int:
                 flush=True,
             )
         if checkpoint_eligible:
+            if macro_manager is not None:
+                macro_decision = macro_manager.consider(
+                    epoch=epoch + 1, metric=float(val_metrics["macro_f1"]),
+                    metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
+                )
+                if macro_decision["saved"]:
+                    print(f"[BEST_MACRO_F1] Saved ckpt-{epoch+1}: val_macro_f1={val_metrics['macro_f1']:.8f}", flush=True)
             acc_decision = best_manager.consider(
                 epoch=epoch + 1,
                 metric=val_acc_val,
@@ -1435,6 +1460,12 @@ def main() -> int:
             "phase_transitioned": int(phase_transitioned),
             "improved": int(improved),
         }
+        if cfg["training"].get("weighted_ce", {}).get("enabled", False):
+            for class_name in ("fear", "disgust"):
+                class_metrics = val_metrics["classification_report"][class_name]
+                for metric in ("precision", "recall", "f1-score"):
+                    row[f"val_{class_name}_{metric.replace('-score', '')}"] = float(class_metrics[metric])
+            print(f"[MINORITY_VAL] fear_f1={row['val_fear_f1']:.6f} disgust_f1={row['val_disgust_f1']:.6f}", flush=True)
         if fusion_train_values is not None:
             from utils.stage_fusion_metrics import append_fusion_epoch
             fusion_val_values = {key: val_metrics[key] for key in fusion_train_values}
@@ -1474,7 +1505,12 @@ def main() -> int:
     else:
         print("[INFO] No new training epochs were run; skipping training_history.csv update.", flush=True)
 
-    best_ckpt = best_manager.latest_checkpoint or last_manager.latest_checkpoint
+    selection_manager = macro_manager if macro_manager is not None else best_manager
+    best_ckpt = selection_manager.latest_checkpoint or last_manager.latest_checkpoint
+    if macro_manager is not None and macro_manager.entries:
+        best_epoch = int(macro_manager.entries[0]["epoch"])
+        best_score = float(macro_manager.entries[0]["metric"])
+        print(f"[SELECTED_ON_VALIDATION] metric=val_macro_f1 epoch={best_epoch} score={best_score:.8f}", flush=True)
     if best_ckpt:
         checkpoint.restore(best_ckpt).expect_partial()
         print(f"[INFO] Restored best checkpoint: {best_ckpt}", flush=True)

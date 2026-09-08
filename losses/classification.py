@@ -49,6 +49,7 @@ def supervised_mgr_loss(
     num_classes: int,
     label_smoothing: float = 0.0,
     class_weights: Optional[tf.Tensor] = None,
+    class_weight_reduction: str = "sum_weights",
     ortho_weight: float = 0.003,
     cnn_aux_weight: float = 0.4,
 ) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
@@ -61,7 +62,13 @@ def supervised_mgr_loss(
         ce = tf.keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True)
     if class_weights is not None:
         weights = tf.cast(tf.gather(class_weights, labels), tf.float32)
-        ce = tf.reduce_sum(ce * weights) / tf.reduce_sum(weights)
+        if class_weight_reduction == "batch_mean":
+            # Weights have mean one over TRAIN, independent of batch composition.
+            ce = tf.reduce_mean(ce * weights)
+        elif class_weight_reduction == "sum_weights":
+            ce = tf.reduce_sum(ce * weights) / tf.reduce_sum(weights)
+        else:
+            raise ValueError(f"Unknown class_weight_reduction: {class_weight_reduction}")
     else:
         ce = tf.reduce_mean(ce)
     ce = tf.cast(ce, tf.float32)
