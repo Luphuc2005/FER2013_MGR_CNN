@@ -40,6 +40,7 @@ nvidia-smi
   --config "$CONFIG" \
   --checkpoint-dirs "$CKPT_BEST_ACC" "$CKPT_BEST_LOSS" \
   --split test \
+  --batch-size 32 \
   --output "$OUTPUT_DIR/eval_ensemble_best_acc_and_loss_report.json"
 
 echo "=========================================================================="
