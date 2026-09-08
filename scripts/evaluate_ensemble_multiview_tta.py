@@ -48,9 +48,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--checkpoint-dir",
-        type=str,
+        "--checkpoint-dirs",
+        nargs="+",
+        dest="checkpoint_dirs",
         default=None,
-        help="Directory containing checkpoints (default: outputs/.../checkpoints/best)",
+        help="One or more directories containing checkpoints (e.g. checkpoints/best checkpoints/best_loss)",
     )
     parser.add_argument(
         "--checkpoints",
@@ -278,26 +280,31 @@ def main() -> int:
     if not out_dir.is_absolute():
         out_dir = PROJECT_ROOT / out_dir
 
-    if args.checkpoint_dir:
-        ckpt_dir = Path(args.checkpoint_dir)
+    target_dirs = []
+    if args.checkpoint_dirs:
+        for d in args.checkpoint_dirs:
+            p = Path(d)
+            if not p.is_absolute():
+                p = PROJECT_ROOT / p
+            if p.exists():
+                target_dirs.append(p)
+            else:
+                print(f"[WARNING] Checkpoint directory not found: {p}")
     else:
-        ckpt_dir = out_dir / "checkpoints" / "best"
-        if not ckpt_dir.exists():
-            ckpt_dir = out_dir / "checkpoints" / "best_loss"
+        best_dir = out_dir / "checkpoints" / "best"
+        loss_dir = out_dir / "checkpoints" / "best_loss"
+        if best_dir.exists():
+            target_dirs.append(best_dir)
+        if loss_dir.exists():
+            target_dirs.append(loss_dir)
+        if not target_dirs:
+            fallback = out_dir / "checkpoints"
+            if fallback.exists():
+                target_dirs.append(fallback)
 
-    ckpt_prefixes = get_checkpoint_list(ckpt_dir, args.checkpoints)
-    if not ckpt_prefixes:
-        print(f"[ERROR] No checkpoint index files found in: {ckpt_dir}")
+    if not target_dirs and not args.checkpoints:
+        print(f"[ERROR] No valid checkpoint directories found for {cfg_path.name}")
         return 1
-
-    print("\n" + "=" * 90)
-    print("      TOP-5 CHECKPOINTS ENSEMBLE + MULTI-VIEW / MULTI-SCALE TTA (RAF-DB)")
-    print("=" * 90)
-    print(f" Config:         {cfg_path.name}")
-    print(f" Checkpoint Dir: {ckpt_dir}")
-    print(f" Found:          {len(ckpt_prefixes)} checkpoint(s): {[p.name for p in ckpt_prefixes]}")
-    print(f" Target Split:   {args.split.upper()}")
-    print("=" * 90 + "\n")
 
     replicas = strategy.num_replicas_in_sync if strategy else 1
     _, val_ds, test_ds = build_datasets(cfg, replicas=replicas)
@@ -311,28 +318,6 @@ def main() -> int:
         model = build_model(cfg)
         _ = model(first_inputs, training=False)
 
-    all_models_view_probs: List[Dict[str, np.ndarray]] = []
-    y_true: Optional[np.ndarray] = None
-
-    # Step 1: Extract view probabilities for each checkpoint
-    for idx, prefix in enumerate(ckpt_prefixes, 1):
-        print(f"[MODEL {idx}/{len(ckpt_prefixes)}] Loading weights: {prefix.name} ...")
-        restore_model_weights(model, prefix)
-
-        probs_dict, labels = extract_view_probs_single_model(
-            model, dataset, crop_fraction=args.crop_fraction, rot_deg=args.rot_deg
-        )
-        all_models_view_probs.append(probs_dict)
-        if y_true is None:
-            y_true = labels
-
-    # Step 2: Compute Ensemble View Probabilities (Averaging across checkpoints for each view)
-    ensemble_view_probs: Dict[str, np.ndarray] = {}
-    for v_name in ["orig", "hflip", "zoom", "hflip_zoom", "rot_neg", "rot_pos"]:
-        stacked = np.stack([m[v_name] for m in all_models_view_probs], axis=0) # [M, N, C]
-        ensemble_view_probs[v_name] = np.mean(stacked, axis=0)
-
-    # Step 3: Evaluate Individual Checkpoints and Grand Ensemble across all 5 strategies
     strategy_names = [
         "No-TTA",
         "2-View TTA",
@@ -341,14 +326,101 @@ def main() -> int:
         "6-View Toàn diện",
     ]
 
+    probs_cache: Dict[str, Dict[str, np.ndarray]] = {}
+    y_true_holder: List[np.ndarray] = []
+    all_group_results: List[Dict[str, Any]] = []
+    all_collected_prefixes: List[Path] = []
+
+    if args.checkpoints:
+        ckpts = get_checkpoint_list(Path("."), args.checkpoints)
+        res = evaluate_checkpoint_group(
+            "Explicit Checkpoint List", ckpts, model, dataset, args, class_names, strategy_names, probs_cache, y_true_holder
+        )
+        all_group_results.append(res)
+    else:
+        for cdir in target_dirs:
+            ckpts = get_checkpoint_list(cdir)
+            if not ckpts:
+                print(f"[WARNING] No checkpoint index files in: {cdir}")
+                continue
+            for p in ckpts:
+                if p not in all_collected_prefixes:
+                    all_collected_prefixes.append(p)
+            g_title = f"Checkpoints Group: {cdir.name} ({cdir.parent.name}/{cdir.name})"
+            res = evaluate_checkpoint_group(
+                g_title, ckpts, model, dataset, args, class_names, strategy_names, probs_cache, y_true_holder
+            )
+            all_group_results.append(res)
+
+        # If multiple directories were evaluated (e.g. best and best_loss), evaluate the GRAND JOINT ENSEMBLE!
+        if len(target_dirs) > 1 and len(all_collected_prefixes) > len(all_group_results[0]["prefixes"]):
+            grand_title = "⭐ GRAND JOINT ENSEMBLE (BEST VAL ACC + BEST LOSS COMBINED) ⭐"
+            grand_res = evaluate_checkpoint_group(
+                grand_title, all_collected_prefixes, model, dataset, args, class_names, strategy_names, probs_cache, y_true_holder
+            )
+            all_group_results.append(grand_res)
+
+    if args.output:
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        report = {
+            "config": str(cfg_path),
+            "target_dirs": [str(d) for d in target_dirs],
+            "split": args.split,
+            "groups": all_group_results,
+        }
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        print(f"\n[INFO] Báo cáo chi tiết đã lưu vào: {out_path}")
+
+    return 0
+
+
+def evaluate_checkpoint_group(
+    group_title: str,
+    prefixes: List[Path],
+    model: tf.keras.Model,
+    dataset: tf.data.Dataset,
+    args: argparse.Namespace,
+    class_names: List[str],
+    strategy_names: List[str],
+    probs_cache: Dict[str, Dict[str, np.ndarray]],
+    y_true_holder: List[np.ndarray],
+) -> Dict[str, Any]:
+    print("\n" + "=" * 105)
+    print(f"      {group_title.upper()}")
+    print("=" * 105)
+    print(f" Số lượng checkpoints: {len(prefixes)} -> {[p.name for p in prefixes]}")
+    print("=" * 105 + "\n")
+
+    group_probs = []
+    for idx, prefix in enumerate(prefixes, 1):
+        k = str(prefix)
+        if k not in probs_cache:
+            print(f"[{group_title} | Model {idx}/{len(prefixes)}] Loading weights: {prefix.name} ...")
+            restore_model_weights(model, prefix)
+            p_dict, labels = extract_view_probs_single_model(
+                model, dataset, crop_fraction=args.crop_fraction, rot_deg=args.rot_deg
+            )
+            probs_cache[k] = p_dict
+            if not y_true_holder:
+                y_true_holder.append(labels)
+        group_probs.append(probs_cache[k])
+
+    y_true = y_true_holder[0]
+
+    # Compute Ensemble View Probabilities for this group
+    ensemble_view_probs: Dict[str, np.ndarray] = {}
+    for v_name in ["orig", "hflip", "zoom", "hflip_zoom", "rot_neg", "rot_pos"]:
+        stacked = np.stack([m[v_name] for m in group_probs], axis=0)
+        ensemble_view_probs[v_name] = np.mean(stacked, axis=0)
+
     print("\n" + "=" * 105)
     print(f" {'Mô hình / Checkpoint':<25} | {'No-TTA':^13} | {'2-View TTA':^13} | {'4-View MS':^13} | {'5-View Góc':^13} | {'6-View All':^13}")
     print("-" * 105)
 
     all_table_data = []
-
-    # Individual models
-    for idx, (prefix, m_probs) in enumerate(zip(ckpt_prefixes, all_models_view_probs), 1):
+    for prefix, m_probs in zip(prefixes, group_probs):
         strats = compute_tta_strategies(m_probs)
         row_accs = {}
         for s_name in strategy_names:
@@ -358,7 +430,6 @@ def main() -> int:
         all_table_data.append((prefix.name, row_accs))
         print(f" {prefix.name:<25} | {row_accs['No-TTA']:^11.2f}% | {row_accs['2-View TTA']:^11.2f}% | {row_accs['4-View Multi-Scale']:^11.2f}% | {row_accs['5-View Multi-Scale & Góc']:^11.2f}% | {row_accs['6-View Toàn diện']:^11.2f}%")
 
-    # Grand Ensemble
     ens_strats = compute_tta_strategies(ensemble_view_probs)
     ens_accs = {}
     ens_metrics = {}
@@ -369,53 +440,42 @@ def main() -> int:
         ens_metrics[s_name] = m
 
     print("-" * 105)
-    print(f" ⭐ {'ENSEMBLE TOP-' + str(len(ckpt_prefixes)):<22} | {ens_accs['No-TTA']:^11.2f}% | {ens_accs['2-View TTA']:^11.2f}% | {ens_accs['4-View Multi-Scale']:^11.2f}% | {ens_accs['5-View Multi-Scale & Góc']:^11.2f}% | {ens_accs['6-View Toàn diện']:^11.2f}%")
+    print(f" ⭐ {'ENSEMBLE TOP-' + str(len(prefixes)):<22} | {ens_accs['No-TTA']:^11.2f}% | {ens_accs['2-View TTA']:^11.2f}% | {ens_accs['4-View Multi-Scale']:^11.2f}% | {ens_accs['5-View Multi-Scale & Góc']:^11.2f}% | {ens_accs['6-View Toàn diện']:^11.2f}%")
     print("=" * 105)
 
-    # Find the absolute best strategy on ensemble
     best_strat_name = max(ens_accs, key=ens_accs.get)
     best_acc = ens_accs[best_strat_name]
     baseline_acc = all_table_data[0][1]["No-TTA"] if all_table_data else ens_accs["No-TTA"]
     best_m = ens_metrics[best_strat_name]
 
-    print(f"\n[KẾT QUẢ VƯỢT TRỘI NHẤT]:")
-    print(f"  -> Cấu hình:  ENSEMBLE TOP-{len(ckpt_prefixes)} + {best_strat_name}")
+    print(f"\n[{group_title} - KẾT QUẢ VƯỢT TRỘI NHẤT]:")
+    print(f"  -> Cấu hình:  ENSEMBLE TOP-{len(prefixes)} + {best_strat_name}")
     print(f"  -> Accuracy:  {best_acc:.2f}% (Tăng {best_acc - baseline_acc:+.2f}% so với ảnh gốc đơn lẻ)")
     print(f"  -> Macro F1:  {float(best_m['macro_f1']):.4f}")
     print(f"  -> Weighted:  {float(best_m['weighted_f1']):.4f}")
 
-    # Per-class Recall Comparison
     print(f"\n[BẢNG RECALL CHI TIẾT TỪNG LỚP: Đơn lẻ No-TTA vs ENSEMBLE + {best_strat_name}]")
     print(f" {'Cảm xúc':<14} | {'Recall Đơn lẻ':^16} | {'Recall Ensemble Best':^24} | {'Tăng trưởng':^14}")
     print("-" * 72)
-    single_no_tta_m = classification_metrics(y_true.tolist(), np.argmax(all_models_view_probs[0]["orig"], axis=-1).tolist(), class_names)
+    single_no_tta_m = classification_metrics(y_true.tolist(), np.argmax(group_probs[0]["orig"], axis=-1).tolist(), class_names)
     for c_idx, c_name in enumerate(class_names):
         r_base = float(single_no_tta_m["per_class_accuracy"][c_idx]) * 100.0
         r_best = float(best_m["per_class_accuracy"][c_idx]) * 100.0
         diff = r_best - r_base
         diff_str = f"{diff:+.2f}%" if diff != 0 else "="
         print(f" {c_name:<14} | {r_base:^14.2f}% | {r_best:^22.2f}% | {diff_str:^14}")
-    print("-" * 72)
+    print("-" * 72 + "\n")
 
-    if args.output:
-        out_path = Path(args.output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        report = {
-            "checkpoint_dir": str(ckpt_dir),
-            "checkpoints": [p.name for p in ckpt_prefixes],
-            "split": args.split,
-            "individual_models": [{"name": name, "accuracies": accs} for name, accs in all_table_data],
-            "ensemble_accuracies": ens_accs,
-            "best_combination": f"Ensemble Top-{len(ckpt_prefixes)} + {best_strat_name}",
-            "best_accuracy": best_acc / 100.0,
-            "best_macro_f1": float(best_m["macro_f1"]),
-            "best_per_class_recall": [float(v) for v in best_m["per_class_accuracy"]],
-        }
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
-        print(f"\n[INFO] Báo cáo chi tiết đã lưu vào: {out_path}")
-
-    return 0
+    return {
+        "group_title": group_title,
+        "prefixes": [p.name for p in prefixes],
+        "individual_models": [{"name": name, "accuracies": accs} for name, accs in all_table_data],
+        "ensemble_accuracies": ens_accs,
+        "best_combination": f"Ensemble Top-{len(prefixes)} + {best_strat_name}",
+        "best_accuracy": best_acc / 100.0,
+        "best_macro_f1": float(best_m["macro_f1"]),
+        "best_per_class_recall": [float(v) for v in best_m["per_class_accuracy"]],
+    }
 
 
 if __name__ == "__main__":
