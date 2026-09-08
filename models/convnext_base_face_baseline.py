@@ -386,6 +386,32 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         else:
             self.dynamic_part_attn = None
 
+        # ECA variant of v5 Combined Ultimate: recalibrate only the regional
+        # input; the backbone's Stage-4 computation remains unchanged.
+        self.use_stage3_eca = bool(model_cfg.get("use_stage3_eca", False))
+        self.stage3_eca = None
+        if self.use_stage3_eca:
+            if not self.use_dynamic_part_attention or self.use_soft_regional_pooling:
+                raise ValueError("Stage-3 ECA requires dynamic part attention and no soft regional pooling.")
+            self.stage3_eca = ECALayer(channels=512, name="stage3_eca")
+
+        # V6 reuses the semantic branch's dynamic regions in the FER classifier.
+        # Disabled by default so existing v5 weights and forward paths stay valid.
+        self.use_global_regional_fusion = bool(model_cfg.get("use_global_regional_fusion", False))
+        self.global_regional_fusion = None
+        if self.use_global_regional_fusion:
+            if not (self.use_dynamic_part_attention and self.use_semantic_branch and self.use_au_region_routed):
+                raise ValueError("Global regional fusion requires dynamic part attention and routed semantics.")
+            if self.use_soft_regional_pooling:
+                raise ValueError("Global regional fusion uses dynamic parts; disable soft_regional_pooling.")
+            if model_cfg.get("checkpoint_path"):
+                raise ValueError("Initialize v6 from the MS1M backbone; FER checkpoint_path is unsupported.")
+            from .global_regional_fusion import GlobalRegionalFusion
+            self.global_regional_fusion = GlobalRegionalFusion(
+                projection_dim=int(model_cfg.get("global_regional_projection_dim", 256)),
+                dtype="float32", name="global_regional_fusion",
+            )
+
         if self.use_semantic_branch:
             embed_dim = int(clip_sem_cfg.get("clip_embedding_dim", model_cfg.get("clip_embedding_dim", 512)))
             self.visual_projector = tf.keras.Sequential([
@@ -954,6 +980,12 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             print(f"[ConvNeXtBaseFace]   Backbone trainable params: {backbone_params:,}", flush=True)
             print(f"[ConvNeXtBaseFace]   Total trainable params: {total_params:,}", flush=True)
 
+        if self.use_stage3_eca:
+            print(
+                f"[ConvNeXtBaseFace] Stage-3 regional ECA: kernel={self.stage3_eca.k_size}, "
+                f"params={self.stage3_eca.count_params()}, output={endpoints['stage3_eca'].shape}",
+                flush=True,
+            )
         if self.use_eca and self.stage4_eca is not None:
             eca_params = int(np.sum([np.prod(v.shape) for v in self.stage4_eca.trainable_variables]))
             backbone_params = int(np.sum([np.prod(v.shape) for v in self.backbone.trainable_variables]))
@@ -996,8 +1028,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             feat = self.stage4_eca(feat, training=training)
             endpoints["stage4_eca"] = feat
         pooled = self.gap(feat)
-        dropped = self.head_dropout(pooled, training=training)
-        logits = self.classifier(dropped)
+        if not self.use_global_regional_fusion:
+            dropped = self.head_dropout(pooled, training=training)
+            logits = self.classifier(dropped)
 
         semantic_logits = None
         agg_sim = None
@@ -1017,6 +1050,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             if self.use_au_region_routed and self.visual_projector_upper is not None:
                 # Extract Stage 3 spatial feature maps [B, 14, 14, 512]
                 stage3_feat = endpoints.get("stage3_adapter", endpoints.get("stage3"))
+                if self.use_stage3_eca:
+                    stage3_feat = self.stage3_eca(stage3_feat, training=training)
+                    endpoints["stage3_eca"] = stage3_feat
                 if self.use_dynamic_part_attention and self.dynamic_part_attn is not None:
                     z_upper, z_lower, z_au, attn_maps = self.dynamic_part_attn(stage3_feat, training=training)
                     endpoints["part_attention_maps"] = attn_maps
@@ -1105,6 +1141,20 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             semantic_logits = tf.where(tf.math.is_finite(semantic_logits), semantic_logits, tf.zeros_like(semantic_logits))
             endpoints["semantic_logits"] = semantic_logits
 
+        if self.use_global_regional_fusion:
+            head_features = self.global_regional_fusion(
+                (pooled, z_upper, z_lower, z_au), training=training,
+            )
+            dropped = self.head_dropout(head_features, training=training)
+            logits = self.classifier(dropped)
+            endpoints["global_regional_features"] = head_features
+            if not self._shape_logged:
+                print(
+                    f"[GlobalRegionalFusion] global={pooled.shape} "
+                    f"upper={z_upper.shape} lower={z_lower.shape} au={z_au.shape} "
+                    f"concat={head_features.shape} logits={logits.shape}", flush=True,
+                )
+
         visual_logits = tf.cast(logits, tf.float32)
         if self.use_adaptive_fusion_gate and self.adaptive_fusion_gate is not None and semantic_logits is not None:
             alpha = self.adaptive_fusion_gate(pooled, training=training)  # [B, 1]
@@ -1118,7 +1168,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 fused_logits = visual_logits
 
         self._log_shapes_once(image, endpoints, pooled, dropped, logits)
-        return {
+        outputs = {
             "logits": fused_logits,
             "visual_logits": visual_logits,
             "semantic_logits": semantic_logits,
@@ -1133,6 +1183,21 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),
             "attention_logits": None,
         }
+        if self.use_global_regional_fusion:
+            outputs.update({
+                "global_features": pooled,
+                "regional_features": (z_upper, z_lower, z_au),
+                "global_regional_features": head_features,
+                "part_attention_maps": attn_maps,
+            })
+            if "adaptive_fusion_alpha" in endpoints:
+                outputs["adaptive_fusion_alpha"] = endpoints["adaptive_fusion_alpha"]
+        if self.use_stage3_eca:
+            outputs["part_attention_maps"] = attn_maps
+            outputs["regional_features"] = (z_upper, z_lower, z_au)
+            if "adaptive_fusion_alpha" in endpoints:
+                outputs["adaptive_fusion_alpha"] = endpoints["adaptive_fusion_alpha"]
+        return outputs
 
 
 
