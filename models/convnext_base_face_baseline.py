@@ -429,9 +429,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 gate_hidden_dim=int(model_cfg.get("multistage_gate_hidden_dim", 128)),
                 name="multistage_adaptive_fusion",
             )
-            # Updated explicitly by train.py, once per original SAM/eval forward.
+            # Train metrics share the training strategy. Evaluation creates
+            # fresh accumulators in its own execution scope in train.py.
             self.stage_fusion_train_metrics = StageFusionMetrics("stage_fusion_train")
-            self.stage_fusion_eval_metrics = StageFusionMetrics("stage_fusion_eval")
 
         if self.use_semantic_branch:
             embed_dim = int(clip_sem_cfg.get("clip_embedding_dim", model_cfg.get("clip_embedding_dim", 512)))

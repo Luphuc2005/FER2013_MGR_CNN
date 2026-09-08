@@ -14,6 +14,15 @@ cd "$ROOT"
 FER_PY="$ROOT/fer2013_env/bin/python"
 CONFIG="$ROOT/config_rafdb_siglip2_semantic_stable_v6_multistage_adaptive_fusion.yaml"
 OUTPUT_DIR="$ROOT/outputs/papers/rafdb_siglip2_semantic_stable_v6_multistage_adaptive_fusion_batch32"
+# Optional fresh run suffix; keep previous failed/successful artifacts intact.
+RUN_TAG="${RUN_TAG:-}"
+if [[ -n "$RUN_TAG" ]]; then
+    if [[ ! "$RUN_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+        echo "RUN_TAG must contain only letters, digits, underscores or hyphens."
+        exit 1
+    fi
+    OUTPUT_DIR="${OUTPUT_DIR}_${RUN_TAG}"
+fi
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 export OMP_NUM_THREADS=16
@@ -34,5 +43,5 @@ nvidia-smi
 echo "Config=$CONFIG Output=$OUTPUT_DIR Job=${SLURM_JOB_ID:-standalone}"
 "$FER_PY" -u scripts/check_rafdb_v6_multistage.py --config "$CONFIG" --smoke --model-smoke
 
-"$FER_PY" -u train.py --config "$CONFIG" --no-auto-increment
+MGR_OUTPUT_DIR="$OUTPUT_DIR" "$FER_PY" -u train.py --config "$CONFIG" --no-auto-increment
 echo "Finished: $OUTPUT_DIR (v6: S2/S3/S4 adaptive fusion; fusion_weights.csv)."

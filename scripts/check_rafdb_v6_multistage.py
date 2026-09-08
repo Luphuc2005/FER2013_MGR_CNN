@@ -129,6 +129,64 @@ def smoke_components(tf):
         tf.keras.mixed_precision.set_global_policy(original_policy)
 
 
+
+def smoke_evaluation_metrics(tf, cfg):
+    """Regression: model in MirroredStrategy, eval outside/inside strategy, TTA."""
+    import numpy as np
+    from train import evaluate_dataset
+    from utils.stage_fusion_metrics import StageFusionMetrics
+
+    devices = tf.config.list_logical_devices("GPU")
+    strategy = tf.distribute.MirroredStrategy(
+        devices=[device.name for device in devices] if devices else ["/cpu:0"],
+    )
+    replicas = strategy.num_replicas_in_sync
+
+    class ProbeModel(tf.Module):
+        def __init__(self):
+            super().__init__()
+            self.use_multistage_adaptive_fusion = True
+            self.bias = tf.Variable(tf.zeros([7]), trainable=False)
+            # Regression fixture: old evaluate_dataset incorrectly reused this.
+            self.stage_fusion_eval_metrics = StageFusionMetrics("legacy_eval_probe")
+
+        def __call__(self, inputs, training=False):
+            image = inputs["image"]
+            count = tf.shape(image)[0]
+            return {
+                "logits": tf.broadcast_to(self.bias, [count, 7]),
+                "stage_fusion_weights": image[:, 0, 0, :],
+                "adaptive_fusion_alpha": tf.fill([count, 1], 0.1),
+            }
+
+    with strategy.scope():
+        model = ProbeModel()
+    known = np.array([[0.6, 0.3, 0.1], [0.2, 0.3, 0.5], [0.1, 0.1, 0.8]], np.float32)
+    known = np.repeat(known, replicas, axis=0)
+    # Flip deliberately changes stage weights: diagnostics must retain original view.
+    images = np.stack([known, known[:, ::-1]], axis=1)[:, None, :, :]
+    labels = np.tile(np.arange(3, dtype=np.int32), replicas)
+    dataset = tf.data.Dataset.from_tensor_slices(({"image": images}, labels)).batch(2 * replicas)
+    options = tf.data.Options()
+    options.threading.private_threadpool_size = 1
+    dataset = dataset.with_options(options)
+    for eval_strategy in (None, strategy):
+        for tta in (False, True):
+            metrics = evaluate_dataset(model, dataset, cfg, strategy=eval_strategy, use_tta_hflip=tta)
+            assert metrics["stage_fusion_samples"] == len(known), "Count/reset/TTA duplication error."
+            assert metrics["stage_fusion_view"] == "original"
+            for index, stage in enumerate((2, 3, 4)):
+                np.testing.assert_allclose(metrics[f"stage_fusion_s{stage}_mean"],
+                                           known[:, index].mean(), atol=1e-6)
+                np.testing.assert_allclose(metrics[f"stage_fusion_s{stage}_std"],
+                                           known[:, index].std(), atol=1e-6)
+            np.testing.assert_allclose(metrics["semantic_fusion_alpha_mean"], 0.1, atol=1e-6)
+    assert model.stage_fusion_eval_metrics.snapshot()["stage_fusion_samples"] == 0
+    print(f"V6_FUSION_EVAL_SCOPE_SMOKE_OK replicas={replicas}: "
+          "model-in-strategy; ordinary/strategy eval; original-view TTA stats; fresh counts",
+          flush=True)
+
+
 def smoke_model(tf, cfg):
     """Uses real pretrained/prototype loading, synthetic images, and no optimizer step."""
     from train import build_model, compute_loss, split_variables
@@ -167,14 +225,17 @@ def main():
     parser.add_argument("--config", default=str(ROOT / f"config_{NAME}.yaml"))
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--model-smoke", action="store_true")
+    parser.add_argument("--metrics-smoke", action="store_true")
     args = parser.parse_args()
     cfg = check_contract(args.config)
-    if args.smoke or args.model_smoke:
+    if args.smoke or args.model_smoke or args.metrics_smoke:
         import tensorflow as tf
         for device in tf.config.list_physical_devices("GPU"):
             tf.config.experimental.set_memory_growth(device, True)
         if args.smoke:
             smoke_components(tf)
+        if args.smoke or args.metrics_smoke:
+            smoke_evaluation_metrics(tf, cfg)
         if args.model_smoke:
             smoke_model(tf, cfg)
 

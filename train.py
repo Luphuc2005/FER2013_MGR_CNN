@@ -765,9 +765,17 @@ def evaluate_dataset(
     else:
         print(f"[TTA] Horizontal Flip: DISABLED", flush=True)
 
-    fusion_eval_tracker = getattr(model, "stage_fusion_eval_metrics", None)
-    if fusion_eval_tracker is not None:
-        fusion_eval_tracker.reset_state()
+    # Evaluation may run outside the strategy used to create the model.
+    # Match accumulator variable ownership to the actual _eval_step execution:
+    # strategy.run only for >1 replicas; otherwise ordinary tf.function.
+    fusion_eval_tracker = None
+    if getattr(model, "use_multistage_adaptive_fusion", False):
+        from utils.stage_fusion_metrics import StageFusionMetrics
+        if strategy is not None and strategy.num_replicas_in_sync > 1:
+            with strategy.scope():
+                fusion_eval_tracker = StageFusionMetrics("stage_fusion_eval")
+        else:
+            fusion_eval_tracker = StageFusionMetrics("stage_fusion_eval")
 
     def _forward_outputs(inputs):
         outputs_orig = model(inputs, training=False)
