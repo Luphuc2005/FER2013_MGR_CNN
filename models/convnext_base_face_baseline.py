@@ -363,7 +363,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         )
 
         self.lambda_local_sem = float(
-            model_cfg.get("lambda_local_sem", clip_sem_cfg.get("lambda_local_sem", 0.02))
+            model_cfg.get("lambda_local_sem", clip_sem_cfg.get("lambda_local_sem", 0.0))
         )
 
         self.use_soft_regional_pooling = bool(model_cfg.get("use_soft_regional_pooling", False))
@@ -1241,6 +1241,16 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),
             "attention_logits": None,
         }
+        # The loss reads outputs, not backbone endpoints. LGSA remains opt-in
+        # through lambda_local_sem so other configs retain their original loss.
+        if "local_semantic_logits" in endpoints:
+            outputs.update({
+                "s_upper": endpoints["s_upper"],
+                "s_lower": endpoints["s_lower"],
+                "s_au": endpoints["s_au"],
+                "local_semantic_logits": endpoints["local_semantic_logits"],
+                "lambda_local_sem": endpoints["lambda_local_sem"],
+            })
         if self.use_global_regional_fusion:
             outputs.update({
                 "global_features": pooled,

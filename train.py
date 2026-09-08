@@ -48,6 +48,7 @@ tf.get_logger().setLevel('ERROR')
 from config import load_config, global_batch_size, resolve_auto_increment_output_dir
 from datasets.fer2013 import EMOTION_NAMES, build_datasets
 from losses.classification import supervised_mgr_loss
+from losses.rdrop import forward_training_loss
 from metrics.classification import classification_metrics, save_metrics
 from models import ConvNeXtBaseFaceFERBaseline, ConvNeXtBaseImageNetFERBaseline, IR50FERBaseline, MGRConvNeXtFER
 from utils.ranked_checkpoint_manager import RankedCheckpointManager
@@ -570,8 +571,12 @@ def make_step_function(
     optimizer_backbone=None,
     loss_scale: float = 1.0,
     lambda_sem_runtime: Optional[tf.Variable] = None,
+    rdrop_metrics=None,
 ):
     loss_cfg = cfg["training"]
+    lambda_rdrop = float(loss_cfg.get("lambda_rdrop", 0.0))
+    if not np.isfinite(lambda_rdrop) or lambda_rdrop < 0:
+        raise ValueError("training.lambda_rdrop must be finite and >= 0.")
     ce_kwargs = training_ce_kwargs(cfg)
     label_smoothing = float(loss_cfg.get("label_smoothing", 0.0))
     ortho_weight = float(cfg["model"].get("ortho_loss_weight", 0.003))
@@ -590,7 +595,7 @@ def make_step_function(
         finite_tensors = [tf.reduce_all(tf.math.is_finite(g)) for g in grads if g is not None]
         return tf.constant(True) if not finite_tensors else tf.reduce_all(tf.stack(finite_tensors))
 
-    def _batch_stats(outputs, labels):
+    def _batch_stats(outputs, labels, parts):
         preds = tf.argmax(outputs["logits"], axis=-1, output_type=tf.int32)
         correct = tf.reduce_sum(tf.cast(tf.equal(preds, labels), tf.int32))
         count = tf.shape(labels)[0]
@@ -610,6 +615,8 @@ def make_step_function(
             ent = -tf.reduce_sum(gw_f32 * tf.math.log(gw_f32 + 1e-9), axis=-1)
             entropy_sum = tf.reduce_sum(ent)
 
+        if rdrop_metrics is not None and lambda_rdrop > 0.0:
+            rdrop_metrics.update_state(parts, count)
         if outputs.get("stage_fusion_weights") is not None:
             model.stage_fusion_train_metrics.update_state(outputs)
         return correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum
@@ -631,13 +638,10 @@ def make_step_function(
 
     def _step_impl(features, labels, trainable_vars):
         with tf.GradientTape() as tape:
-            outputs = model(features, training=True)
-            loss_outputs = dict(outputs)
-            if lambda_sem_runtime is not None and outputs.get("semantic_logits") is not None:
-                loss_outputs["lambda_sem"] = lambda_sem_runtime.read_value()
-            raw_loss, parts = supervised_mgr_loss(
-                labels,
-                loss_outputs,
+            outputs, raw_loss, parts = forward_training_loss(
+                model, features, labels,
+                lambda_rdrop=lambda_rdrop,
+                lambda_sem_runtime=lambda_sem_runtime,
                 **ce_kwargs,
                 num_classes=cfg["data"]["num_classes"],
                 label_smoothing=label_smoothing,
@@ -653,7 +657,7 @@ def make_step_function(
 
         if not use_sam:
             _apply_gradients(grads, trainable_vars)
-            fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum = _batch_stats(outputs, labels)
+            fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum = _batch_stats(outputs, labels, parts)
             return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, tf.constant(1, tf.int32)
 
         grads = _clip_gradients(grads)
@@ -676,13 +680,10 @@ def make_step_function(
                 var.assign_add(eps)
 
         with tf.GradientTape() as tape2:
-            outputs_2 = model(features, training=True)
-            loss_outputs_2 = dict(outputs_2)
-            if lambda_sem_runtime is not None and outputs_2.get("semantic_logits") is not None:
-                loss_outputs_2["lambda_sem"] = lambda_sem_runtime.read_value()
-            raw_loss_2, _ = supervised_mgr_loss(
-                labels,
-                loss_outputs_2,
+            _, raw_loss_2, _ = forward_training_loss(
+                model, features, labels,
+                lambda_rdrop=lambda_rdrop,
+                lambda_sem_runtime=lambda_sem_runtime,
                 **ce_kwargs,
                 num_classes=cfg["data"]["num_classes"],
                 label_smoothing=label_smoothing,
@@ -700,7 +701,7 @@ def make_step_function(
             grads_2 = [tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) if g is not None else None for g in grads_2]
 
         _apply_gradients(grads_2, trainable_vars)
-        fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum = _batch_stats(outputs, labels)
+        fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum = _batch_stats(outputs, labels, parts)
         return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, tf.constant(1, tf.int32)
 
     def train_step_head(features, labels):
@@ -1069,6 +1070,19 @@ def main() -> int:
             trainable=False,
             name="lambda_sem_runtime",
         )
+        # Metrics live in the strategy scope but outside the model/checkpoint.
+        rdrop_train_tracker = None
+        lambda_rdrop = float(cfg["training"].get("lambda_rdrop", 0.0))
+        if not np.isfinite(lambda_rdrop) or lambda_rdrop < 0:
+            raise ValueError("training.lambda_rdrop must be finite and >= 0.")
+        if lambda_rdrop > 0:
+            from utils.rdrop_metrics import RDropMetrics
+            rdrop_train_tracker = RDropMetrics()
+            print(
+                f"[RDROP] lambda={lambda_rdrop}; symmetric KL on fused logits; "
+                "two same-input forwards per objective; both SAM passes use R-Drop; "
+                "validation/test inference unchanged.", flush=True,
+            )
         backbone_vars_for_optimizer, head_vars_for_optimizer = split_variables(model)
         ensure_optimizer_built(optimizer_head, head_vars_for_optimizer, strategy)
         ensure_optimizer_built(optimizer_backbone, backbone_vars_for_optimizer, strategy)
@@ -1124,6 +1138,7 @@ def main() -> int:
         optimizer_backbone,
         loss_scale=loss_scale,
         lambda_sem_runtime=lambda_sem_runtime,
+        rdrop_metrics=rdrop_train_tracker,
     )
     distributed_train_step_head = make_distributed_train_step(strategy, train_step_head)
     distributed_train_step_full = make_distributed_train_step(strategy, train_step_full)
@@ -1231,6 +1246,8 @@ def main() -> int:
                 f"override lr_head={lr:.6f} lr_backbone={backbone_lr:.6f}",
                 flush=True,
             )
+        if rdrop_train_tracker is not None:
+            rdrop_train_tracker.reset_state()
         total_losses = []
         ce_losses = []
         sem_losses = []
@@ -1274,6 +1291,9 @@ def main() -> int:
                     f"lr_head={lr:.6f} lr_backbone={backbone_lr:.2e}",
                     flush=True,
                 )
+                if rdrop_train_tracker is not None:
+                    from utils.rdrop_metrics import format_rdrop
+                    print("[RDROP][train running] " + format_rdrop(rdrop_train_tracker.snapshot()), flush=True)
                 if fusion_train_tracker is not None:
                     from utils.stage_fusion_metrics import format_stage_fusion
                     print(
@@ -1475,6 +1495,12 @@ def main() -> int:
                 run_dir / "fusion_weights.csv", epoch + 1,
                 fusion_train_values, fusion_val_values,
             )
+        if rdrop_train_tracker is not None:
+            from utils.rdrop_metrics import format_rdrop
+            rdrop_values = rdrop_train_tracker.snapshot()
+            row.update(rdrop_values)
+            row["lambda_rdrop"] = lambda_rdrop
+            print("[RDROP][train epoch] " + format_rdrop(rdrop_values), flush=True)
         history.append(row)
         gw_means_str = ",".join([f"{m:.3f}" for m in gw_means])
         print(
