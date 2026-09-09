@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=EVAL_V5_2VIEW_CPU
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=48G
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=64G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/EVAL_V5_2VIEW_CPU_%j.out
 #SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/EVAL_V5_2VIEW_CPU_%j.err
 
@@ -20,10 +20,10 @@ export CUDA_VISIBLE_DEVICES="-1"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 
-NCPUS="${SLURM_CPUS_PER_TASK:-16}"
+NCPUS="${SLURM_CPUS_PER_TASK:-32}"
 export OMP_NUM_THREADS="$NCPUS"
 export TF_NUM_INTRAOP_THREADS="$NCPUS"
-export TF_NUM_INTEROP_THREADS=2
+export TF_NUM_INTEROP_THREADS=4
 
 FER_PY="$ROOT/fer2013_env/bin/python"
 if [ ! -f "$FER_PY" ]; then

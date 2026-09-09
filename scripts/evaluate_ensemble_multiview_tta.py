@@ -258,9 +258,11 @@ def extract_view_probs_single_model(
 
         all_labels.append(batch_labels.numpy())
 
-        if total_batches and ((b_idx + 1) % 25 == 0 or (b_idx + 1) == total_batches):
+        step_report = 10 if total_batches and total_batches > 20 else 5
+        if total_batches and ((b_idx + 1) % step_report == 0 or (b_idx + 1) == total_batches):
             pct = ((b_idx + 1) / total_batches) * 100
-            print(f"    -> [GPU Inference] Batch {b_idx + 1}/{total_batches} ({pct:.0f}%)", flush=True)
+            dev_tag = "CPU" if (os.environ.get("CUDA_VISIBLE_DEVICES") == "-1" or len(tf.config.list_physical_devices("GPU")) == 0) else "GPU"
+            print(f"    -> [{dev_tag} Inference] Batch {b_idx + 1}/{total_batches} ({pct:.0f}%)", flush=True)
 
     concat_probs = {k: softmax(np.concatenate(v, axis=0)) for k, v in view_logits.items()}
     y_true = np.concatenate(all_labels, axis=0)
@@ -338,10 +340,24 @@ def main() -> int:
         cfg["runtime"]["fallback_batch_size_per_gpu"] = int(args.batch_size)
 
     is_cpu = bool(args.cpu or os.environ.get("CUDA_VISIBLE_DEVICES") == "-1" or len(tf.config.list_physical_devices("GPU")) == 0)
+    num_cpus = int(os.environ.get("SLURM_CPUS_PER_TASK") or os.cpu_count() or 16)
     if is_cpu:
         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
         try:
             tf.config.set_visible_devices([], "GPU")
+        except Exception:
+            pass
+        inter_cpus = max(2, min(8, num_cpus // 8))
+        cfg["runtime"]["intra_op_threads"] = num_cpus
+        cfg["runtime"]["inter_op_threads"] = inter_cpus
+        cfg["runtime"]["tf_data_num_parallel_calls"] = num_cpus
+        cfg["runtime"]["tf_data_private_threadpool_size"] = num_cpus
+        os.environ["OMP_NUM_THREADS"] = str(num_cpus)
+        os.environ["TF_NUM_INTRAOP_THREADS"] = str(num_cpus)
+        os.environ["TF_NUM_INTEROP_THREADS"] = str(inter_cpus)
+        try:
+            tf.config.threading.set_intra_op_parallelism_threads(num_cpus)
+            tf.config.threading.set_inter_op_parallelism_threads(inter_cpus)
         except Exception:
             pass
         cfg["runtime"]["allow_cpu_fallback"] = True
@@ -358,6 +374,7 @@ def main() -> int:
         strategy = tf.distribute.MirroredStrategy(devices=[f"/GPU:{i}" for i in range(max(visible_gpu_count, 1))])
     else:
         print("[INFO] Chế độ chạy: 100% CPU thuần túy (GPU đã được vô hiệu hóa, 0MB VRAM).", flush=True)
+        print(f"[INFO] ÉP FULL CPU HPC: Khởi chạy tối đa {num_cpus} luồng intra-op và {inter_cpus} luồng inter-op parallelism!", flush=True)
         strategy = tf.distribute.OneDeviceStrategy(device="/CPU:0")
 
     out_dir = Path(cfg["paths"]["output_dir"])

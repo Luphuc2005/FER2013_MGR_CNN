@@ -22,10 +22,10 @@ export CUDA_VISIBLE_DEVICES="-1"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 
-NCPUS=$(nproc 2>/dev/null || echo 8)
+NCPUS=$(nproc 2>/dev/null || echo 32)
 export OMP_NUM_THREADS="$NCPUS"
 export TF_NUM_INTRAOP_THREADS="$NCPUS"
-export TF_NUM_INTEROP_THREADS=2
+export TF_NUM_INTEROP_THREADS=4
 
 echo "=========================================================================="
 echo " Running Ensemble + Multi-View TTA + TTA Sweep (CPU Mode)"
