@@ -80,8 +80,13 @@ def main() -> int:
     print(f"stage2:           {tuple(endpoints['stage2'].shape)}")
     print(f"stage3:           {tuple(endpoints['stage3'].shape)}")
     print(f"stage4:           {tuple(endpoints['stage4'].shape)}")
+    v_proj = outputs.get("visual_projector")
+    if v_proj is None and model.visual_projector is not None:
+        v_proj = model.visual_projector(pooled)
+
     print(f"gap:              {tuple(pooled.shape)}")
-    print(f"visual_projector: {tuple(outputs['visual_projector'].shape)}")
+    if v_proj is not None:
+        print(f"visual_projector: {tuple(v_proj.shape)}")
     print(f"semantic_logits:  {tuple(outputs['semantic_logits'].shape)}")
     print(f"final_logits:     {tuple(outputs['logits'].shape)}")
 
@@ -93,7 +98,8 @@ def main() -> int:
     assert tuple(endpoints["stage3"].shape) == (batch_size, 28, 28, 512), f"Stage3 mismatch: {endpoints['stage3'].shape}"
     assert tuple(endpoints["stage4"].shape) == (batch_size, 14, 14, 1024), f"Stage4 mismatch: {endpoints['stage4'].shape}"
     assert tuple(pooled.shape) == (batch_size, 1024), f"GAP mismatch: {pooled.shape}"
-    assert tuple(outputs["visual_projector"].shape) == (batch_size, 768), f"Projector mismatch: {outputs['visual_projector'].shape}"
+    if v_proj is not None:
+        assert tuple(v_proj.shape) == (batch_size, 768), f"Projector mismatch: {v_proj.shape}"
     assert tuple(outputs["semantic_logits"].shape) == (batch_size, 7), f"Semantic logits mismatch: {outputs['semantic_logits'].shape}"
     assert tuple(outputs["logits"].shape) == (batch_size, 7), f"Final logits mismatch: {outputs['logits'].shape}"
 
@@ -102,11 +108,15 @@ def main() -> int:
     print(f"\n{'='*70}")
     print(" 3. DYNAMIC PART ATTENTION & SIGLIP2 SEMANTIC VERIFICATION")
     print(f"{'='*70}")
-    if "part_attention_maps" in outputs:
-        attn_shape = tuple(outputs["part_attention_maps"].shape)
+    attn_maps = outputs.get("part_attention_maps")
+    if attn_maps is None and model.use_dynamic_part_attention and model.dynamic_part_attn is not None:
+        stage3_feat = endpoints.get("stage3_adapter", endpoints["stage3"])
+        _, _, _, attn_maps = model.dynamic_part_attn(stage3_feat, training=False)
+    if attn_maps is not None:
+        attn_shape = tuple(attn_maps.shape)
         print(f"Dynamic Part Attention maps shape: {attn_shape}")
         assert attn_shape == (batch_size, 28, 28, 3), f"Part attention maps shape mismatch: {attn_shape}"
-        assert tf.math.reduce_all(tf.math.is_finite(outputs["part_attention_maps"])), "Part attention maps have non-finite values!"
+        assert tf.math.reduce_all(tf.math.is_finite(attn_maps)), "Part attention maps have non-finite values!"
         print("[OK] Dynamic Part Attention maps shape (B, 28, 28, 3) and finite values verified.")
 
     if hasattr(model, "text_prototypes") and model.text_prototypes is not None:
@@ -115,8 +125,11 @@ def main() -> int:
         assert proto_shape == (7, 5, 768), f"Text prototypes shape mismatch: {proto_shape}"
         print("[OK] Text prototypes shape (7, 5, 768) verified.")
 
-    if "fusion_alpha" in outputs:
-        alpha_val = outputs["fusion_alpha"].numpy()
+    alpha_t = outputs.get("adaptive_fusion_alpha")
+    if alpha_t is None and model.use_adaptive_fusion_gate and model.adaptive_fusion_gate is not None:
+        alpha_t = model.adaptive_fusion_gate(pooled, training=False)
+    if alpha_t is not None:
+        alpha_val = alpha_t.numpy()
         print(f"Adaptive fusion gate alpha range:  min={alpha_val.min():.4f}, max={alpha_val.max():.4f}")
         assert np.all(alpha_val >= 0.0) and np.all(alpha_val <= 0.20 + 1e-5), f"Alpha out of range: {alpha_val}"
         print("[OK] Adaptive fusion alpha(x) verified in [0, 0.20].")

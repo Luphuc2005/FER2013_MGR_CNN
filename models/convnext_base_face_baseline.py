@@ -1279,6 +1279,12 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             outputs["part_attention_maps"] = attn_maps
             if "adaptive_fusion_alpha" in endpoints:
                 outputs["adaptive_fusion_alpha"] = endpoints["adaptive_fusion_alpha"]
+        if "visual_projector" in endpoints:
+            outputs["visual_projector"] = endpoints["visual_projector"]
+        if "part_attention_maps" in endpoints and "part_attention_maps" not in outputs:
+            outputs["part_attention_maps"] = endpoints["part_attention_maps"]
+        if "adaptive_fusion_alpha" in endpoints and "adaptive_fusion_alpha" not in outputs:
+            outputs["adaptive_fusion_alpha"] = endpoints["adaptive_fusion_alpha"]
         return outputs
 
 
