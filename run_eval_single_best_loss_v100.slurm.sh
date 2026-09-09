@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 #SBATCH --job-name=EVAL_SINGLE
 #SBATCH --partition=gpu-queue
 #SBATCH --account=sokhcn
