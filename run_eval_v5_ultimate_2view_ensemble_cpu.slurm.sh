@@ -1,16 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=EVAL_V5_2VIEW_CPU
-#SBATCH --partition=gpu-queue
-#SBATCH --account=sokhcn
-#SBATCH --qos=gpu-q
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=48G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/EVAL_V5_2VIEW_CPU_%j.out
 #SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/EVAL_V5_2VIEW_CPU_%j.err
 
-# GHI CHÚ: Nếu cluster yêu cầu bắt buộc phải có --gres=gpu mới submit được vào gpu-queue,
-# hãy bỏ comment dòng dưới. Script bên dưới vẫn ép CUDA_VISIBLE_DEVICES="-1" để chạy 100% CPU.
-# #SBATCH --gres=gpu:v100:1
+# GHI CHÚ: Job này chạy thuần CPU (100% CPU, 0 GPU, 0MB VRAM).
+# Nếu cluster của bạn bắt buộc phải chỉ định partition mặc định, bỏ comment dòng tương ứng:
+# #SBATCH --partition=cpu-queue
 
 set -euo pipefail
 

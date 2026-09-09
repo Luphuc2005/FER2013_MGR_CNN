@@ -339,6 +339,11 @@ def main() -> int:
 
     is_cpu = bool(args.cpu or os.environ.get("CUDA_VISIBLE_DEVICES") == "-1" or len(tf.config.list_physical_devices("GPU")) == 0)
     if is_cpu:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+        try:
+            tf.config.set_visible_devices([], "GPU")
+        except Exception:
+            pass
         cfg["runtime"]["allow_cpu_fallback"] = True
         cfg["runtime"]["min_gpus"] = 0
         cfg["runtime"]["use_mixed_precision"] = False
@@ -352,7 +357,8 @@ def main() -> int:
         visible_gpu_count = len(tf.config.list_logical_devices("GPU"))
         strategy = tf.distribute.MirroredStrategy(devices=[f"/GPU:{i}" for i in range(max(visible_gpu_count, 1))])
     else:
-        strategy = tf.distribute.MirroredStrategy(devices=["/CPU:0"])
+        print("[INFO] Chế độ chạy: 100% CPU thuần túy (GPU đã được vô hiệu hóa, 0MB VRAM).", flush=True)
+        strategy = tf.distribute.OneDeviceStrategy(device="/CPU:0")
 
     out_dir = Path(cfg["paths"]["output_dir"])
     if not out_dir.is_absolute():
@@ -417,7 +423,8 @@ def main() -> int:
         if "mask" in first_inputs and first_inputs["mask"] is not None:
             w_dict["mask"] = tf.concat([first_inputs["mask"][:min(len(first_inputs["mask"]), 16)]] * n_views, axis=0)
         _ = predict_fn(w_dict)
-        print(f"[INFO] GPU Graph compiled and warmed up ({n_views} views). Dataset cached in RAM ({total_batches} batches).", flush=True)
+        device_str = "CPU" if is_cpu else "GPU"
+        print(f"[INFO] {device_str} Graph compiled and warmed up ({n_views} views). Dataset cached in RAM ({total_batches} batches).", flush=True)
     except Exception as e:
         print(f"[INFO] Graph notice: {e}", flush=True)
 
