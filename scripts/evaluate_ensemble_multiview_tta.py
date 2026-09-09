@@ -463,7 +463,7 @@ def main() -> int:
                 print(f"[WARNING] No checkpoint index files in: {cdir}")
                 continue
             for p in ckpts:
-                if p not in all_collected_prefixes:
+                if not any(existing.name == p.name for existing in all_collected_prefixes):
                     all_collected_prefixes.append(p)
             g_title = f"Checkpoints Group: {cdir.name} ({cdir.parent.name}/{cdir.name})"
             res = evaluate_checkpoint_group(
@@ -482,35 +482,38 @@ def main() -> int:
             all_group_results.append(res)
 
         # If multiple directories were evaluated (e.g. best and best_loss), evaluate the GRAND JOINT ENSEMBLE!
-        if len(target_dirs) > 1 and all_group_results and len(all_collected_prefixes) > len(all_group_results[0]["prefixes"]):
-            grand_title = "⭐ GRAND JOINT ENSEMBLE (BEST VAL ACC + BEST LOSS COMBINED) ⭐"
-            grand_res = evaluate_checkpoint_group(
-                grand_title,
-                all_collected_prefixes,
-                model,
-                dataset,
-                args,
-                class_names,
-                strategy_names,
-                probs_cache,
-                y_true_holder,
-                predict_fn=predict_fn,
-                total_batches=total_batches,
-            )
-            all_group_results.append(grand_res)
+        if len(all_group_results) > 1:
+            names_first = set(all_group_results[0]["prefixes"])
+            has_different_sets = any(set(g["prefixes"]) != names_first for g in all_group_results[1:])
+            if has_different_sets and len(all_collected_prefixes) > 1:
+                all_collected_prefixes = sorted(all_collected_prefixes, key=_extract_epoch_num)
+                grand_title = "⭐ GRAND JOINT ENSEMBLE (BEST VAL ACC + BEST LOSS COMBINED) ⭐"
+                grand_res = evaluate_checkpoint_group(
+                    grand_title,
+                    all_collected_prefixes,
+                    model,
+                    dataset,
+                    args,
+                    class_names,
+                    strategy_names,
+                    probs_cache,
+                    y_true_holder,
+                    predict_fn=predict_fn,
+                    total_batches=total_batches,
+                )
+                all_group_results.append(grand_res)
 
-    if args.output:
-        out_path = Path(args.output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        report = {
-            "config": str(cfg_path),
-            "target_dirs": [str(d) for d in target_dirs],
-            "split": args.split,
-            "groups": all_group_results,
-        }
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
-        print(f"\n[INFO] Báo cáo chi tiết đã lưu vào: {out_path}")
+    out_path = Path(args.output) if args.output else (out_dir / f"eval_ensemble_{args.split}_report.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    report = {
+        "config": str(cfg_path),
+        "target_dirs": [str(d) for d in target_dirs],
+        "split": args.split,
+        "groups": all_group_results,
+    }
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    print(f"\n[INFO] Báo cáo chi tiết đã lưu vào: {out_path}")
 
     return 0
 
@@ -536,7 +539,7 @@ def evaluate_checkpoint_group(
 
     group_probs = []
     for idx, prefix in enumerate(prefixes, 1):
-        k = str(prefix)
+        k = prefix.name
         if k not in probs_cache:
             print(f"[{group_title} | Model {idx}/{len(prefixes)}] Loading weights: {prefix.name} ...")
             restore_model_weights(model, prefix)
@@ -552,6 +555,8 @@ def evaluate_checkpoint_group(
             probs_cache[k] = p_dict
             if not y_true_holder:
                 y_true_holder.append(labels)
+        else:
+            print(f"[{group_title} | Model {idx}/{len(prefixes)}] {prefix.name} đã được tính toán trước đó, tái sử dụng từ cache.")
         group_probs.append(probs_cache[k])
 
     y_true = y_true_holder[0]
