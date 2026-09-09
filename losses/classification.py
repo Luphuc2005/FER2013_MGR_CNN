@@ -50,16 +50,21 @@ def supervised_mgr_loss(
     label_smoothing: float = 0.0,
     class_weights: Optional[tf.Tensor] = None,
     class_weight_reduction: str = "sum_weights",
+    logit_adj_offsets: Optional[tf.Tensor] = None,
     ortho_weight: float = 0.003,
     cnn_aux_weight: float = 0.4,
 ) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
     logits = tf.cast(outputs["logits"], tf.float32)
+    if logit_adj_offsets is not None:
+        train_logits = logits + tf.cast(logit_adj_offsets, tf.float32)
+    else:
+        train_logits = logits
     if label_smoothing > 0.0:
         targets = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
         targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
-        ce = tf.keras.losses.categorical_crossentropy(targets, logits, from_logits=True)
+        ce = tf.keras.losses.categorical_crossentropy(targets, train_logits, from_logits=True)
     else:
-        ce = tf.keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True)
+        ce = tf.keras.losses.sparse_categorical_crossentropy(labels, train_logits, from_logits=True)
     if class_weights is not None:
         weights = tf.cast(tf.gather(class_weights, labels), tf.float32)
         if class_weight_reduction == "batch_mean":

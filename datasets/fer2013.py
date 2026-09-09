@@ -715,6 +715,10 @@ def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.D
         from utils.ce_class_weights import configure_training_ce_weights
         configure_training_ce_weights(cfg, records["train"].labels)
 
+    if cfg.get("training", {}).get("logit_adjustment", {}).get("enabled", False):
+        from utils.logit_adjustment import configure_training_logit_adjustment
+        configure_training_logit_adjustment(cfg, records["train"].labels)
+
     return (
         make_dataset(records["train"], cfg, split="train", training=True, replicas=replicas),
         make_dataset(records["val"], cfg, split="val", training=False, replicas=replicas),

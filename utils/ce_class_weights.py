@@ -62,14 +62,21 @@ def configure_training_ce_weights(cfg, train_labels):
 
 
 def training_ce_kwargs(cfg):
+    kwargs = {}
     settings = cfg.get("training", {}).get("weighted_ce", {})
-    if not settings.get("enabled", False):
-        if cfg.get("training", {}).get("loss") == "weighted_cross_entropy":
-            raise ValueError("weighted_cross_entropy requires weighted_ce.enabled.")
-        return {}
-    if cfg["training"].get("loss") != "weighted_cross_entropy":
-        raise ValueError("weighted_ce.enabled requires weighted_cross_entropy.")
-    report = cfg["training"].get("resolved_ce_weight_report")
-    if report is None:
-        raise ValueError("Compute CE weights from training records before building train steps.")
-    return dict(class_weights=report["weights"], class_weight_reduction="batch_mean")
+    if settings.get("enabled", False):
+        if cfg["training"].get("loss") != "weighted_cross_entropy":
+            raise ValueError("weighted_ce.enabled requires weighted_cross_entropy.")
+        report = cfg["training"].get("resolved_ce_weight_report")
+        if report is None:
+            raise ValueError("Compute CE weights from training records before building train steps.")
+        kwargs.update(dict(class_weights=report["weights"], class_weight_reduction="batch_mean"))
+    elif cfg.get("training", {}).get("loss") == "weighted_cross_entropy":
+        raise ValueError("weighted_cross_entropy requires weighted_ce.enabled.")
+
+    la_settings = cfg.get("training", {}).get("logit_adjustment", {})
+    if la_settings.get("enabled", False):
+        from utils.logit_adjustment import logit_adjustment_kwargs
+        kwargs.update(logit_adjustment_kwargs(cfg))
+
+    return kwargs
