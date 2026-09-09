@@ -1082,16 +1082,23 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     z_upper, z_lower, z_au, attn_maps = self.dynamic_part_attn(stage3_feat, training=training)
                     endpoints["part_attention_maps"] = attn_maps
                 elif self.use_soft_regional_pooling:
-                    # Retain the original 112px/14x14 region supports so only
-                    # pooling changes. Reject unsupported resolutions explicitly.
-                    tf.debugging.assert_equal(tf.shape(stage3_feat)[1:3], [14, 14])
-                    z_upper = self.soft_pool_upper(stage3_feat[:, 0:8, :, :])
-                    z_lower = self.soft_pool_lower(stage3_feat[:, 5:14, :, :])
-                    z_au = self.soft_pool_au(stage3_feat[:, 3:11, :, :])
+                    h_feat = tf.shape(stage3_feat)[1]
+                    r_up = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (8.0 / 14.0)), tf.int32)
+                    r_low = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (5.0 / 14.0)), tf.int32)
+                    r_au_start = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (3.0 / 14.0)), tf.int32)
+                    r_au_end = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (11.0 / 14.0)), tf.int32)
+                    z_upper = self.soft_pool_upper(stage3_feat[:, :r_up, :, :])
+                    z_lower = self.soft_pool_lower(stage3_feat[:, r_low:, :, :])
+                    z_au = self.soft_pool_au(stage3_feat[:, r_au_start:r_au_end, :, :])
                 else:
-                    z_upper = tf.reduce_mean(stage3_feat[:, 0:8, :, :], axis=[1, 2])
-                    z_lower = tf.reduce_mean(stage3_feat[:, 5:14, :, :], axis=[1, 2])
-                    z_au = tf.reduce_mean(stage3_feat[:, 3:11, :, :], axis=[1, 2])
+                    h_feat = tf.shape(stage3_feat)[1]
+                    r_up = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (8.0 / 14.0)), tf.int32)
+                    r_low = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (5.0 / 14.0)), tf.int32)
+                    r_au_start = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (3.0 / 14.0)), tf.int32)
+                    r_au_end = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (11.0 / 14.0)), tf.int32)
+                    z_upper = tf.reduce_mean(stage3_feat[:, :r_up, :, :], axis=[1, 2])
+                    z_lower = tf.reduce_mean(stage3_feat[:, r_low:, :, :], axis=[1, 2])
+                    z_au = tf.reduce_mean(stage3_feat[:, r_au_start:r_au_end, :, :], axis=[1, 2])
 
                 semantic_source = pooled
                 if self.use_multistage_adaptive_fusion:

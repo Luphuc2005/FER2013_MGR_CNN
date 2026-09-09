@@ -422,7 +422,15 @@ def _random_erasing(image: tf.Tensor, cfg: Dict) -> tf.Tensor:
     return tf.cond(draw < prob, erase, lambda: image)
 
 
-def _rotate_tensor(tensor: tf.Tensor, radians: tf.Tensor, interpolation: str = "BILINEAR") -> tf.Tensor:
+def _affine_transform_tensor(
+    tensor: tf.Tensor,
+    radians: tf.Tensor,
+    shift_h: tf.Tensor,
+    shift_w: tf.Tensor,
+    zoom: tf.Tensor,
+    interpolation: str = "BILINEAR",
+    fill_mode: str = "REFLECT",
+) -> tf.Tensor:
     shape = tf.shape(tensor)
     orig_dtype = tensor.dtype
     if orig_dtype != tf.float32:
@@ -431,30 +439,36 @@ def _rotate_tensor(tensor: tf.Tensor, radians: tf.Tensor, interpolation: str = "
     width = tf.cast(shape[1], tf.float32)
     center_x = (width - 1.0) / 2.0
     center_y = (height - 1.0) / 2.0
+    t_x = shift_w * width
+    t_y = shift_h * height
+    k = tf.math.divide_no_nan(1.0, zoom)
     cos_v = tf.cos(radians)
     sin_v = tf.sin(radians)
-    transform = tf.stack([
-        cos_v,
-        sin_v,
-        center_x - cos_v * center_x - sin_v * center_y,
-        -sin_v,
-        cos_v,
-        center_y + sin_v * center_x - cos_v * center_y,
-        0.0,
-        0.0,
-    ])
-    rotated = tf.raw_ops.ImageProjectiveTransformV3(
+    a0 = k * cos_v
+    a1 = k * sin_v
+    a2 = center_x - k * (cos_v * (center_x + t_x) + sin_v * (center_y + t_y))
+    a3 = -k * sin_v
+    a4 = k * cos_v
+    a5 = center_y - k * (-sin_v * (center_x + t_x) + cos_v * (center_y + t_y))
+    transform = tf.stack([a0, a1, a2, a3, a4, a5, 0.0, 0.0])
+    transformed = tf.raw_ops.ImageProjectiveTransformV3(
         images=tf.expand_dims(tensor, axis=0),
         transforms=tf.expand_dims(transform, axis=0),
         output_shape=shape[:2],
         interpolation=interpolation,
-        fill_mode="CONSTANT",
+        fill_mode=fill_mode,
         fill_value=tf.constant(0.0, dtype=tf.float32),
     )
-    rotated = tf.squeeze(rotated, axis=0)
-    if rotated.dtype != orig_dtype:
-        rotated = tf.cast(rotated, orig_dtype)
-    return rotated
+    transformed = tf.squeeze(transformed, axis=0)
+    if transformed.dtype != orig_dtype:
+        transformed = tf.cast(transformed, orig_dtype)
+    return transformed
+
+
+def _rotate_tensor(tensor: tf.Tensor, radians: tf.Tensor, interpolation: str = "BILINEAR", fill_mode: str = "CONSTANT") -> tf.Tensor:
+    zero = tf.constant(0.0, dtype=tf.float32)
+    one = tf.constant(1.0, dtype=tf.float32)
+    return _affine_transform_tensor(tensor, radians, zero, zero, one, interpolation=interpolation, fill_mode=fill_mode)
 
 
 def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
@@ -466,12 +480,36 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
         if mask is not None:
             mask = tf.cond(flip, lambda: tf.image.flip_left_right(mask), lambda: mask)
     degrees = float(aug_cfg.get("rotation_degrees", 0.0))
-    if degrees > 0.0:
-        angle = tf.random.uniform([], minval=-degrees, maxval=degrees)
-        radians = angle * np.pi / 180.0
-        image = _rotate_tensor(image, radians, interpolation="NEAREST")
+    trans_h = float(aug_cfg.get("translation_height", 0.0))
+    trans_w = float(aug_cfg.get("translation_width", 0.0))
+    zoom_min = float(aug_cfg.get("zoom_min", 1.0))
+    zoom_max = float(aug_cfg.get("zoom_max", 1.0))
+    has_affine = (degrees > 0.0 or trans_h > 0.0 or trans_w > 0.0 or zoom_min != 1.0 or zoom_max != 1.0)
+    if has_affine:
+        fill_mode = str(aug_cfg.get("fill_mode", "REFLECT" if (trans_h > 0 or trans_w > 0 or zoom_min != 1.0 or zoom_max != 1.0) else "CONSTANT")).upper()
+        radians = (
+            tf.random.uniform([], minval=-degrees, maxval=degrees) * (np.pi / 180.0)
+            if degrees > 0.0 else tf.constant(0.0, dtype=tf.float32)
+        )
+        shift_h = (
+            tf.random.uniform([], minval=-trans_h, maxval=trans_h)
+            if trans_h > 0.0 else tf.constant(0.0, dtype=tf.float32)
+        )
+        shift_w = (
+            tf.random.uniform([], minval=-trans_w, maxval=trans_w)
+            if trans_w > 0.0 else tf.constant(0.0, dtype=tf.float32)
+        )
+        zoom = (
+            tf.random.uniform([], minval=zoom_min, maxval=zoom_max)
+            if zoom_max > zoom_min else tf.constant(1.0, dtype=tf.float32)
+        )
+        image = _affine_transform_tensor(image, radians, shift_h, shift_w, zoom, interpolation="BILINEAR", fill_mode=fill_mode)
         if mask is not None:
-            mask = tf.clip_by_value(_rotate_tensor(mask, radians, interpolation="BILINEAR"), 0.0, 1.0)
+            mask = tf.clip_by_value(
+                _affine_transform_tensor(mask, radians, shift_h, shift_w, zoom, interpolation="BILINEAR", fill_mode="CONSTANT"),
+                0.0,
+                1.0,
+            )
     brightness_delta = float(aug_cfg.get("brightness_delta", 0.0))
     if brightness_delta > 0.0:
         brightness = tf.random.uniform(
