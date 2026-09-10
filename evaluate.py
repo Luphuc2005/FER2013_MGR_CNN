@@ -142,11 +142,23 @@ def main() -> int:
     if args.no_tta_hflip:
         use_tta_hflip = False
 
+    dataset_name = data_cfg.get("dataset_type")
+    if not dataset_name:
+        data_path_str = str(data_cfg.get("data_path", "")).lower()
+        if "raf" in data_path_str:
+            dataset_name = "RAF-DB"
+        elif "affectnet" in data_path_str:
+            dataset_name = "AffectNet"
+        elif "expw" in data_path_str:
+            dataset_name = "ExpW"
+        else:
+            dataset_name = "FER2013"
+
     print("\n" + "=" * 65)
     print("           EVALUATION PRE-CHECK VERIFICATION")
     print("=" * 65)
     print(f"  Checkpoint Path    : {checkpoint_path}")
-    print(f"  Dataset Name       : FERPlus ({data_cfg.get('dataset_type', 'ferplus_majority8')})")
+    print(f"  Dataset Name       : {dataset_name}")
     print(f"  Split              : {args.split.upper()}")
     print(f"  Total Test Samples : {expected_samples if expected_samples is not None else 'N/A'}")
     print(f"  Number of Classes  : {len(class_names)} ({', '.join(class_names)})")
