@@ -582,9 +582,8 @@ def _make_class_balanced_tensor_dataset(
         raise ValueError(f"Cannot build class-balanced sampler for empty {split} split.")
 
     configured_weights = cfg["data"].get("class_sampling_weights")
-    if configured_weights is None:
-        weights = np.ones(len(active_classes), dtype=np.float64) / float(len(active_classes))
-    else:
+    sampling_strategy = str(cfg["data"].get("sampling_strategy", "")).lower()
+    if configured_weights is not None:
         raw_weights = np.asarray(configured_weights, dtype=np.float64)
         if raw_weights.shape[0] != num_classes:
             raise ValueError(
@@ -595,6 +594,13 @@ def _make_class_balanced_tensor_dataset(
         if weight_sum <= 0.0:
             raise ValueError("class_sampling_weights must sum to a positive value for present classes.")
         weights = weights / weight_sum
+    elif sampling_strategy in {"square_root", "sqrt", "power"}:
+        gamma = float(cfg["data"].get("sampling_gamma", 0.5))
+        active_counts = counts[active_classes].astype(np.float64)
+        raw_weights = np.power(active_counts, gamma)
+        weights = raw_weights / float(raw_weights.sum())
+    else:
+        weights = np.ones(len(active_classes), dtype=np.float64) / float(len(active_classes))
 
     class_datasets = []
     for class_id in active_classes:
@@ -603,7 +609,7 @@ def _make_class_balanced_tensor_dataset(
         class_datasets.append(_make_tensor_dataset(class_tensors).repeat())
 
     print(
-        "[INFO] Class-balanced sampling enabled for "
+        f"[INFO] Class-aware ({sampling_strategy or 'uniform_balanced'}) sampling enabled for "
         f"{split}: counts={counts.tolist()} weights={weights.round(6).tolist()} "
         f"epoch_samples={len(labels_arr)}",
         flush=True,
@@ -640,6 +646,9 @@ def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool
         "class-balanced",
         "balanced",
         "balanced_classes",
+        "square_root",
+        "sqrt",
+        "power",
     }
     if use_class_balanced:
         ds = _make_class_balanced_tensor_dataset(tensors, records.labels, cfg, split)
