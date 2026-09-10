@@ -62,7 +62,15 @@ if [ -n "$BEST_LOSS_CKPT" ]; then
     "$FER_PY" -u sweep_tta_weights.py --config "$CONFIG" --checkpoint "$BEST_LOSS_CKPT" --step 0.05 || true
 fi
 
+# 4. Automated Top-5 Checkpoint Softmax Ensemble + TTA Evaluation
 echo "============================================================"
-echo " FER2013 SigLIP 2 Pipeline Completed (Training + TTA Sweeps)"
+echo " Running Automated Top-5 Checkpoint Softmax Ensemble + TTA..."
+echo "============================================================"
+if [ -f "scripts/evaluate_top5_ensemble_siglip2.py" ]; then
+    "$FER_PY" -u scripts/evaluate_top5_ensemble_siglip2.py --config "$CONFIG" || true
+fi
+
+echo "============================================================"
+echo " FER2013 SigLIP 2 Pipeline Completed (Training + TTA Sweeps + Top-5 Ensemble)"
 echo " End: $(date)"
 echo "============================================================"

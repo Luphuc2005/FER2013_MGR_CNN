@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import numpy as np
 
 # Multi-Granularity Prompt Bank for 7 FER emotions (P1: Emotion, P2: AU, P3: Upper-face, P4: Lower-face, P5: Combined)
@@ -235,6 +235,34 @@ ENSEMBLE_DISCRIMINATIVE_PROMPTS: Dict[int, List[List[str]]] = {
     ],
 }
 
+FERPLUS_CONTEMPT_PROMPTS: List[List[str]] = [
+    [
+        "a facial expression of contempt with a dismissive and disdainful appearance",
+        "a close-up portrait of a person showing contempt and scorn",
+        "a face with a contemptuous expression and a dismissive look",
+    ],
+    [
+        "contempt characterized by unilateral lip corner tightening AU14 and an asymmetric smirk",
+        "facial action units of contempt with one-sided dimpler AU14 and restrained disdain",
+        "distinctive contempt facial cues with asymmetric lip corner tightening and slight sneer",
+    ],
+    [
+        "steady eyes with slightly raised or tightened cheek on one side and a skeptical brow expression",
+        "upper face showing restrained disdain with calm eyes and subtle asymmetric facial tension",
+        "dismissive gaze with controlled upper-face tension distinct from anger or disgust",
+    ],
+    [
+        "one lip corner tightened or raised into an asymmetric smirk without a broad happy smile",
+        "unilateral mouth corner dimpling with a subtle sneer and closed lips",
+        "asymmetric contempt mouth with one-sided lip corner tightening and slight smirk",
+    ],
+    [
+        "a contemptuous face with a dismissive gaze and one-sided tightened lip corner, consistent with AU14",
+        "a complete facial portrait of contempt with asymmetric smirk, restrained disdain, and unilateral mouth tension",
+        "scornful contempt expression featuring a subtle one-sided smirk and dismissive facial posture",
+    ],
+]
+
 
 EMOTION_CLASS_MAP: Dict[int, str] = {
     0: "angry",
@@ -245,6 +273,20 @@ EMOTION_CLASS_MAP: Dict[int, str] = {
     5: "surprise",
     6: "neutral",
 }
+
+
+def default_prompt_bank(num_classes: int) -> Dict[int, List[List[str]]]:
+    """Return the built-in FER prompt bank for contiguous class IDs."""
+    if int(num_classes) == 7:
+        return ENSEMBLE_DISCRIMINATIVE_PROMPTS
+    if int(num_classes) == 8:
+        prompts = dict(ENSEMBLE_DISCRIMINATIVE_PROMPTS)
+        prompts[7] = FERPLUS_CONTEMPT_PROMPTS
+        return prompts
+    raise ValueError(
+        f"No built-in semantic prompt bank for num_classes={num_classes}. "
+        "Pass prompts_per_class explicitly."
+    )
 
 
 def compute_prompt_hash(prompts_per_class: Dict[int, Any]) -> tuple[str, int]:
@@ -315,27 +357,45 @@ def get_or_compute_clip_text_prototypes(
     prompts_per_class: Optional[Dict[int, Any]] = None,
     embedding_dim: int = 512,
     multi_prototype: bool = False,
+    num_classes: int = 7,
+    class_names: Optional[List[str]] = None,
 ) -> np.ndarray:
     """
-    Computes or loads text prototypes for 7 FER emotion classes using a frozen REAL CLIP text encoder.
+    Computes or loads text prototypes for FER emotion classes using a frozen REAL CLIP text encoder.
     Synthetic/random prototype fallbacks are COMPLETELY DISABLED.
     If loading CLIP fails, raises RuntimeError immediately.
     """
     if prompts_per_class is None:
-        prompts_per_class = ENSEMBLE_DISCRIMINATIVE_PROMPTS
+        prompts_per_class = default_prompt_bank(int(num_classes))
+    else:
+        prompts_per_class = {int(k): v for k, v in prompts_per_class.items()}
+
+    class_ids = sorted(prompts_per_class.keys())
+    expected_ids = list(range(len(class_ids)))
+    if class_ids != expected_ids:
+        raise ValueError(f"Prompt class IDs must be contiguous from 0, got {class_ids}.")
+    if len(class_ids) != int(num_classes):
+        raise ValueError(
+            f"Prompt bank has {len(class_ids)} classes but num_classes={num_classes}."
+        )
+    if class_names is not None and len(class_names) != int(num_classes):
+        raise ValueError(
+            f"class_names has {len(class_names)} entries but num_classes={num_classes}."
+        )
 
     prompt_hash, prompt_count = compute_prompt_hash(prompts_per_class)
 
     if cache_path is None or ("clip_text_prototypes_7emotions.npy" in cache_path and "siglip" in model_name.lower()):
         safe_model_tag = "siglip2" if "siglip2" in model_name.lower() else ("siglip" if "siglip" in model_name.lower() else "clip")
+        class_tag = f"{int(num_classes)}emotions"
         cache_path = (
-            f"pretrained/{safe_model_tag}_text_prototypes_7emotions_multigranularity_multi5.npy"
+            f"pretrained/{safe_model_tag}_text_prototypes_{class_tag}_multigranularity_multi5.npy"
             if multi_prototype
-            else f"pretrained/{safe_model_tag}_text_prototypes_7emotions.npy"
+            else f"pretrained/{safe_model_tag}_text_prototypes_{class_tag}.npy"
         )
 
     meta_path = cache_path + ".meta.json"
-    expected_shape = (7, 5, embedding_dim) if multi_prototype else (7, embedding_dim)
+    expected_shape = (int(num_classes), 5, embedding_dim) if multi_prototype else (int(num_classes), embedding_dim)
 
     # Validate existing cache & provenance (including prompt content hash)
     if validate_cache_provenance(
@@ -409,6 +469,7 @@ def get_or_compute_clip_text_prototypes(
             meta_data = {
                 "model": model_name,
                 "source": "REAL_CLIP",
+                "class_names": class_names,
                 "embedding_dim": embedding_dim,
                 "multi_prototype": multi_prototype,
                 "shape": list(prototypes.shape),
@@ -440,6 +501,8 @@ def _encode_with_transformers(
     multi_prototype: bool = False,
 ) -> Optional[np.ndarray]:
     """Encodes text prompts using HuggingFace transformers CLIP/SigLIP text model (PyTorch or TF)."""
+    class_ids = sorted(prompts_per_class.keys())
+
     # 1. Try PyTorch Transformers
     try:
         import torch
@@ -473,7 +536,7 @@ def _encode_with_transformers(
 
         class_prototypes = []
         with torch.no_grad():
-            for c in range(7):
+            for c in class_ids:
                 p_items = prompts_per_class[c]
                 if multi_prototype and len(p_items) == 5:
                     gran_embeds = []
@@ -533,22 +596,45 @@ def _encode_with_transformers(
             is_full_clip = False
 
         class_prototypes = []
-        for c in range(7):
-            prompts = prompts_per_class[c]
-            inputs = tokenizer(prompts, padding=True, return_tensors="tf")
-            if is_full_clip and hasattr(text_encoder, "get_text_features"):
-                embeds = text_encoder.get_text_features(**inputs)
-            else:
-                outputs = text_encoder(**inputs)
-                embeds = outputs.last_hidden_state[:, 0, :] if hasattr(outputs, "last_hidden_state") else outputs[0][:, 0, :]
+        for c in class_ids:
+            p_items = prompts_per_class[c]
+            if multi_prototype and len(p_items) == 5:
+                gran_embeds = []
+                for p_item in p_items:
+                    prompts = [p_item] if isinstance(p_item, str) else p_item
+                    inputs = tokenizer(prompts, padding=True, return_tensors="tf")
+                    if is_full_clip and hasattr(text_encoder, "get_text_features"):
+                        embeds = text_encoder.get_text_features(**inputs)
+                    else:
+                        outputs = text_encoder(**inputs)
+                        embeds = outputs.last_hidden_state[:, 0, :] if hasattr(outputs, "last_hidden_state") else outputs[0][:, 0, :]
 
-            embeds = embeds / tf.norm(embeds, ord=2, axis=-1, keepdims=True)
-            if multi_prototype:
-                class_prototypes.append(embeds.numpy())
+                    embeds = embeds / tf.norm(embeds, ord=2, axis=-1, keepdims=True)
+                    level_embed = tf.reduce_mean(embeds, axis=0)
+                    level_embed = level_embed / tf.norm(level_embed, ord=2, axis=-1, keepdims=True)
+                    gran_embeds.append(level_embed.numpy())
+                class_prototypes.append(np.stack(gran_embeds, axis=0))
             else:
-                mean_embed = tf.reduce_mean(embeds, axis=0)
-                mean_embed = mean_embed / tf.norm(mean_embed, ord=2, axis=-1, keepdims=True)
-                class_prototypes.append(mean_embed.numpy())
+                flat_prompts = []
+                for item in p_items:
+                    if isinstance(item, list):
+                        flat_prompts.extend(item)
+                    else:
+                        flat_prompts.append(item)
+                inputs = tokenizer(flat_prompts, padding=True, return_tensors="tf")
+                if is_full_clip and hasattr(text_encoder, "get_text_features"):
+                    embeds = text_encoder.get_text_features(**inputs)
+                else:
+                    outputs = text_encoder(**inputs)
+                    embeds = outputs.last_hidden_state[:, 0, :] if hasattr(outputs, "last_hidden_state") else outputs[0][:, 0, :]
+
+                embeds = embeds / tf.norm(embeds, ord=2, axis=-1, keepdims=True)
+                if multi_prototype:
+                    class_prototypes.append(embeds.numpy())
+                else:
+                    mean_embed = tf.reduce_mean(embeds, axis=0)
+                    mean_embed = mean_embed / tf.norm(mean_embed, ord=2, axis=-1, keepdims=True)
+                    class_prototypes.append(mean_embed.numpy())
 
         res = np.stack(class_prototypes, axis=0)
         return res
@@ -556,4 +642,3 @@ def _encode_with_transformers(
         print(f"[CLIP] TensorFlow encoding attempt: {e_tf}", flush=True)
 
     return None
-

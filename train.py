@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import gc
 import json
 import os
@@ -47,8 +48,53 @@ tf.get_logger().setLevel('ERROR')
 from config import load_config, global_batch_size, resolve_auto_increment_output_dir
 from datasets.fer2013 import EMOTION_NAMES, build_datasets
 from losses.classification import supervised_mgr_loss
+from losses.rdrop import forward_training_loss
 from metrics.classification import classification_metrics, save_metrics
 from models import ConvNeXtBaseFaceFERBaseline, ConvNeXtBaseImageNetFERBaseline, IR50FERBaseline, MGRConvNeXtFER
+from utils.ranked_checkpoint_manager import RankedCheckpointManager
+from utils.ce_class_weights import training_ce_kwargs
+from utils.semantic_schedule import configured_lambda_sem, resolve_lambda_sem
+
+
+def get_class_names(cfg: Dict) -> List[str]:
+    data_cfg = cfg.get("data", {})
+    configured = data_cfg.get("class_names") or data_cfg.get("emotion_names")
+    if configured:
+        class_names = [str(name) for name in configured]
+    else:
+        class_names = list(EMOTION_NAMES)
+    num_classes = int(data_cfg.get("num_classes", len(class_names)))
+    if len(class_names) != num_classes:
+        raise ValueError(
+            f"data.class_names has {len(class_names)} entries but data.num_classes={num_classes}."
+        )
+    return class_names
+
+
+def save_classification_artifacts(metrics: Dict[str, object], output_prefix: Path, class_names: Sequence[str]) -> None:
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    report = metrics.get("classification_report", {})
+    report_path = output_prefix.with_name(output_prefix.name + "_classification_report.csv")
+    with report_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["class", "precision", "recall", "f1-score", "support"])
+        for class_name in class_names:
+            row = report.get(class_name, {}) if isinstance(report, dict) else {}
+            writer.writerow([
+                class_name,
+                row.get("precision", ""),
+                row.get("recall", ""),
+                row.get("f1-score", ""),
+                row.get("support", ""),
+            ])
+
+    cm = np.asarray(metrics.get("confusion_matrix", []), dtype=np.int64)
+    cm_path = output_prefix.with_name(output_prefix.name + "_confusion_matrix.csv")
+    with cm_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["true\\pred", *class_names])
+        for class_name, row in zip(class_names, cm.tolist()):
+            writer.writerow([class_name, *row])
 
 
 class LegacyDecoupledAdamW(tf.keras.optimizers.Adam):
@@ -110,23 +156,31 @@ def configure_tensorflow_runtime(cfg: Dict) -> None:
 
 
 def configure_gpus(cfg: Dict) -> None:
+    runtime = cfg["runtime"]
+    require_two_gpus = bool(runtime.get("require_two_gpus", False))
+    min_gpus = int(runtime.get("min_gpus", 1))
+    if require_two_gpus:
+        min_gpus = max(min_gpus, 2)
+    allow_fallback = bool(runtime.get("allow_cpu_fallback", not require_two_gpus))
+
     gpus = tf.config.list_physical_devices("GPU")
     if not gpus:
+        if min_gpus > 0 and not allow_fallback:
+            raise RuntimeError(f"TensorFlow sees 0 GPU(s), need {min_gpus}.")
         print("[WARNING] No GPU devices visible to TensorFlow. Falling back to CPU mode.")
         return
-    gpu_ids = cfg["runtime"].get("gpu_ids", [0])
+    gpu_ids = runtime.get("gpu_ids", [0])
     visible = [gpus[i] for i in gpu_ids if i < len(gpus)]
     if not visible:
         visible = gpus
-    min_gpus = int(cfg["runtime"].get("min_gpus", 1))
     if len(visible) < min_gpus:
-        if bool(cfg["runtime"].get("allow_cpu_fallback", True)) or min_gpus <= 1:
+        if allow_fallback:
             visible = gpus
-        else:
+        if len(visible) < min_gpus:
             raise RuntimeError(f"TensorFlow sees only {len(visible)} GPU(s), need {min_gpus}.")
     if visible:
         tf.config.set_visible_devices(visible, "GPU")
-        if cfg["runtime"].get("memory_growth", True):
+        if runtime.get("memory_growth", True):
             for gpu in visible:
                 try:
                     tf.config.experimental.set_memory_growth(gpu, True)
@@ -136,16 +190,27 @@ def configure_gpus(cfg: Dict) -> None:
 
 
 def build_optimizer(cfg: Dict, learning_rate: float):
-    weight_decay = float(cfg["training"].get("weight_decay", 0.0))
-    adamw = getattr(tf.keras.optimizers, "AdamW", None)
-    if adamw is None:
-        adamw = getattr(getattr(tf.keras.optimizers, "experimental", object()), "AdamW", None)
-    if adamw is not None:
+    from utils.optimizer_config import resolve_base_optimizer
+    name, weight_decay = resolve_base_optimizer(cfg["training"])
+    if name == "adam":
         try:
-            return adamw(learning_rate=learning_rate, weight_decay=weight_decay, jit_compile=False)
+            optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate, jit_compile=False)
         except (TypeError, ValueError):
-            return adamw(learning_rate=learning_rate, weight_decay=weight_decay)
-    return LegacyDecoupledAdamW(learning_rate=learning_rate, weight_decay=weight_decay)
+            optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    else:
+        adamw = getattr(tf.keras.optimizers, "AdamW", None)
+        if adamw is None:
+            adamw = getattr(getattr(tf.keras.optimizers, "experimental", object()), "AdamW", None)
+        if adamw is not None:
+            try:
+                optimizer = adamw(learning_rate=learning_rate, weight_decay=weight_decay, jit_compile=False)
+            except (TypeError, ValueError):
+                optimizer = adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+        else:
+            optimizer = LegacyDecoupledAdamW(learning_rate=learning_rate, weight_decay=weight_decay)
+    print(f"[OPTIMIZER] base={name} class={type(optimizer).__name__} "
+          f"lr={learning_rate:g} weight_decay={weight_decay:g}", flush=True)
+    return optimizer
 
 
 def get_param_count(model: tf.keras.Model) -> Tuple[int, int]:
@@ -185,6 +250,137 @@ def split_variables(model: MGRConvNeXtFER) -> Tuple[List[tf.Variable], List[tf.V
     return backbone, head
 
 
+# ---------------------------------------------------------------------------
+# Progressive Unfreezing
+# ---------------------------------------------------------------------------
+
+def _var_belongs_to_stage(var_name: str, stage_num: int) -> bool:
+    """Check if a backbone variable belongs to a given ConvNeXt stage (1-4).
+
+    Backbone naming conventions in ConvNeXtBaseFRBackbone:
+      stem:  stem_conv, stem_norm
+      stage1: stage1_block0..2
+      downsample_stage2: norm, conv  (between stage1 and stage2)
+      stage2: stage2_block0..2
+      downsample_stage3: norm, conv  (between stage2 and stage3)
+      stage3: stage3_block0..26
+      downsample_stage4: norm, conv  (between stage3 and stage4)
+      stage4: stage4_block0..2
+
+    We group each downsample layer with the NEXT stage (the stage it feeds into),
+    so unfreezing stage4 also unfreezes downsample_stage4.
+    """
+    lower = var_name.lower()
+    if stage_num == 1:
+        return "stage1_block" in lower or "stem_conv" in lower or "stem_norm" in lower
+    elif stage_num == 2:
+        return "stage2_block" in lower or "downsample_stage2" in lower
+    elif stage_num == 3:
+        return "stage3_block" in lower or "downsample_stage3" in lower
+    elif stage_num == 4:
+        return "stage4_block" in lower or "downsample_stage4" in lower
+    return False
+
+
+def resolve_progressive_unfreeze_mask(
+    cfg: Dict,
+    epoch_number: int,
+    backbone_vars: List[tf.Variable],
+) -> Tuple[Dict[str, bool], List[int]]:
+    """Return (mask_dict, trainable_stages) for the current epoch.
+
+    mask_dict: maps variable_key(v) -> True if variable should receive gradients.
+    trainable_stages: list of stage numbers that are trainable (e.g. [3, 4]).
+    """
+    prog_cfg = cfg.get("model", {}).get("progressive_unfreeze", {})
+    if not prog_cfg.get("enabled", False):
+        # Progressive unfreezing disabled => all backbone vars trainable
+        return {variable_key(v): True for v in backbone_vars}, [1, 2, 3, 4]
+
+    schedule = prog_cfg.get("schedule", [])
+    trainable_stages: List[int] = []
+    for phase in schedule:
+        start = int(phase.get("start_epoch", 1))
+        end = int(phase.get("end_epoch", 9999))
+        if start <= epoch_number <= end:
+            trainable_stages = [int(s) for s in phase.get("trainable_stages", [])]
+            break
+
+    mask = {}
+    for v in backbone_vars:
+        v_key = variable_key(v)
+        v_name = getattr(v, "name", str(v_key))
+        is_trainable = any(_var_belongs_to_stage(v_name, s) for s in trainable_stages)
+        mask[v_key] = is_trainable
+    return mask, trainable_stages
+
+
+def compute_stage_lr_scales(
+    cfg: Dict,
+    backbone_vars: List[tf.Variable],
+    trainable_stages: List[int],
+    epoch_number: int = 1,
+) -> Dict[str, float]:
+    """Return per-variable LR scale factors for discriminative LR."""
+    prog_cfg = cfg.get("model", {}).get("progressive_unfreeze", {})
+    stage_mults = None
+    for phase in prog_cfg.get("schedule", []):
+        start = int(phase.get("start_epoch", 1))
+        end = int(phase.get("end_epoch", 9999))
+        if start <= epoch_number <= end:
+            if "stage_lr_multipliers" in phase:
+                stage_mults = phase["stage_lr_multipliers"]
+            break
+    if stage_mults is None:
+        stage_mults = prog_cfg.get("stage_lr_multipliers", {})
+    scales = {}
+    for v in backbone_vars:
+        v_key = variable_key(v)
+        v_name = getattr(v, "name", str(v_key))
+        scale = 1.0
+        for s in trainable_stages:
+            if _var_belongs_to_stage(v_name, s):
+                scale = float(stage_mults.get(str(s), 1.0))
+                break
+        scales[v_key] = scale
+    return scales
+
+
+def log_unfreeze_state(
+    epoch_number: int,
+    trainable_stages: List[int],
+    backbone_vars: List[tf.Variable],
+    mask: Dict[str, bool],
+    lr_scales: Dict[str, float],
+    base_backbone_lr: float,
+) -> None:
+    """Log detailed progressive unfreeze diagnostics."""
+    frozen_stages = [s for s in [1, 2, 3, 4] if s not in trainable_stages]
+    trainable_count = sum(1 for v in backbone_vars if mask.get(variable_key(v), False))
+    trainable_params = sum(
+        int(np.prod(v.shape)) for v in backbone_vars if mask.get(variable_key(v), False)
+    )
+    frozen_count = len(backbone_vars) - trainable_count
+    frozen_params = sum(
+        int(np.prod(v.shape)) for v in backbone_vars if not mask.get(variable_key(v), False)
+    )
+    print(f"\n{'='*70}", flush=True)
+    print(f"[PROGRESSIVE_UNFREEZE] Epoch {epoch_number}", flush=True)
+    print(f"  Trainable stages: {trainable_stages if trainable_stages else 'NONE (head only)'}", flush=True)
+    print(f"  Frozen stages:    {frozen_stages}", flush=True)
+    print(f"  Backbone trainable vars: {trainable_count} ({trainable_params:,} params)", flush=True)
+    print(f"  Backbone frozen vars:    {frozen_count} ({frozen_params:,} params)", flush=True)
+    for s in trainable_stages:
+        mult = lr_scales.get(next(
+            (variable_key(v) for v in backbone_vars
+             if _var_belongs_to_stage(getattr(v, "name", ""), s)),
+            None,
+        ), 1.0) if backbone_vars else 1.0
+        effective_lr = base_backbone_lr * mult
+        print(f"  Stage {s}: LR = {effective_lr:.2e} (mult={mult})", flush=True)
+    print(f"{'='*70}\n", flush=True)
+
+
 def build_model(cfg: Dict) -> tf.keras.Model:
     arch = str(cfg.get("model", {}).get("arch", "convnext_tiny")).lower()
     name = str(cfg.get("model", {}).get("name", "")).lower()
@@ -192,6 +388,9 @@ def build_model(cfg: Dict) -> tf.keras.Model:
         return IR50FERBaseline(cfg)
     if arch in ("convnext_base_imagenet1k", "convnext_base_imagenet", "convnext_base_imagenet_1k"):
         return ConvNeXtBaseImageNetFERBaseline(cfg)
+    if "swin" in name or "swin" in arch or "cross_stage" in name or "cross_stage" in arch:
+        from models.convnext_ms1m_cross_stage_swin import ConvNeXtMS1MCrossStageSwinFER
+        return ConvNeXtMS1MCrossStageSwinFER(cfg)
     if "mgr" in name or "mgr" in arch or "dynamic_gate" in name:
         return MGRConvNeXtFER(cfg)
     if arch in ("convnext_base", "convnext_base_face", "convnext_base_ms1m_arcface") or name.startswith("convnext_base_ms1m"):
@@ -201,6 +400,28 @@ def build_model(cfg: Dict) -> tf.keras.Model:
     if name.startswith("convnext_base"):
         return ConvNeXtBaseFaceFERBaseline(cfg)
     return MGRConvNeXtFER(cfg)
+
+
+def compute_loss(outputs, labels, cfg: Dict, model=None) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
+    num_classes = int(cfg.get("data", {}).get("num_classes", 7))
+    label_smoothing = float(cfg.get("training", {}).get("label_smoothing", 0.0))
+    ortho_weight = float(cfg.get("model", {}).get("ortho_loss_weight", 0.003))
+    cnn_aux_weight = float(cfg.get("model", {}).get("cnn_aux_loss_weight", 0.4))
+    
+    if isinstance(outputs, (tuple, list)):
+        outputs = {"logits": outputs[0]}
+    elif not isinstance(outputs, dict):
+        outputs = {"logits": outputs}
+
+    return supervised_mgr_loss(
+        labels=labels,
+        outputs=outputs,
+        num_classes=num_classes,
+        label_smoothing=label_smoothing,
+        ortho_weight=ortho_weight,
+        cnn_aux_weight=cnn_aux_weight,
+    )
+
 
 
 def ensure_optimizer_built(optimizer, variables: Sequence[tf.Variable], strategy: Optional[tf.distribute.Strategy] = None) -> None:
@@ -264,6 +485,8 @@ def resolve_phase_lrs(cfg: Dict, epoch: int, train_backbone: bool) -> Tuple[floa
     training_cfg = cfg["training"]
     total_epochs = int(training_cfg["epochs"])
     warmup_epochs = int(training_cfg.get("warmup_epochs", 5))
+    min_lr = float(training_cfg.get("min_lr", 1e-6))
+    head_decay_epochs = training_cfg.get("head_decay_epochs", None)
     stage_tr = cfg.get("stage_transition", {})
     if bool(stage_tr.get("enable_2stage_switching", False)) and epoch >= int(stage_tr.get("stage1_end_epoch", 60)):
         stage2_start = int(stage_tr.get("stage1_end_epoch", 60))
@@ -272,19 +495,22 @@ def resolve_phase_lrs(cfg: Dict, epoch: int, train_backbone: bool) -> Tuple[floa
         head_base_lr = float(stage_tr.get("stage2_finetune_lr", training_cfg.get("finetune_lr", 0.00004)))
         visual_base_lr = float(stage_tr.get("stage2_visual_extractor_lr", training_cfg.get("visual_extractor_lr", 0.000002)))
         return (
-            cosine_lr(head_base_lr, phase2_epoch, phase2_total, warmup_epochs=min(warmup_epochs, phase2_total)),
-            cosine_lr(visual_base_lr, phase2_epoch, phase2_total, warmup_epochs=min(warmup_epochs, phase2_total)),
+            cosine_lr(head_base_lr, phase2_epoch, phase2_total, min_lr=min_lr, warmup_epochs=min(warmup_epochs, phase2_total)),
+            cosine_lr(visual_base_lr, phase2_epoch, phase2_total, min_lr=min_lr, warmup_epochs=min(warmup_epochs, phase2_total)),
         )
     if train_backbone:
         freeze_epochs = int(cfg["model"].get("freeze_backbone_epochs", 0) or 0)
         phase_epoch = max(0, int(epoch) - freeze_epochs)
         head_base_lr = float(training_cfg.get("finetune_lr", training_cfg["lr"]))
         visual_base_lr = float(training_cfg.get("visual_extractor_lr", head_base_lr))
-        return (
-            cosine_lr(head_base_lr, phase_epoch, total_epochs, warmup_epochs=warmup_epochs),
-            cosine_lr(visual_base_lr, phase_epoch, total_epochs, warmup_epochs=warmup_epochs),
-        )
-    return cosine_lr(float(training_cfg["lr"]), int(epoch), total_epochs, warmup_epochs=warmup_epochs), 0.0
+        if head_decay_epochs is not None:
+            head_lr = cosine_lr(head_base_lr, int(epoch), int(head_decay_epochs), min_lr=min_lr, warmup_epochs=warmup_epochs)
+        else:
+            head_lr = cosine_lr(head_base_lr, phase_epoch, total_epochs, min_lr=min_lr, warmup_epochs=warmup_epochs)
+        backbone_lr = cosine_lr(visual_base_lr, phase_epoch, total_epochs, min_lr=min_lr, warmup_epochs=warmup_epochs)
+        return (head_lr, backbone_lr)
+    head_total = int(head_decay_epochs) if head_decay_epochs is not None else total_epochs
+    return cosine_lr(float(training_cfg["lr"]), int(epoch), head_total, min_lr=min_lr, warmup_epochs=warmup_epochs), 0.0
 
 
 def resolve_monitor_value(metrics: Dict[str, object], monitor_name: str) -> float:
@@ -491,14 +717,26 @@ def make_step_function(
     optimizer_head,
     optimizer_backbone=None,
     loss_scale: float = 1.0,
+    lambda_sem_runtime: Optional[tf.Variable] = None,
+    rdrop_metrics=None,
+    vlm_kd_metrics=None,
+    backbone_grad_mask: Optional[Dict[str, bool]] = None,
+    backbone_lr_scales: Optional[Dict[str, float]] = None,
 ):
     loss_cfg = cfg["training"]
+    from losses.vlm_kd import validate_kd_settings
+    lambda_vlm_kd, kd_temperature = validate_kd_settings(loss_cfg)
+    lambda_rdrop = float(loss_cfg.get("lambda_rdrop", 0.0))
+    if not np.isfinite(lambda_rdrop) or lambda_rdrop < 0:
+        raise ValueError("training.lambda_rdrop must be finite and >= 0.")
+    ce_kwargs = training_ce_kwargs(cfg)
     label_smoothing = float(loss_cfg.get("label_smoothing", 0.0))
     ortho_weight = float(cfg["model"].get("ortho_loss_weight", 0.003))
     cnn_aux_weight = float(cfg["model"].get("cnn_aux_loss_weight", 0.4))
     sam_rho = float(loss_cfg.get("sam_rho", 0.03))
     sam_adaptive = bool(loss_cfg.get("sam_adaptive", False))
-    use_sam = str(loss_cfg.get("optimizer", "sam")).lower() == "sam"
+    optimizer_name = str(loss_cfg.get("optimizer", "sam")).lower().replace("_", "-")
+    use_sam = optimizer_name in {"sam", "adamw+sam", "sam+adamw", "adamw-sam", "sam-adamw"}
     skip_nonfinite = bool(loss_cfg.get("skip_nonfinite_batches", True))
     grad_clip_norm = float(loss_cfg.get("grad_clip_norm", 0.0)) if loss_cfg.get("grad_clip_norm") else None
     loss_scale_tensor = tf.constant(float(loss_scale), dtype=tf.float32)
@@ -509,7 +747,7 @@ def make_step_function(
         finite_tensors = [tf.reduce_all(tf.math.is_finite(g)) for g in grads if g is not None]
         return tf.constant(True) if not finite_tensors else tf.reduce_all(tf.stack(finite_tensors))
 
-    def _batch_stats(outputs, labels):
+    def _batch_stats(outputs, labels, parts):
         preds = tf.argmax(outputs["logits"], axis=-1, output_type=tf.int32)
         correct = tf.reduce_sum(tf.cast(tf.equal(preds, labels), tf.int32))
         count = tf.shape(labels)[0]
@@ -521,6 +759,7 @@ def make_step_function(
         gw_sum = tf.zeros([5], dtype=tf.float32)
         gw_sq_sum = tf.zeros([5], dtype=tf.float32)
         entropy_sum = tf.constant(0.0, dtype=tf.float32)
+        gw_max = tf.constant(0.0, dtype=tf.float32)
         gw = outputs.get("granularity_weights")
         if gw is not None:
             gw_f32 = tf.cast(gw, tf.float32)
@@ -528,8 +767,15 @@ def make_step_function(
             gw_sq_sum = tf.reduce_sum(tf.square(gw_f32), axis=0)
             ent = -tf.reduce_sum(gw_f32 * tf.math.log(gw_f32 + 1e-9), axis=-1)
             entropy_sum = tf.reduce_sum(ent)
+            gw_max = tf.reduce_max(gw_f32)
 
-        return correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum
+        if rdrop_metrics is not None and lambda_rdrop > 0.0:
+            rdrop_metrics.update_state(parts, count)
+        if vlm_kd_metrics is not None and lambda_vlm_kd > 0.0:
+            vlm_kd_metrics.update_state(parts, count)
+        if outputs.get("stage_fusion_weights") is not None:
+            model.stage_fusion_train_metrics.update_state(outputs)
+        return correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, gw_max
 
     def _clip_gradients(grads):
         if grad_clip_norm:
@@ -540,7 +786,22 @@ def make_step_function(
         grads = _clip_gradients(grads)
         backbone_ids = {variable_key(v) for v in backbone_vars}
         head_grads = [(g, v) for g, v in zip(grads, trainable_vars) if variable_key(v) not in backbone_ids and g is not None]
-        backbone_grads = [(g, v) for g, v in zip(grads, trainable_vars) if variable_key(v) in backbone_ids and g is not None]
+        backbone_grads_raw = [(g, v) for g, v in zip(grads, trainable_vars) if variable_key(v) in backbone_ids and g is not None]
+        # Apply progressive unfreeze mask: zero out gradients for frozen stages
+        if backbone_grad_mask is not None:
+            backbone_grads = []
+            for g, v in backbone_grads_raw:
+                v_key = variable_key(v)
+                if backbone_grad_mask.get(v_key, False):
+                    # Variable is trainable; apply per-stage LR scale if configured
+                    if backbone_lr_scales is not None:
+                        scale = backbone_lr_scales.get(v_key, 1.0)
+                        if scale != 1.0:
+                            g = g * scale
+                    backbone_grads.append((g, v))
+                # else: variable is frozen, skip its gradient entirely
+        else:
+            backbone_grads = backbone_grads_raw
         if head_grads:
             optimizer_head.apply_gradients(head_grads)
         if optimizer_backbone is not None and backbone_grads:
@@ -548,10 +809,12 @@ def make_step_function(
 
     def _step_impl(features, labels, trainable_vars):
         with tf.GradientTape() as tape:
-            outputs = model(features, training=True)
-            raw_loss, parts = supervised_mgr_loss(
-                labels,
-                outputs,
+            outputs, raw_loss, parts = forward_training_loss(
+                model, features, labels,
+                lambda_rdrop=lambda_rdrop,
+                lambda_vlm_kd=lambda_vlm_kd, kd_temperature=kd_temperature,
+                lambda_sem_runtime=lambda_sem_runtime,
+                **ce_kwargs,
                 num_classes=cfg["data"]["num_classes"],
                 label_smoothing=label_smoothing,
                 ortho_weight=ortho_weight,
@@ -566,31 +829,35 @@ def make_step_function(
 
         if not use_sam:
             _apply_gradients(grads, trainable_vars)
-            fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum = _batch_stats(outputs, labels)
-            return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, tf.constant(1, tf.int32)
+            fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, gw_max = _batch_stats(outputs, labels, parts)
+            return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, gw_max, tf.constant(1, tf.int32)
 
         grads = _clip_gradients(grads)
         grad_norm = tf.linalg.global_norm([g for g in grads if g is not None])
+        is_finite_grad = tf.math.is_finite(grad_norm)
 
         eps_list = []
         for var, grad in zip(trainable_vars, grads):
             if grad is None:
                 eps_list.append(None)
                 continue
-            scale = sam_rho / (grad_norm + 1e-12)
+            scale = tf.where(is_finite_grad, sam_rho / (grad_norm + 1e-12), 0.0)
             if sam_adaptive:
                 scale = scale * tf.square(tf.abs(var))
-            eps_list.append(grad * scale)
+            eps = tf.where(tf.math.is_finite(grad), grad * scale, tf.zeros_like(grad))
+            eps_list.append(eps)
 
         for var, eps in zip(trainable_vars, eps_list):
             if eps is not None:
                 var.assign_add(eps)
 
         with tf.GradientTape() as tape2:
-            outputs_2 = model(features, training=True)
-            raw_loss_2, _ = supervised_mgr_loss(
-                labels,
-                outputs_2,
+            _, raw_loss_2, _ = forward_training_loss(
+                model, features, labels,
+                lambda_rdrop=lambda_rdrop,
+                lambda_vlm_kd=lambda_vlm_kd, kd_temperature=kd_temperature,
+                lambda_sem_runtime=lambda_sem_runtime,
+                **ce_kwargs,
                 num_classes=cfg["data"]["num_classes"],
                 label_smoothing=label_smoothing,
                 ortho_weight=ortho_weight,
@@ -607,8 +874,8 @@ def make_step_function(
             grads_2 = [tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) if g is not None else None for g in grads_2]
 
         _apply_gradients(grads_2, trainable_vars)
-        fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum = _batch_stats(outputs, labels)
-        return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, tf.constant(1, tf.int32)
+        fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, gw_max = _batch_stats(outputs, labels, parts)
+        return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, gw_max, tf.constant(1, tf.int32)
 
     def train_step_head(features, labels):
         return _step_impl(features, labels, head_vars)
@@ -625,7 +892,7 @@ def make_distributed_train_step(strategy: tf.distribute.Strategy, train_step):
         (
             per_loss, per_ce, per_sem, per_hard,
             per_correct, per_sem_correct, per_count,
-            per_gw_sum, per_gw_sq_sum, per_ent_sum, per_ok
+            per_gw_sum, per_gw_sq_sum, per_ent_sum, per_gw_max, per_ok
         ) = strategy.run(train_step, args=batch)
         ok = strategy.reduce(tf.distribute.ReduceOp.SUM, per_ok, axis=None)
         loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_loss, axis=None)
@@ -638,7 +905,8 @@ def make_distributed_train_step(strategy: tf.distribute.Strategy, train_step):
         gw_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_gw_sum, axis=None)
         gw_sq_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_gw_sq_sum, axis=None)
         ent_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_ent_sum, axis=None)
-        return loss, ce, sem, hard, correct, sem_correct, count, gw_sum, gw_sq_sum, ent_sum, ok
+        gw_max = tf.reduce_max(tf.stack(strategy.experimental_local_results(per_gw_max)))
+        return loss, ce, sem, hard, correct, sem_correct, count, gw_sum, gw_sq_sum, ent_sum, gw_max, ok
 
     return distributed_step
 
@@ -651,6 +919,7 @@ def evaluate_dataset(
     use_tta_hflip: Optional[bool] = None,
     original_weight: Optional[float] = None,
     flip_weight: Optional[float] = None,
+    lambda_sem_override: Optional[float] = None,
 ) -> Dict[str, object]:
     tta_cfg = cfg.get("tta", {})
     if use_tta_hflip is None:
@@ -660,6 +929,9 @@ def evaluate_dataset(
 
     w_orig = float(original_weight if original_weight is not None else tta_cfg.get("original_weight", 0.5))
     w_flip = float(flip_weight if flip_weight is not None else tta_cfg.get("flip_weight", 0.5))
+    eval_lambda_sem = float(
+        configured_lambda_sem(cfg) if lambda_sem_override is None else lambda_sem_override
+    )
 
     if use_tta:
         total_w = w_orig + w_flip
@@ -672,8 +944,23 @@ def evaluate_dataset(
     else:
         print(f"[TTA] Horizontal Flip: DISABLED", flush=True)
 
+    # Evaluation may run outside the strategy used to create the model.
+    # Match accumulator variable ownership to the actual _eval_step execution:
+    # strategy.run only for >1 replicas; otherwise ordinary tf.function.
+    fusion_eval_tracker = None
+    if getattr(model, "use_multistage_adaptive_fusion", False):
+        from utils.stage_fusion_metrics import StageFusionMetrics
+        if strategy is not None and strategy.num_replicas_in_sync > 1:
+            with strategy.scope():
+                fusion_eval_tracker = StageFusionMetrics("stage_fusion_eval")
+        else:
+            fusion_eval_tracker = StageFusionMetrics("stage_fusion_eval")
+
     def _forward_outputs(inputs):
         outputs_orig = model(inputs, training=False)
+        if outputs_orig.get("semantic_logits") is not None:
+            outputs_orig = dict(outputs_orig)
+            outputs_orig["lambda_sem"] = tf.constant(eval_lambda_sem, dtype=tf.float32)
         if not use_tta:
             return outputs_orig, outputs_orig
 
@@ -682,6 +969,9 @@ def evaluate_dataset(
         if "mask" in inputs:
             flipped_inputs["mask"] = tf.image.flip_left_right(inputs["mask"])
         outputs_flip = model(flipped_inputs, training=False)
+        if outputs_flip.get("semantic_logits") is not None:
+            outputs_flip = dict(outputs_flip)
+            outputs_flip["lambda_sem"] = tf.constant(eval_lambda_sem, dtype=tf.float32)
 
         outputs_tta = dict(outputs_orig)
         outputs_tta["logits"] = w_orig * outputs_orig["logits"] + w_flip * outputs_flip["logits"]
@@ -693,6 +983,8 @@ def evaluate_dataset(
     @tf.function(reduce_retracing=True, jit_compile=False)
     def _eval_step(inputs, labels):
         outputs_orig, outputs_tta = _forward_outputs(inputs)
+        if fusion_eval_tracker is not None:
+            fusion_eval_tracker.update_state(outputs_orig)
         total_l_orig, parts_orig = supervised_mgr_loss(
             labels,
             outputs_orig,
@@ -711,16 +1003,32 @@ def evaluate_dataset(
         )
         fer_preds_orig = tf.argmax(outputs_orig["logits"], axis=-1, output_type=tf.int32)
         fer_preds_tta = tf.argmax(outputs_tta["logits"], axis=-1, output_type=tf.int32)
+        semantic_logits_orig = outputs_orig.get("semantic_logits")
+        semantic_logits_tta = outputs_tta.get("semantic_logits")
+        if semantic_logits_orig is not None and semantic_logits_tta is not None:
+            semantic_preds_orig = tf.argmax(semantic_logits_orig, axis=-1, output_type=tf.int32)
+            semantic_preds_tta = tf.argmax(semantic_logits_tta, axis=-1, output_type=tf.int32)
+            semantic_correct_orig = tf.reduce_sum(tf.cast(tf.equal(semantic_preds_orig, labels), tf.int32))
+            semantic_correct_tta = tf.reduce_sum(tf.cast(tf.equal(semantic_preds_tta, labels), tf.int32))
+        else:
+            semantic_correct_orig = tf.constant(0, dtype=tf.int32)
+            semantic_correct_tta = tf.constant(0, dtype=tf.int32)
+
+        # Calibration diagnostics: max softmax probability per sample
+        probs_tta = tf.nn.softmax(tf.cast(outputs_tta["logits"], tf.float32), axis=-1)
+        max_probs_tta = tf.reduce_max(probs_tta, axis=-1)  # [B]
 
         return (
             total_l_orig, parts_orig["ce"], parts_orig["semantic"], parts_orig.get("hard_semantic", tf.constant(0.0, tf.float32)), fer_preds_orig,
             total_l_tta, parts_tta["ce"], parts_tta["semantic"], parts_tta.get("hard_semantic", tf.constant(0.0, tf.float32)), fer_preds_tta,
-            tf.shape(labels)[0], labels
+            semantic_correct_orig, semantic_correct_tta,
+            tf.shape(labels)[0], labels, max_probs_tta
         )
 
     y_true: List[int] = []
     y_pred_orig: List[int] = []
     y_pred_tta: List[int] = []
+    max_probs_all: List[float] = []  # For calibration diagnostics
 
     total_loss_orig = 0.0
     total_ce_orig = 0.0
@@ -732,6 +1040,8 @@ def evaluate_dataset(
     total_sem_tta = 0.0
     total_hard_tta = 0.0
     total_count = 0
+    total_semantic_correct_orig = 0
+    total_semantic_correct_tta = 0
 
     if strategy is not None and strategy.num_replicas_in_sync > 1:
         dist_dataset = strategy.experimental_distribute_dataset(dataset)
@@ -740,10 +1050,11 @@ def evaluate_dataset(
             (
                 loc_tot_o, loc_ce_o, loc_sem_o, loc_hd_o, loc_p_o,
                 loc_tot_t, loc_ce_t, loc_sem_t, loc_hd_t, loc_p_t,
-                loc_cnts, loc_lbs
+                loc_sem_correct_o, loc_sem_correct_t,
+                loc_cnts, loc_lbs, loc_max_probs
             ) = strategy.run(_eval_step, args=batch)
 
-            for l_tot_o, l_ce_o, l_sem_o, l_hd_o, l_p_o, l_tot_t, l_ce_t, l_sem_t, l_hd_t, l_p_t, l_cnt, l_lb in zip(
+            for l_tot_o, l_ce_o, l_sem_o, l_hd_o, l_p_o, l_tot_t, l_ce_t, l_sem_t, l_hd_t, l_p_t, l_sem_correct_o, l_sem_correct_t, l_cnt, l_lb, l_mp in zip(
                 strategy.experimental_local_results(loc_tot_o),
                 strategy.experimental_local_results(loc_ce_o),
                 strategy.experimental_local_results(loc_sem_o),
@@ -754,8 +1065,11 @@ def evaluate_dataset(
                 strategy.experimental_local_results(loc_sem_t),
                 strategy.experimental_local_results(loc_hd_t),
                 strategy.experimental_local_results(loc_p_t),
+                strategy.experimental_local_results(loc_sem_correct_o),
+                strategy.experimental_local_results(loc_sem_correct_t),
                 strategy.experimental_local_results(loc_cnts),
                 strategy.experimental_local_results(loc_lbs),
+                strategy.experimental_local_results(loc_max_probs),
             ):
                 count = int(l_cnt.numpy())
                 if count == 0:
@@ -769,20 +1083,24 @@ def evaluate_dataset(
                 total_ce_tta += float(l_ce_t.numpy()) * count
                 total_sem_tta += float(l_sem_t.numpy()) * count
                 total_hard_tta += float(l_hd_t.numpy()) * count
+                total_semantic_correct_orig += int(l_sem_correct_o.numpy())
+                total_semantic_correct_tta += int(l_sem_correct_t.numpy())
 
                 total_count += count
                 y_true.extend(l_lb.numpy().tolist())
                 y_pred_orig.extend(l_p_o.numpy().tolist())
                 y_pred_tta.extend(l_p_t.numpy().tolist())
+                max_probs_all.extend(l_mp.numpy().tolist())
 
     else:
         for batch in dataset:
             inputs, labels = batch
-            tot_o, ce_o, sem_o, hd_o, p_o, tot_t, ce_t, sem_t, hd_t, p_t, count, _ = _eval_step(inputs, labels)
+            tot_o, ce_o, sem_o, hd_o, p_o, tot_t, ce_t, sem_t, hd_t, p_t, sem_correct_o, sem_correct_t, count, _, max_probs_batch = _eval_step(inputs, labels)
             c = int(count.numpy())
             y_true.extend(labels.numpy().tolist())
             y_pred_orig.extend(p_o.numpy().tolist())
             y_pred_tta.extend(p_t.numpy().tolist())
+            max_probs_all.extend(max_probs_batch.numpy().tolist())
 
             total_loss_orig += float(tot_o.numpy()) * c
             total_ce_orig += float(ce_o.numpy()) * c
@@ -793,27 +1111,67 @@ def evaluate_dataset(
             total_ce_tta += float(ce_t.numpy()) * c
             total_sem_tta += float(sem_t.numpy()) * c
             total_hard_tta += float(hd_t.numpy()) * c
+            total_semantic_correct_orig += int(sem_correct_o.numpy())
+            total_semantic_correct_tta += int(sem_correct_t.numpy())
 
             total_count += c
 
     c_norm = max(total_count, 1)
 
-    metrics_tta = classification_metrics(y_true, y_pred_tta, EMOTION_NAMES)
+    class_names = get_class_names(cfg)
+    metrics_tta = classification_metrics(y_true, y_pred_tta, class_names)
+    metrics_tta["class_names"] = class_names
     metrics_tta["loss"] = total_loss_tta / c_norm
     metrics_tta["total_loss"] = total_loss_tta / c_norm
     metrics_tta["ce_loss"] = total_ce_tta / c_norm
     metrics_tta["semantic_loss"] = total_sem_tta / c_norm
+    metrics_tta["weighted_sem_loss"] = eval_lambda_sem * metrics_tta["semantic_loss"]
+    metrics_tta["semantic_accuracy"] = total_semantic_correct_tta / c_norm
+    metrics_tta["lambda_sem"] = eval_lambda_sem
     metrics_tta["hard_semantic_loss"] = total_hard_tta / c_norm
     metrics_tta["tta_hflip"] = bool(use_tta)
     metrics_tta["original_weight"] = w_orig
     metrics_tta["flip_weight"] = w_flip
 
-    metrics_no_tta = classification_metrics(y_true, y_pred_orig, EMOTION_NAMES)
+    metrics_no_tta = classification_metrics(y_true, y_pred_orig, class_names)
     metrics_tta["no_tta_accuracy"] = float(metrics_no_tta["accuracy"])
     metrics_tta["no_tta_macro_f1"] = float(metrics_no_tta["macro_f1"])
     metrics_tta["no_tta_weighted_f1"] = float(metrics_no_tta["weighted_f1"])
     metrics_tta["no_tta_loss"] = total_loss_orig / c_norm
+    metrics_tta["no_tta_semantic_loss"] = total_sem_orig / c_norm
+    metrics_tta["no_tta_weighted_sem_loss"] = eval_lambda_sem * metrics_tta["no_tta_semantic_loss"]
+    metrics_tta["no_tta_semantic_accuracy"] = total_semantic_correct_orig / c_norm
     metrics_tta["no_tta_hard_semantic_loss"] = total_hard_orig / c_norm
+
+    # --- Calibration Diagnostics (post-hoc, no backprop) ---
+    if max_probs_all:
+        mp_arr = np.array(max_probs_all, dtype=np.float64)
+        yt_arr = np.array(y_true, dtype=np.int64)
+        yp_arr = np.array(y_pred_tta, dtype=np.int64)
+        mean_confidence = float(np.mean(mp_arr))
+        nll = float(metrics_tta["loss"])  # Already computed
+        # ECE with 15 bins
+        n_bins = 15
+        bin_boundaries = np.linspace(0.0, 1.0, n_bins + 1)
+        correct = (yp_arr == yt_arr).astype(np.float64)
+        ece = 0.0
+        for i in range(n_bins):
+            in_bin = (mp_arr > bin_boundaries[i]) & (mp_arr <= bin_boundaries[i + 1])
+            if i == 0:
+                in_bin = in_bin | (mp_arr == bin_boundaries[i])
+            bin_count = int(np.sum(in_bin))
+            if bin_count > 0:
+                bin_acc = float(np.mean(correct[in_bin]))
+                bin_conf = float(np.mean(mp_arr[in_bin]))
+                ece += (bin_count / len(mp_arr)) * abs(bin_acc - bin_conf)
+        metrics_tta["mean_max_confidence"] = mean_confidence
+        metrics_tta["nll"] = nll
+        metrics_tta["ece"] = float(ece)
+        print(
+            f"  CALIBRATION - Mean confidence: {mean_confidence:.4f} | "
+            f"NLL: {nll:.4f} | ECE: {ece:.4f}",
+            flush=True,
+        )
 
     print(f"[EVALUATION SUMMARY]", flush=True)
     print(
@@ -829,6 +1187,13 @@ def evaluate_dataset(
             f"Weighted F1: {metrics_tta['weighted_f1']:.4f}",
             flush=True,
         )
+
+    if fusion_eval_tracker is not None:
+        from utils.stage_fusion_metrics import format_stage_fusion
+        fusion_values = fusion_eval_tracker.snapshot()
+        metrics_tta.update(fusion_values)
+        metrics_tta["stage_fusion_view"] = "original"
+        print("[STAGE_FUSION][eval original] " + format_stage_fusion(fusion_values), flush=True)
 
     gc.collect()
     return metrics_tta
@@ -879,6 +1244,22 @@ def main() -> int:
     logs_dir = Path(cfg["paths"]["logs_dir"])
     logs_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_root = run_dir / "checkpoints"
+    if float(cfg["training"].get("lambda_vlm_kd", 0.0)) > 0:
+        from utils.vlm_teacher_cache import resolve as resolve_teacher_path, sha256
+        teacher_path = resolve_teacher_path(cfg["vlm_teacher"]["cache_path"])
+        with np.load(teacher_path, allow_pickle=False) as teacher_cache:
+            teacher_manifest = json.loads(str(teacher_cache["metadata"].item()))
+        teacher_manifest.update(cache_path=str(teacher_path), cache_sha256=sha256(teacher_path))
+        (run_dir / "teacher_cache_manifest.json").write_text(
+            json.dumps(teacher_manifest, indent=2), encoding="utf-8")
+        (run_dir / "effective_config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    if cfg["training"].get("weighted_ce", {}).get("enabled", False):
+        (run_dir / "ce_class_weights.json").write_text(
+            json.dumps(cfg["training"]["resolved_ce_weight_report"], indent=2), encoding="utf-8"
+        )
+        (run_dir / "effective_config.json").write_text(
+            json.dumps(cfg, indent=2), encoding="utf-8"
+        )
 
     with strategy.scope():
         model = build_model(cfg)
@@ -902,6 +1283,32 @@ def main() -> int:
         print(f"Smoke logits shape: {smoke['logits'].shape}")
         optimizer_head = build_optimizer(cfg, float(cfg["training"]["lr"]))
         optimizer_backbone = build_optimizer(cfg, float(cfg["training"].get("visual_extractor_lr", cfg["training"]["lr"])))
+        lambda_sem_runtime = tf.Variable(
+            configured_lambda_sem(cfg),
+            dtype=tf.float32,
+            trainable=False,
+            name="lambda_sem_runtime",
+        )
+        # Metrics live in the strategy scope but outside the model/checkpoint.
+        rdrop_train_tracker = None
+        from losses.vlm_kd import validate_kd_settings, VLMKDMetrics
+        lambda_vlm_kd, kd_temperature = validate_kd_settings(cfg["training"])
+        vlm_kd_tracker = VLMKDMetrics() if lambda_vlm_kd > 0 else None
+        if vlm_kd_tracker is not None:
+            print(f"[VLM_KD] lambda={lambda_vlm_kd} T={kd_temperature}; "
+                  "frozen cached clean-224 teacher -> V5 fused logits; "
+                  "both SAM passes; no R-Drop/feature cosine; inference unchanged.", flush=True)
+        lambda_rdrop = float(cfg["training"].get("lambda_rdrop", 0.0))
+        if not np.isfinite(lambda_rdrop) or lambda_rdrop < 0:
+            raise ValueError("training.lambda_rdrop must be finite and >= 0.")
+        if lambda_rdrop > 0:
+            from utils.rdrop_metrics import RDropMetrics
+            rdrop_train_tracker = RDropMetrics()
+            print(
+                f"[RDROP] lambda={lambda_rdrop}; symmetric KL on fused logits; "
+                "two same-input forwards per objective; both SAM passes use R-Drop; "
+                "validation/test inference unchanged.", flush=True,
+            )
         backbone_vars_for_optimizer, head_vars_for_optimizer = split_variables(model)
         ensure_optimizer_built(optimizer_head, head_vars_for_optimizer, strategy)
         ensure_optimizer_built(optimizer_backbone, backbone_vars_for_optimizer, strategy)
@@ -921,16 +1328,6 @@ def main() -> int:
         )
         max_to_keep_acc = int(cfg["training"].get("max_to_keep_acc", 5))
         max_to_keep_loss = int(cfg["training"].get("max_to_keep_loss", 5))
-        best_manager = tf.train.CheckpointManager(
-            checkpoint,
-            directory=str(checkpoint_root / "best"),
-            max_to_keep=max_to_keep_acc,
-        )
-        best_loss_manager = tf.train.CheckpointManager(
-            checkpoint,
-            directory=str(checkpoint_root / "best_loss"),
-            max_to_keep=max_to_keep_loss,
-        )
         periodic_manager = tf.train.CheckpointManager(
             checkpoint,
             directory=str(checkpoint_root / "periodic"),
@@ -944,6 +1341,7 @@ def main() -> int:
     first_loss, _ = supervised_mgr_loss(
         first_labels,
         first_outputs,
+        **training_ce_kwargs(cfg),
         num_classes=cfg["data"]["num_classes"],
         label_smoothing=float(cfg["training"].get("label_smoothing", 0.0)),
         ortho_weight=float(cfg["model"].get("ortho_loss_weight", 0.003)),
@@ -956,26 +1354,84 @@ def main() -> int:
     if backbone_vars:
         print(f"Backbone trainable vars: {len(backbone_vars)}")
     print(f"Head trainable vars: {len(head_vars)}")
+    print(f"[CONFIG] label_smoothing={float(cfg['training'].get('label_smoothing', 0.0))}", flush=True)
 
     loss_scale = 1.0 / float(max(int(strategy.num_replicas_in_sync), 1))
     print(f"[INFO] Distributed gradient loss scale: {loss_scale:.6f}")
-    train_step_head, train_step_full = make_step_function(
-        cfg,
-        model,
-        optimizer_head,
-        optimizer_backbone,
-        loss_scale=loss_scale,
-    )
-    distributed_train_step_head = make_distributed_train_step(strategy, train_step_head)
-    distributed_train_step_full = make_distributed_train_step(strategy, train_step_full)
+
     start_epoch = int(ckpt_epoch.numpy())
     monitor_name = str(cfg["training"].get("monitor", "val_macro_f1"))
     best_score = float(ckpt_best_metric.numpy())
     best_epoch = start_epoch if best_score >= 0.0 else -1
     best_checkpoint_start_epoch = int(cfg["training"].get("best_checkpoint_start_epoch", 1) or 1)
     patience_anchor_epoch = best_epoch if best_score >= 0.0 else max(start_epoch, best_checkpoint_start_epoch - 1)
+
+    # --- Progressive Unfreezing Initialization ---
+    prog_unfreeze_enabled = bool(cfg.get("model", {}).get("progressive_unfreeze", {}).get("enabled", False))
+    if prog_unfreeze_enabled:
+        print("[PROGRESSIVE_UNFREEZE] Enabled", flush=True)
+    prev_trainable_stages: Optional[List[int]] = None  # Track stage transitions
+    prev_lr_scales: Optional[Dict[str, float]] = None
+    gate_collapse_consecutive_epochs: int = 0
+
+    def _build_step_functions(grad_mask, lr_scales):
+        """Build train step functions with the given gradient mask."""
+        step_head, step_full = make_step_function(
+            cfg,
+            model,
+            optimizer_head,
+            optimizer_backbone,
+            loss_scale=loss_scale,
+            lambda_sem_runtime=lambda_sem_runtime,
+            rdrop_metrics=rdrop_train_tracker,
+            vlm_kd_metrics=vlm_kd_tracker,
+            backbone_grad_mask=grad_mask,
+            backbone_lr_scales=lr_scales,
+        )
+        dist_head = make_distributed_train_step(strategy, step_head)
+        dist_full = make_distributed_train_step(strategy, step_full)
+        return step_head, step_full, dist_head, dist_full
+
+    # Initial step functions (will be rebuilt at unfreeze boundaries)
+    initial_mask, initial_stages = resolve_progressive_unfreeze_mask(
+        cfg, start_epoch + 1, backbone_vars
+    ) if prog_unfreeze_enabled else (None, [1, 2, 3, 4])
+    initial_lr_scales = compute_stage_lr_scales(
+        cfg, backbone_vars, initial_stages, epoch_number=start_epoch + 1
+    ) if prog_unfreeze_enabled else None
+
+    train_step_head, train_step_full, distributed_train_step_head, distributed_train_step_full = _build_step_functions(
+        initial_mask, initial_lr_scales
+    )
     history = []
     csv_path = run_dir / "training_history.csv"
+    best_manager = RankedCheckpointManager(
+        checkpoint=checkpoint,
+        directory=checkpoint_root / "best",
+        max_to_keep=max_to_keep_acc,
+        metric_name="val_accuracy",
+        mode="max",
+        history_csv=csv_path,
+    )
+    best_loss_manager = RankedCheckpointManager(
+        checkpoint=checkpoint,
+        directory=checkpoint_root / "best_loss",
+        max_to_keep=max_to_keep_loss,
+        metric_name="val_loss",
+        mode="min",
+        history_csv=csv_path,
+    )
+    macro_manager = None
+    _create_macro_mgr = (
+        (cfg["training"].get("weighted_ce", {}).get("enabled", False) and monitor_name == "val_macro_f1")
+        or bool(cfg["training"].get("save_best_macro_f1", False))
+    )
+    if _create_macro_mgr:
+        macro_manager = RankedCheckpointManager(
+            checkpoint=checkpoint, directory=checkpoint_root / "best_macro_f1",
+            max_to_keep=1, metric_name="val_macro_f1", mode="max", history_csv=csv_path,
+        )
+        print("[CHECKPOINT] Best Macro-F1 checkpoint manager enabled", flush=True)
     progress_interval = int(cfg["training"].get("progress_interval", 0) or 0)
     periodic_interval = int(cfg["training"].get("periodic_checkpoint_interval", 10) or 0)
     eval_strategy = strategy if bool(cfg["runtime"].get("distributed_eval", False)) else None
@@ -994,17 +1450,84 @@ def main() -> int:
         "cooldown_remaining": 0,
         "snapshot": None,
     }
-    best_val_loss_tracked = float("inf")
+    best_val_loss_tracked = (
+        float(best_loss_manager.entries[0]["metric"])
+        if best_loss_manager.entries else float("inf")
+    )
     for epoch in range(start_epoch, int(cfg["training"]["epochs"])):
         epoch_start_time = time.time()
+        epoch_number = epoch + 1
+        current_lambda_sem = resolve_lambda_sem(cfg, epoch_number)
+        lambda_sem_runtime.assign(current_lambda_sem)
+        if bool(getattr(model, "granularity_gate_schedule_enabled", False)):
+            model.set_granularity_gate_epoch(epoch_number)
+            print(f"[GRANULARITY_GATE] Epoch {epoch_number}: schedule epoch set", flush=True)
+
+        print(
+            f"[SEMANTIC_SCHEDULE] Epoch {epoch_number}: lambda_sem={current_lambda_sem:.4f}",
+            flush=True,
+        )
+        try:
+            from datasets.fer2013 import get_oversample_stats
+            _ov_stats = get_oversample_stats()
+            if _ov_stats.get("enabled", False):
+                print(
+                    f"[DATASET_OVERSAMPLE] Epoch {epoch_number}: effective_counts={_ov_stats.get('effective_class_counts')} "
+                    f"total_samples={_ov_stats.get('total_samples')}",
+                    flush=True,
+                )
+        except Exception:
+            pass
         train_backbone = bool(cfg["model"].get("unfreeze_backbone", True)) and epoch >= freeze_epochs
-        phase_transitioned = bool(train_backbone and epoch == freeze_epochs)
-        if phase_transitioned:
-            patience_anchor_epoch = epoch + 1
-            print(
-                f"[INFO] Unfreezing backbone at epoch {epoch+1}; resetting early-stopping patience counter",
-                flush=True,
+        phase_transitioned = False
+
+        # --- Progressive Unfreezing ---
+        if prog_unfreeze_enabled:
+            current_mask, current_stages = resolve_progressive_unfreeze_mask(
+                cfg, epoch_number, backbone_vars
             )
+            current_lr_scales = compute_stage_lr_scales(
+                cfg, backbone_vars, current_stages, epoch_number=epoch_number
+            )
+
+            # Detect stage transition or LR scale multiplier changes
+            if (
+                prev_trainable_stages is None
+                or current_stages != prev_trainable_stages
+                or current_lr_scales != prev_lr_scales
+            ):
+                phase_transitioned = True
+                log_unfreeze_state(
+                    epoch_number, current_stages, backbone_vars, current_mask,
+                    current_lr_scales,
+                    float(cfg["training"].get("visual_extractor_lr", cfg["training"]["lr"])),
+                )
+                # Rebuild step functions with new gradient mask
+                train_step_head, train_step_full, distributed_train_step_head, distributed_train_step_full = _build_step_functions(
+                    current_mask, current_lr_scales
+                )
+                if prev_trainable_stages is not None:
+                    patience_anchor_epoch = epoch + 1
+                    print(
+                        f"[INFO] Progressive unfreeze transition at epoch {epoch_number}; "
+                        f"resetting early-stopping patience counter",
+                        flush=True,
+                    )
+                prev_trainable_stages = list(current_stages)
+                prev_lr_scales = dict(current_lr_scales)
+
+            # If any stages are trainable, use full step (backbone gets masked gradients)
+            train_backbone = len(current_stages) > 0
+        else:
+            # Legacy freeze/unfreeze behavior
+            if train_backbone and epoch == freeze_epochs:
+                phase_transitioned = True
+                patience_anchor_epoch = epoch + 1
+                print(
+                    f"[INFO] Unfreezing backbone at epoch {epoch+1}; resetting early-stopping patience counter",
+                    flush=True,
+                )
+
         train_step = train_step_full if train_backbone else train_step_head
         distributed_train_step = distributed_train_step_full if train_backbone else distributed_train_step_head
         # Dynamic 2-Stage Transition check
@@ -1040,19 +1563,27 @@ def main() -> int:
                 f"override lr_head={lr:.6f} lr_backbone={backbone_lr:.6f}",
                 flush=True,
             )
+        if rdrop_train_tracker is not None:
+            rdrop_train_tracker.reset_state()
+        if vlm_kd_tracker is not None:
+            vlm_kd_tracker.reset_state()
         total_losses = []
         ce_losses = []
         sem_losses = []
         hard_losses = []
+        fusion_train_tracker = getattr(model, "stage_fusion_train_metrics", None)
+        if fusion_train_tracker is not None:
+            fusion_train_tracker.reset_state()
         total_gw_sum = np.zeros(5, dtype=np.float64)
         total_gw_sq_sum = np.zeros(5, dtype=np.float64)
         total_entropy_sum = 0.0
+        max_gate_alpha = 0.0
         fer_correct = 0
         sem_correct = 0
         seen = 0
         total_steps = int(tf.data.experimental.cardinality(train_ds).numpy())
         for step_index, batch in enumerate(train_loop_ds, start=1):
-            loss, ce_l, sem_l, hard_l, batch_correct, batch_sem_correct, batch_count, gw_sum, gw_sq_sum, ent_sum, ok = distributed_train_step(batch)
+            loss, ce_l, sem_l, hard_l, batch_correct, batch_sem_correct, batch_count, gw_sum, gw_sq_sum, ent_sum, gw_max, ok = distributed_train_step(batch)
             if int(ok.numpy()) == 0:
                 continue
             b_cnt = int(batch_count.numpy())
@@ -1066,6 +1597,7 @@ def main() -> int:
             total_gw_sum += gw_sum.numpy().astype(np.float64)
             total_gw_sq_sum += gw_sq_sum.numpy().astype(np.float64)
             total_entropy_sum += float(ent_sum.numpy())
+            max_gate_alpha = max(max_gate_alpha, float(gw_max.numpy()))
             if progress_interval and step_index % progress_interval == 0:
                 print(
                     f"Epoch {epoch+1}/{cfg['training']['epochs']} "
@@ -1073,12 +1605,24 @@ def main() -> int:
                     f"total_loss={float(loss.numpy()):.4f} "
                     f"ce_loss={float(ce_l.numpy()):.4f} "
                     f"sem_loss={float(sem_l.numpy()):.4f} "
+                    f"weighted_sem_loss={current_lambda_sem * float(sem_l.numpy()):.4f} "
                     f"hard_loss={float(hard_l.numpy()):.4f} "
                     f"fer_acc={fer_correct / max(seen, 1):.4f} "
                     f"sem_acc={sem_correct / max(seen, 1):.4f} "
-                    f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f}",
+                    f"lr_head={lr:.6f} lr_backbone={backbone_lr:.2e}",
                     flush=True,
                 )
+                if rdrop_train_tracker is not None:
+                    from utils.rdrop_metrics import format_rdrop
+                    print("[RDROP][train running] " + format_rdrop(rdrop_train_tracker.snapshot()), flush=True)
+                if vlm_kd_tracker is not None:
+                    print("[VLM_KD][train running] " + json.dumps(vlm_kd_tracker.snapshot()), flush=True)
+                if fusion_train_tracker is not None:
+                    from utils.stage_fusion_metrics import format_stage_fusion
+                    print(
+                        f"[STAGE_FUSION][train running][epoch={epoch+1} step={step_index}] "
+                        + format_stage_fusion(fusion_train_tracker.snapshot()), flush=True,
+                    )
         train_time_sec = time.time() - epoch_start_time
         train_steps = len(total_losses)
         train_samples_per_sec = float(seen) / max(train_time_sec, 1e-9)
@@ -1096,62 +1640,134 @@ def main() -> int:
         gw_var = np.maximum(0.0, (total_gw_sq_sum / n_samples) - (gw_means ** 2))
         gw_stds = np.sqrt(gw_var)
         gate_entropy = total_entropy_sum / n_samples
+        gate_max_alpha = float(max_gate_alpha)
 
         # Collapse check: warn if any weight > 0.90
+        any_weight_above_90 = False
         for k_idx, gw_m in enumerate(gw_means):
             if gw_m > 0.90:
+                any_weight_above_90 = True
                 print(
                     f"[WARNING] Granularity weight {k_idx} mean ({gw_m:.4f}) > 0.90 at Epoch {epoch+1}! Gate may be collapsing.",
                     flush=True,
                 )
+        if any_weight_above_90:
+            gate_collapse_consecutive_epochs += 1
+            if gate_collapse_consecutive_epochs >= 2:
+                print(
+                    f"[GATE_COLLAPSE_WARNING] Gate weight mean > 0.90 for {gate_collapse_consecutive_epochs} consecutive epochs (Epoch {epoch+1})! Means: {np.round(gw_means, 4).tolist()}",
+                    flush=True,
+                )
+        else:
+            gate_collapse_consecutive_epochs = 0
 
-        print(f"[INFO] Epoch {epoch+1}: starting validation", flush=True)
-        val_metrics = evaluate_dataset(
-            model,
-            val_ds,
-            cfg,
-            strategy=eval_strategy,
-            use_tta_hflip=bool(cfg["runtime"].get("train_val_tta_hflip", False)),
-        )
-        print(f"[INFO] Epoch {epoch+1}: validation finished", flush=True)
-        # --- LR Escape State Update ---
-        if lr_escape_enabled and (epoch + 1) >= int(lr_esc_cfg.get("start_epoch", 81)):
-            best_score, best_epoch, patience_anchor_epoch = _update_lr_escape_state(
-                lr_esc_state, lr_esc_cfg, val_metrics, train_loss,
-                epoch, best_score, best_epoch, patience_anchor_epoch,
-                checkpoint, best_manager,
+        fusion_train_values = None
+        if fusion_train_tracker is not None:
+            from utils.stage_fusion_metrics import format_stage_fusion
+            fusion_train_values = fusion_train_tracker.snapshot()
+            print(
+                f"[STAGE_FUSION][train epoch={epoch+1}] "
+                + format_stage_fusion(fusion_train_values), flush=True,
             )
-        monitor = resolve_monitor_value(val_metrics, monitor_name)
-        checkpoint_eligible = (epoch + 1) >= best_checkpoint_start_epoch
-        improved = bool(checkpoint_eligible and monitor > best_score)
-        if improved:
-            best_score = monitor
-            best_epoch = epoch + 1
-            patience_anchor_epoch = epoch + 1
-            ckpt_best_metric.assign(best_score)
+
+        if val_ds is not None:
+            print(f"[INFO] Epoch {epoch+1}: starting validation", flush=True)
+            val_metrics = evaluate_dataset(
+                model,
+                val_ds,
+                cfg,
+                strategy=eval_strategy,
+                use_tta_hflip=bool(cfg["runtime"].get("train_val_tta_hflip", False)),
+                lambda_sem_override=current_lambda_sem,
+            )
+            print(f"[INFO] Epoch {epoch+1}: validation finished", flush=True)
+            # --- LR Escape State Update ---
+            if lr_escape_enabled and (epoch + 1) >= int(lr_esc_cfg.get("start_epoch", 81)):
+                best_score, best_epoch, patience_anchor_epoch = _update_lr_escape_state(
+                    lr_esc_state, lr_esc_cfg, val_metrics, train_loss,
+                    epoch, best_score, best_epoch, patience_anchor_epoch,
+                    checkpoint, best_manager,
+                )
+            monitor = resolve_monitor_value(val_metrics, monitor_name)
+            checkpoint_eligible = (epoch + 1) >= best_checkpoint_start_epoch
             val_loss_val = float(val_metrics['loss'])
             val_acc_val = float(val_metrics['accuracy'])
-            print(
-                f"[INFO] Save best at ep {epoch+1}, val_loss: {val_loss_val:.4f}, val_accuracy: {val_acc_val:.4f}, monitor: {monitor_name}",
-                flush=True,
-            )
-            best_manager.save(checkpoint_number=epoch + 1)
-        elif not checkpoint_eligible:
-            print(
-                f"[INFO] Epoch {epoch+1}: best checkpoint is not considered before epoch "
-                f"{best_checkpoint_start_epoch}",
-                flush=True,
-            )
-        val_loss_val = float(val_metrics['loss'])
-        val_acc_val = float(val_metrics['accuracy'])
-        if checkpoint_eligible and val_loss_val < best_val_loss_tracked:
-            best_val_loss_tracked = val_loss_val
-            print(
-                f"[INFO] Save best_loss at ep {epoch+1}, val_loss: {val_loss_val:.4f}, val_accuracy: {val_acc_val:.4f}",
-                flush=True,
-            )
-            best_loss_manager.save(checkpoint_number=epoch + 1)
-        ckpt_epoch.assign(epoch + 1)
+            ckpt_epoch.assign(epoch + 1)
+            improved = bool(checkpoint_eligible and monitor > best_score)
+            if improved:
+                best_score = monitor
+                best_epoch = epoch + 1
+                patience_anchor_epoch = epoch + 1
+                ckpt_best_metric.assign(best_score)
+                print(
+                    f"[INFO] New all-time best at ep {epoch+1}, val_loss: {val_loss_val:.4f}, "
+                    f"val_accuracy: {val_acc_val:.4f}, monitor: {monitor_name}",
+                    flush=True,
+                )
+            elif not checkpoint_eligible:
+                print(
+                    f"[INFO] Epoch {epoch+1}: best checkpoint is not considered before epoch "
+                    f"{best_checkpoint_start_epoch}",
+                    flush=True,
+                )
+            if checkpoint_eligible and val_loss_val < best_val_loss_tracked:
+                best_val_loss_tracked = val_loss_val
+                print(
+                    f"[INFO] New all-time lowest val_loss at ep {epoch+1}: "
+                    f"val_loss={val_loss_val:.4f}, val_accuracy={val_acc_val:.4f}",
+                    flush=True,
+                )
+            if checkpoint_eligible:
+                if macro_manager is not None:
+                    macro_decision = macro_manager.consider(
+                        epoch=epoch + 1, metric=float(val_metrics["macro_f1"]),
+                        metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
+                    )
+                    if macro_decision["saved"]:
+                        print(f"[BEST_MACRO_F1] Saved ckpt-{epoch+1}: val_macro_f1={val_metrics['macro_f1']:.8f}", flush=True)
+                acc_decision = best_manager.consider(
+                    epoch=epoch + 1,
+                    metric=val_acc_val,
+                    metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
+                )
+                loss_decision = best_loss_manager.consider(
+                    epoch=epoch + 1,
+                    metric=val_loss_val,
+                    metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
+                )
+                for label, metric_value, decision in (
+                    ("TOP5_ACC", val_acc_val, acc_decision),
+                    ("TOP5_LOSS", val_loss_val, loss_decision),
+                ):
+                    if decision["saved"]:
+                        removed = decision.get("removed")
+                        removed_text = (
+                            f", removed={removed['checkpoint']} ({removed['metric']:.6f})"
+                            if removed else ""
+                        )
+                        print(
+                            f"[{label}] Saved ckpt-{epoch+1} at rank {decision['rank']}: "
+                            f"metric={metric_value:.6f}{removed_text}",
+                            flush=True,
+                        )
+                    else:
+                        threshold = decision.get("threshold")
+                        threshold_text = f"{threshold:.6f}" if threshold is not None else "N/A"
+                        print(
+                            f"[{label}] Skipped ckpt-{epoch+1}: metric={metric_value:.6f}, "
+                            f"rank-5 threshold={threshold_text}, reason={decision['reason']}",
+                            flush=True,
+                        )
+        else:
+            # Full-train protocol: no validation split, zero test leakage
+            val_metrics = {}
+            monitor = train_loss
+            val_loss_val = train_loss
+            val_acc_val = train_acc
+            checkpoint_eligible = True
+            improved = False
+            ckpt_epoch.assign(epoch + 1)
+            print(f"[INFO] Epoch {epoch+1}: full-train protocol (all 12,271 images, no validation split).", flush=True)
         print(f"[INFO] Epoch {epoch+1}: saving last checkpoint", flush=True)
         last_manager.save(checkpoint_number=epoch + 1)
         if periodic_interval and (epoch + 1) % periodic_interval == 0:
@@ -1171,6 +1787,7 @@ def main() -> int:
             "train_loss": train_loss,
             "train_ce_loss": train_ce_loss,
             "train_semantic_loss": train_sem_loss,
+            "train_weighted_sem_loss": current_lambda_sem * train_sem_loss,
             "train_hard_semantic_loss": train_hard_loss,
             "train_accuracy": train_acc,
             "train_fer_accuracy": train_acc,
@@ -1178,10 +1795,12 @@ def main() -> int:
             "val_loss": float(val_metrics.get("loss", 0.0)),
             "val_ce_loss": float(val_metrics.get("ce_loss", 0.0)),
             "val_semantic_loss": float(val_metrics.get("semantic_loss", 0.0)),
+            "val_weighted_sem_loss": float(val_metrics.get("weighted_sem_loss", 0.0)),
             "val_hard_semantic_loss": float(val_metrics.get("hard_semantic_loss", 0.0)),
             "val_accuracy": float(val_metrics.get("accuracy", 0.0)),
             "val_fer_accuracy": float(val_metrics.get("fer_accuracy", val_metrics.get("accuracy", 0.0))),
             "val_semantic_accuracy": float(val_metrics.get("semantic_accuracy", 0.0)),
+            "lambda_sem": current_lambda_sem,
             "val_macro_f1": float(val_metrics.get("macro_f1", 0.0)),
             "val_weighted_f1": float(val_metrics.get("weighted_f1", 0.0)),
             "gw_mean_0": float(gw_means[0]),
@@ -1194,6 +1813,7 @@ def main() -> int:
             "gw_std_2": float(gw_stds[2]),
             "gw_std_3": float(gw_stds[3]),
             "gw_std_4": float(gw_stds[4]),
+            "gate_max_alpha": gate_max_alpha,
             "gate_entropy": float(gate_entropy),
             "lr_head": lr,
             "lr_backbone": backbone_lr,
@@ -1206,15 +1826,47 @@ def main() -> int:
             "patience": f"{patience_counter}/{patience_limit}",
             "phase_transitioned": int(phase_transitioned),
             "improved": int(improved),
+            "val_mean_confidence": float(val_metrics.get("mean_max_confidence", 0.0)),
+            "val_ece": float(val_metrics.get("ece", 0.0)),
+            "val_nll": float(val_metrics.get("nll", val_metrics.get("loss", 0.0))),
         }
+        if cfg["training"].get("weighted_ce", {}).get("enabled", False):
+            for class_name in ("fear", "disgust"):
+                class_metrics = val_metrics["classification_report"][class_name]
+                for metric in ("precision", "recall", "f1-score"):
+                    row[f"val_{class_name}_{metric.replace('-score', '')}"] = float(class_metrics[metric])
+            print(f"[MINORITY_VAL] fear_f1={row['val_fear_f1']:.6f} disgust_f1={row['val_disgust_f1']:.6f}", flush=True)
+        if fusion_train_values is not None:
+            from utils.stage_fusion_metrics import append_fusion_epoch
+            fusion_val_values = {key: val_metrics[key] for key in fusion_train_values}
+            row.update({f"train_{key}": value for key, value in fusion_train_values.items()})
+            row.update({f"val_orig_{key}": value for key, value in fusion_val_values.items()})
+            append_fusion_epoch(
+                run_dir / "fusion_weights.csv", epoch + 1,
+                fusion_train_values, fusion_val_values,
+            )
+        if rdrop_train_tracker is not None:
+            from utils.rdrop_metrics import format_rdrop
+            rdrop_values = rdrop_train_tracker.snapshot()
+            row.update(rdrop_values)
+            row["lambda_rdrop"] = lambda_rdrop
+            print("[RDROP][train epoch] " + format_rdrop(rdrop_values), flush=True)
+        if vlm_kd_tracker is not None:
+            kd_values = vlm_kd_tracker.snapshot()
+            row.update(kd_values)
+            row.update(lambda_vlm_kd=lambda_vlm_kd, kd_temperature=kd_temperature)
+            print("[VLM_KD][train epoch] " + json.dumps(kd_values), flush=True)
         history.append(row)
         gw_means_str = ",".join([f"{m:.3f}" for m in gw_means])
         print(
             f"Epoch {epoch+1}/{cfg['training']['epochs']} [{time_str}] "
-            f"loss={train_loss:.4f} sem_loss={train_sem_loss:.4f} hard_loss={train_hard_loss:.4f} acc={train_acc:.4f} "
+            f"loss={train_loss:.4f} sem_loss={train_sem_loss:.4f} weighted_sem_loss={row['train_weighted_sem_loss']:.4f} "
+            f"hard_loss={train_hard_loss:.4f} acc={train_acc:.4f} sem_acc={train_sem_acc:.4f} "
             f"val_loss={row['val_loss']:.4f} val_acc={row['val_accuracy']:.4f} "
+            f"val_sem_loss={row['val_semantic_loss']:.4f} val_weighted_sem_loss={row['val_weighted_sem_loss']:.4f} "
+            f"val_sem_acc={row['val_semantic_accuracy']:.4f} lambda_sem={current_lambda_sem:.4f} "
             f"val_macro_f1={row['val_macro_f1']:.4f} "
-            f"gw_means=[{gw_means_str}] ent={gate_entropy:.3f} "
+            f"gw_means=[{gw_means_str}] ent={gate_entropy:.3f} max_alpha={gate_max_alpha:.3f} "
             f"throughput={train_samples_per_sec:.1f} samples/s "
             f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f} "
             f"patience={patience_counter}/{patience_limit} "
@@ -1234,19 +1886,59 @@ def main() -> int:
     else:
         print("[INFO] No new training epochs were run; skipping training_history.csv update.", flush=True)
 
-    best_ckpt = best_manager.latest_checkpoint or last_manager.latest_checkpoint
-    if best_ckpt:
-        checkpoint.restore(best_ckpt).expect_partial()
-        print(f"[INFO] Restored best checkpoint: {best_ckpt}", flush=True)
+    if monitor_name == "val_macro_f1" and macro_manager is not None:
+        selection_manager = macro_manager
+        sel_metric_name = "val_macro_f1"
+    elif monitor_name in ("val_loss", "loss") and best_loss_manager is not None:
+        selection_manager = best_loss_manager
+        sel_metric_name = "val_loss"
+    else:
+        selection_manager = best_manager
+        sel_metric_name = "val_accuracy"
+
+    if val_ds is not None and (selection_manager.latest_checkpoint or last_manager.latest_checkpoint):
+        best_ckpt = selection_manager.latest_checkpoint or last_manager.latest_checkpoint
+        if selection_manager.entries:
+            best_epoch = int(selection_manager.entries[0]["epoch"])
+            best_score = float(selection_manager.entries[0]["metric"])
+            print(f"[SELECTED_ON_VALIDATION] metric={sel_metric_name} epoch={best_epoch} score={best_score:.8f}", flush=True)
+        if best_ckpt:
+            checkpoint.restore(best_ckpt).expect_partial()
+            print(f"[INFO] Restored best checkpoint ({sel_metric_name}): {best_ckpt}", flush=True)
+    else:
+        best_ckpt = last_manager.latest_checkpoint
+        best_epoch = max(int(ckpt_epoch.numpy()), 1)
+        if best_ckpt:
+            checkpoint.restore(best_ckpt).expect_partial()
+            print(f"[INFO] Restored final full-train checkpoint (epoch {best_epoch}): {best_ckpt}", flush=True)
 
     print("\n" + "=" * 70, flush=True)
     print("  FINAL TEST EVALUATION", flush=True)
     print("=" * 70, flush=True)
+    final_class_names = get_class_names(cfg)
+    final_lambda_epoch = best_epoch if best_epoch >= 1 else max(int(ckpt_epoch.numpy()), 1)
+    final_lambda_sem = resolve_lambda_sem(cfg, final_lambda_epoch)
+    if bool(getattr(model, "granularity_gate_schedule_enabled", False)):
+        model.set_granularity_gate_epoch(final_lambda_epoch)
+        print(f"[GRANULARITY_GATE] Final evaluation uses epoch {final_lambda_epoch}", flush=True)
+    print(
+        f"[SEMANTIC_SCHEDULE] Final checkpoint epoch {final_lambda_epoch}: "
+        f"lambda_sem={final_lambda_sem:.4f}",
+        flush=True,
+    )
 
     # --- No-TTA evaluation ---
     print("\n[INFO] Running final test evaluation (No TTA)...", flush=True)
-    no_tta_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=False)
+    no_tta_metrics = evaluate_dataset(
+        model,
+        test_ds,
+        cfg,
+        strategy=eval_strategy,
+        use_tta_hflip=False,
+        lambda_sem_override=final_lambda_sem,
+    )
     save_metrics(no_tta_metrics, run_dir / "test_metrics_no_tta.json")
+    save_classification_artifacts(no_tta_metrics, run_dir / "test_no_tta", final_class_names)
     no_tta_acc = float(no_tta_metrics['accuracy'])
     print(f"\n{'─' * 50}", flush=True)
     print(f"  TEST RESULTS (No TTA)", flush=True)
@@ -1261,9 +1953,17 @@ def main() -> int:
     use_final_tta = bool(cfg["runtime"].get("eval_tta_hflip", False))
     if use_final_tta:
         print("[INFO] Running final test evaluation (TTA HFlip)...", flush=True)
-        tta_metrics = evaluate_dataset(model, test_ds, cfg, strategy=eval_strategy, use_tta_hflip=True)
+        tta_metrics = evaluate_dataset(
+            model,
+            test_ds,
+            cfg,
+            strategy=eval_strategy,
+            use_tta_hflip=True,
+            lambda_sem_override=final_lambda_sem,
+        )
         save_metrics(tta_metrics, run_dir / "test_metrics_tta_hflip.json")
         save_metrics(tta_metrics, run_dir / "test_metrics.json")
+        save_classification_artifacts(tta_metrics, run_dir / "test_tta_hflip", final_class_names)
         tta_acc = float(tta_metrics['accuracy'])
         print(f"\n{'─' * 50}", flush=True)
         print(f"  TEST RESULTS (TTA HFlip)", flush=True)
@@ -1288,8 +1988,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-
-
-

@@ -48,20 +48,33 @@ def supervised_mgr_loss(
     *,
     num_classes: int,
     label_smoothing: float = 0.0,
+    smooth_auxiliary: bool = False,
     class_weights: Optional[tf.Tensor] = None,
+    class_weight_reduction: str = "sum_weights",
+    logit_adj_offsets: Optional[tf.Tensor] = None,
     ortho_weight: float = 0.003,
     cnn_aux_weight: float = 0.4,
 ) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
     logits = tf.cast(outputs["logits"], tf.float32)
+    if logit_adj_offsets is not None:
+        train_logits = logits + tf.cast(logit_adj_offsets, tf.float32)
+    else:
+        train_logits = logits
     if label_smoothing > 0.0:
         targets = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
         targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
-        ce = tf.keras.losses.categorical_crossentropy(targets, logits, from_logits=True)
+        ce = tf.keras.losses.categorical_crossentropy(targets, train_logits, from_logits=True)
     else:
-        ce = tf.keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True)
+        ce = tf.keras.losses.sparse_categorical_crossentropy(labels, train_logits, from_logits=True)
     if class_weights is not None:
         weights = tf.cast(tf.gather(class_weights, labels), tf.float32)
-        ce = tf.reduce_sum(ce * weights) / tf.reduce_sum(weights)
+        if class_weight_reduction == "batch_mean":
+            # Weights have mean one over TRAIN, independent of batch composition.
+            ce = tf.reduce_mean(ce * weights)
+        elif class_weight_reduction == "sum_weights":
+            ce = tf.reduce_sum(ce * weights) / tf.reduce_sum(weights)
+        else:
+            raise ValueError(f"Unknown class_weight_reduction: {class_weight_reduction}")
     else:
         ce = tf.reduce_mean(ce)
     ce = tf.cast(ce, tf.float32)
@@ -71,7 +84,7 @@ def supervised_mgr_loss(
     cnn_aux_logits = outputs.get("cnn_aux_logits")
     if cnn_aux_logits is not None:
         cnn_aux_logits = tf.cast(cnn_aux_logits, tf.float32)
-        if label_smoothing > 0.0:
+        if smooth_auxiliary and label_smoothing > 0.0:
             targets = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
             targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
             aux = tf.keras.losses.categorical_crossentropy(targets, cnn_aux_logits, from_logits=True)
@@ -86,7 +99,7 @@ def supervised_mgr_loss(
     semantic_logits = outputs.get("semantic_logits")
     if semantic_logits is not None:
         semantic_logits = tf.cast(semantic_logits, tf.float32)
-        if label_smoothing > 0.0:
+        if smooth_auxiliary and label_smoothing > 0.0:
             targets = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
             targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
             sem = tf.keras.losses.categorical_crossentropy(targets, semantic_logits, from_logits=True)
@@ -94,8 +107,8 @@ def supervised_mgr_loss(
             sem = tf.keras.losses.sparse_categorical_crossentropy(labels, semantic_logits, from_logits=True)
         sem_loss = tf.reduce_mean(sem)
         sem_loss = tf.cast(sem_loss, tf.float32)
-        lambda_sem = float(outputs.get("lambda_sem", 0.1))
-        total = total + tf.cast(lambda_sem, tf.float32) * sem_loss
+        lambda_sem = tf.cast(outputs.get("lambda_sem", 0.1), tf.float32)
+        total = total + lambda_sem * sem_loss
     else:
         sem_loss = tf.constant(0.0, dtype=tf.float32)
 
@@ -113,10 +126,46 @@ def supervised_mgr_loss(
         )
         total = total + tf.cast(lambda_hard, tf.float32) * hard_loss
 
+    # Explicit Local Semantic Alignment Loss (LGSA)
+    local_sem_loss = tf.constant(0.0, dtype=tf.float32)
+    lambda_local_sem = tf.cast(outputs.get("lambda_local_sem", 0.0), tf.float32)
+    s_upper = outputs.get("s_upper")
+    s_lower = outputs.get("s_lower")
+    s_au = outputs.get("s_au")
+    if s_upper is None and "local_semantic_logits" in outputs and isinstance(outputs["local_semantic_logits"], dict):
+        s_upper = outputs["local_semantic_logits"].get("upper")
+        s_lower = outputs["local_semantic_logits"].get("lower")
+        s_au = outputs["local_semantic_logits"].get("au")
+
+    if s_upper is not None and s_lower is not None and s_au is not None:
+        s_upper_f32 = tf.cast(s_upper, tf.float32)
+        s_lower_f32 = tf.cast(s_lower, tf.float32)
+        s_au_f32 = tf.cast(s_au, tf.float32)
+        if smooth_auxiliary and label_smoothing > 0.0:
+            targets = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
+            targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
+            loss_upper = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(targets, s_upper_f32, from_logits=True))
+            loss_lower = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(targets, s_lower_f32, from_logits=True))
+            loss_au = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(targets, s_au_f32, from_logits=True))
+        else:
+            loss_upper = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(labels, s_upper_f32, from_logits=True))
+            loss_lower = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(labels, s_lower_f32, from_logits=True))
+            loss_au = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(labels, s_au_f32, from_logits=True))
+        local_sem_loss = (loss_upper + loss_lower + loss_au) / 3.0
+        total = total + lambda_local_sem * local_sem_loss
+
+    # Gate Entropy Floor Regularization (Anti-Collapse)
+    gate_entropy_loss = outputs.get("gate_entropy_loss")
+    lambda_gate_entropy = float(outputs.get("lambda_gate_entropy", 0.0))
+    if gate_entropy_loss is not None and lambda_gate_entropy > 0.0:
+        total = total + tf.cast(lambda_gate_entropy, tf.float32) * tf.cast(gate_entropy_loss, tf.float32)
+
     return total, {
         "ce": ce,
         "ortho": ortho,
         "cnn_aux": aux,
         "semantic": sem_loss,
         "hard_semantic": hard_loss,
+        "local_semantic": local_sem_loss,
+        "gate_entropy": outputs.get("gate_entropy", tf.constant(0.0, dtype=tf.float32)),
     }

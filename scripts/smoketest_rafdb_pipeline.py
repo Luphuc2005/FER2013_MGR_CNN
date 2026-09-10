@@ -11,12 +11,18 @@ Tests:
 
 from pathlib import Path
 import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import numpy as np
 import tensorflow as tf
 
 from config import load_config
 from datasets.fer2013 import build_datasets, collect_split_records
-from train import build_model, compute_loss
+from train import build_model, compute_loss, evaluate_dataset
+from utils.semantic_schedule import resolve_lambda_sem
 
 def main():
     config_file = "config_rafdb_convnext_base_ms1m_adaptive_siglip2_confusion.yaml"
@@ -32,12 +38,13 @@ def main():
     print(f"[1/5] Checking RAF-DB dataset directory: {data_dir}")
     if not data_dir.exists():
         print(f"      [WARNING] Directory {data_dir} not found locally.")
-        print("      Attempting local fallback check at data/raf_db...")
-        data_dir = Path("data/raf_db")
-        if data_dir.exists():
-            cfg["data"]["data_path"] = str(data_dir)
-            print(f"      [OK] Local fallback dataset directory found: {data_dir}")
-        else:
+        for fallback in [Path("data/rafdb"), Path("data/raf_db")]:
+            if fallback.exists():
+                data_dir = fallback
+                cfg["data"]["data_path"] = str(data_dir)
+                print(f"      [OK] Local fallback dataset directory found: {data_dir}")
+                break
+        if not data_dir.exists():
             print("      [INFO] Testing with simulated dataset structure for offline validation.")
             
     # Check dataset split records if files exist
@@ -46,37 +53,122 @@ def main():
         val_rec = collect_split_records(data_dir, "val")
         test_rec = collect_split_records(data_dir, "test")
         
-        print(f"[2/5] RAF-DB Dataset Split Verification:")
-        print(f"      - Train samples: {len(train_rec.labels)} | Labels range: [{train_rec.labels.min()}..{train_rec.labels.max()}]")
-        print(f"      - Val samples:   {len(val_rec.labels)}   | Labels range: [{val_rec.labels.min()}..{val_rec.labels.max()}]")
-        print(f"      - Test samples:  {len(test_rec.labels)}  | Labels range: [{test_rec.labels.min()}..{test_rec.labels.max()}]")
-        
-        # Verify no data leakage between train, val, test sample_ids / paths
-        train_ids = set(train_rec.images)
-        val_ids = set(val_rec.images)
-        test_ids = set(test_rec.images)
-        overlap_tv = train_ids.intersection(val_ids)
-        overlap_tt = train_ids.intersection(test_ids)
-        print(f"      - Train/Val overlap count:  {len(overlap_tv)} (Data Leakage Check)")
-        print(f"      - Train/Test overlap count: {len(overlap_tt)} (Data Leakage Check)")
-        assert len(overlap_tv) == 0, "ERROR: Data leakage detected between train and val!"
-        assert len(overlap_tt) == 0, "ERROR: Data leakage detected between train and test!"
-        print("      [PASSED] No data leakage detected between splits!")
+        n_train = len(train_rec.labels)
+        n_val = len(val_rec.labels)
+        n_train_val = n_train + n_val
+        n_test = len(test_rec.labels)
+
+        is_full_train = bool(cfg.get("data", {}).get("full_train", False))
+        if is_full_train:
+            full_train_rec_images = np.concatenate([train_rec.images, val_rec.images], axis=0)
+            full_train_rec_labels = np.concatenate([train_rec.labels, val_rec.labels], axis=0)
+            n_train = len(full_train_rec_labels)
+            n_val = 0
+            n_test = len(test_rec.labels)
+            train_unique = set(full_train_rec_labels.tolist())
+            test_unique = set(test_rec.labels.tolist())
+            train_counts = np.bincount(full_train_rec_labels, minlength=7).tolist()
+            test_counts = np.bincount(test_rec.labels, minlength=7).tolist()
+
+            print(f"[2/5] RAF-DB Benchmark Dataset Verification (FINAL FULL-TRAIN PROTOCOL):")
+            print(f"      - Train samples: {n_train} (Expected: 12271) | Unique labels: {sorted(list(train_unique))}")
+            print(f"      - Val samples:   {n_val}   (Expected: 0 - No Validation Split)")
+            print(f"      - Test samples:  {n_test}  (Expected: 3068) | Unique labels: {sorted(list(test_unique))}")
+            print(f"      - Class Distribution [0..6] (angry, disgust, fear, happy, sad, surprise, neutral):")
+            print(f"        * Train: {train_counts}")
+            print(f"        * Test:  {test_counts}")
+
+            assert n_train == 12271, f"[FAIL] Full train count is {n_train}, expected exactly 12,271!"
+            assert n_test == 3068, f"[FAIL] Test count is {n_test}, expected exactly 3,068!"
+
+            expected_classes = {0, 1, 2, 3, 4, 5, 6}
+            assert train_unique == expected_classes, f"[FAIL] Train set missing classes: {expected_classes - train_unique}"
+            assert test_unique == expected_classes, f"[FAIL] Test set missing classes: {expected_classes - test_unique}"
+
+            train_ids = set(full_train_rec_images)
+            test_ids = set(test_rec.images)
+            overlap_tt = train_ids.intersection(test_ids)
+            print(f"      - Leakage Check:")
+            print(f"        * Train / Test overlap: {len(overlap_tt)}")
+            assert len(overlap_tt) == 0, f"[FAIL] Data leakage detected between Train and Test! ({len(overlap_tt)} samples)"
+
+            print("      [PASSED] All Benchmark Checks Succeeded!")
+            print("      [CONFIRMED] Full Train = 12271 and Test = 3068 (Zero Validation Split, Zero Test Leakage).")
+        else:
+            train_unique = set(train_rec.labels.tolist())
+            val_unique = set(val_rec.labels.tolist())
+            test_unique = set(test_rec.labels.tolist())
+
+            train_counts = np.bincount(train_rec.labels, minlength=7).tolist()
+            val_counts = np.bincount(val_rec.labels, minlength=7).tolist()
+            test_counts = np.bincount(test_rec.labels, minlength=7).tolist()
+
+            print(f"[2/5] RAF-DB Benchmark Dataset Verification:")
+            print(f"      - Train samples: {n_train} | Unique labels: {sorted(list(train_unique))}")
+            print(f"      - Val samples:   {n_val}   | Unique labels: {sorted(list(val_unique))}")
+            print(f"      - Train + Val:   {n_train_val} (Expected: 12271)")
+            print(f"      - Test samples:  {n_test}  (Expected: 3068) | Unique labels: {sorted(list(test_unique))}")
+            print(f"      - Class Distribution [0..6] (angry, disgust, fear, happy, sad, surprise, neutral):")
+            print(f"        * Train: {train_counts}")
+            print(f"        * Val:   {val_counts}")
+            print(f"        * Test:  {test_counts}")
+
+            # Verification 1: Exact sample count checks
+            assert n_train_val == 12271, f"[FAIL] Train + Val count is {n_train_val}, expected exactly 12,271!"
+            assert n_test == 3068, f"[FAIL] Test count is {n_test}, expected exactly 3,068!"
+
+            # Verification 2: All 7 classes [0..6] present in every split
+            expected_classes = {0, 1, 2, 3, 4, 5, 6}
+            assert train_unique == expected_classes, f"[FAIL] Train set missing classes: {expected_classes - train_unique}"
+            assert val_unique == expected_classes, f"[FAIL] Val set missing classes: {expected_classes - val_unique}"
+            assert test_unique == expected_classes, f"[FAIL] Test set missing classes: {expected_classes - test_unique}"
+
+            # Verification 3: Data leakage check across all pairs (Train/Val, Train/Test, Val/Test)
+            train_ids = set(train_rec.images)
+            val_ids = set(val_rec.images)
+            test_ids = set(test_rec.images)
+
+            overlap_tv = train_ids.intersection(val_ids)
+            overlap_tt = train_ids.intersection(test_ids)
+            overlap_vt = val_ids.intersection(test_ids)
+
+            print(f"      - Leakage Check:")
+            print(f"        * Train / Val overlap:  {len(overlap_tv)}")
+            print(f"        * Train / Test overlap: {len(overlap_tt)}")
+            print(f"        * Val / Test overlap:   {len(overlap_vt)}")
+
+            assert len(overlap_tv) == 0, f"[FAIL] Data leakage detected between Train and Val! ({len(overlap_tv)} samples)"
+            assert len(overlap_tt) == 0, f"[FAIL] Data leakage detected between Train and Test! ({len(overlap_tt)} samples)"
+            assert len(overlap_vt) == 0, f"[FAIL] Data leakage detected between Val and Test! ({len(overlap_vt)} samples)"
+
+            print("      [PASSED] All Benchmark Checks Succeeded!")
+            print("      [CONFIRMED] Train + Val = 12271 and Test = 3068.")
         
         # Build TF datasets
         train_ds, val_ds, test_ds = build_datasets(cfg, replicas=1)
-        for batch_feat, batch_labels in train_ds.take(1):
-            batch_images = batch_feat["image"]
-            print(f"[3/5] Batch Parsing Verification:")
-            print(f"      - Batch image shape: {batch_images.shape} (Expected: [16, 112, 112, 3])")
-            print(f"      - Batch label shape: {batch_labels.shape} (Expected: [16])")
-            print(f"      - Batch label values: {batch_labels.numpy()[:8]}")
-            assert batch_images.shape == (16, 112, 112, 3), f"Invalid batch image shape {batch_images.shape}"
-            assert batch_labels.shape == (16,), f"Invalid batch label shape {batch_labels.shape}"
+        if is_full_train:
+            assert val_ds is None, f"[FAIL] val_ds should be None in full-train protocol, got {val_ds}"
+        batch_feat = None
+        batch_labels = None
+        for feat, labels in train_ds.take(1):
+            batch_feat = feat
+            batch_labels = labels
+            break
+        assert batch_feat is not None, "[FAIL] train_ds returned no batches!"
+        expected_bs = int(cfg["runtime"]["batch_size_per_gpu"])
+        batch_images = batch_feat["image"]
+        print(f"[3/5] Batch Parsing Verification:")
+        print(f"      - Batch image shape: {batch_images.shape} (Expected: [{expected_bs}, 112, 112, 3])")
+        print(f"      - Batch label shape: {batch_labels.shape} (Expected: [{expected_bs}])")
+        print(f"      - Batch label values: {batch_labels.numpy()[:8]}")
+        assert batch_images.shape == (expected_bs, 112, 112, 3), f"Invalid batch image shape {batch_images.shape}"
+        assert batch_labels.shape == (expected_bs,), f"Invalid batch label shape {batch_labels.shape}"
     else:
         print("[2/5] Skipping live RAF-DB CSV reading (Directory not found on local machine, will run on server).")
-        batch_images = tf.random.normal([16, 112, 112, 3])
-        batch_labels = tf.random.uniform([16], minval=0, maxval=7, dtype=tf.int32)
+        expected_bs = int(cfg["runtime"]["batch_size_per_gpu"])
+        batch_images = tf.random.normal([expected_bs, 112, 112, 3])
+        batch_labels = tf.random.uniform([expected_bs], minval=0, maxval=7, dtype=tf.int32)
+        batch_feat = {"image": batch_images}
         
     print(f"[4/5] Model & SigLIP2 Prototypes Initialization:")
     model = build_model(cfg)
@@ -95,11 +187,59 @@ def main():
             logits = outputs
         loss, loss_dict = compute_loss(outputs, batch_labels, cfg, model=model)
         
-    print(f"      - Logits shape: {logits.shape} (Expected: [16, 7])")
+    print(f"      - Logits shape: {logits.shape} (Expected: [{expected_bs}, 7])")
     print(f"      - Computed Loss: {float(loss):.4f}")
     if isinstance(loss_dict, dict):
         for k, v in loss_dict.items():
             print(f"        * {k}: {float(v):.4f}")
+
+    lambda_epoch_1 = resolve_lambda_sem(cfg, 1)
+    lambda_epoch_5 = resolve_lambda_sem(cfg, 5)
+    lambda_epoch_10 = resolve_lambda_sem(cfg, 10)
+    lambda_epoch_11 = resolve_lambda_sem(cfg, 11)
+    weighted_sem_loss = lambda_epoch_1 * float(loss_dict["semantic"])
+    print(
+        "      - lambda_sem schedule: "
+        f"ep1={lambda_epoch_1:.2f}, ep5={lambda_epoch_5:.2f}, "
+        f"ep10={lambda_epoch_10:.2f}, ep11={lambda_epoch_11:.2f}"
+    )
+    print(f"      - weighted_sem_loss (epoch 1): {weighted_sem_loss:.4f}")
+
+    smoke_eval_ds = tf.data.Dataset.from_tensors((batch_feat, batch_labels))
+    smoke_eval = evaluate_dataset(
+        model,
+        smoke_eval_ds,
+        cfg,
+        use_tta_hflip=False,
+        lambda_sem_override=lambda_epoch_1,
+    )
+    eval_outputs = model(batch_feat, training=False)
+    expected_semantic_accuracy = float(
+        tf.reduce_mean(
+            tf.cast(
+                tf.equal(
+                    tf.argmax(eval_outputs["semantic_logits"], axis=-1, output_type=tf.int32),
+                    batch_labels,
+                ),
+                tf.float32,
+            )
+        ).numpy()
+    )
+    assert "semantic_accuracy" in smoke_eval, "Validation semantic_accuracy was not returned."
+    assert np.isclose(smoke_eval["semantic_accuracy"], expected_semantic_accuracy), (
+        f"semantic_accuracy mismatch: evaluate_dataset={smoke_eval['semantic_accuracy']} "
+        f"direct={expected_semantic_accuracy}"
+    )
+    assert np.isclose(
+        smoke_eval["weighted_sem_loss"],
+        lambda_epoch_1 * smoke_eval["semantic_loss"],
+    ), "weighted_sem_loss does not equal lambda_sem * semantic_loss."
+    print(
+        "      - VAL_SEMANTIC_METRICS_OK: "
+        f"semantic_accuracy={smoke_eval['semantic_accuracy']:.4f}, "
+        f"semantic_loss={smoke_eval['semantic_loss']:.4f}, "
+        f"weighted_sem_loss={smoke_eval['weighted_sem_loss']:.4f}"
+    )
             
     print("=" * 60)
     print(" [SUCCESS] RAF-DB SMOKE TEST PASSED SUCCESSFULLY!")

@@ -258,6 +258,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         data_cfg = cfg.get("data", cfg)
         super().__init__(name=model_cfg.get("name", "convnext_base_ms1m_arcface_baseline"))
         self.num_classes = int(data_cfg.get("num_classes", 7))
+        self.class_names = list(data_cfg.get("class_names", []))
         self.ablation = model_cfg.get("ablation", "cnn_only")
         self.input_size = int(data_cfg.get("image_size", 112))
         self.channels = int(data_cfg.get("channels", 3))
@@ -305,11 +306,23 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             float(model_cfg.get("classifier_dropout1", 0.35)),
             name="fer_dropout",
         )
-        self.classifier = tf.keras.layers.Dense(
-            self.num_classes,
-            kernel_initializer="he_normal",
-            name="fer_classifier",
-        )
+        classifier_type = str(model_cfg.get("classifier_type", "linear")).lower()
+        if classifier_type in ("arcmargin", "arcface", "arcmarginproduct"):
+            from .arcmargin import ArcMarginProduct
+            arcmargin_cfg = model_cfg.get("arcmargin", {})
+            self.classifier = ArcMarginProduct(
+                num_classes=self.num_classes,
+                scale=float(arcmargin_cfg.get("scale", model_cfg.get("arcmargin_scale", 30.0))),
+                margin=float(arcmargin_cfg.get("margin", model_cfg.get("arcmargin_margin", 0.30))),
+                easy_margin=bool(arcmargin_cfg.get("easy_margin", model_cfg.get("arcmargin_easy_margin", False))),
+                name="fer_classifier",
+            )
+        else:
+            self.classifier = tf.keras.layers.Dense(
+                self.num_classes,
+                kernel_initializer="he_normal",
+                name="fer_classifier",
+            )
 
         clip_sem_cfg = model_cfg.get("clip_semantic", {})
         if not isinstance(clip_sem_cfg, dict):
@@ -330,6 +343,54 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             or model_cfg.get("use_adaptive_granularity", False)
             or model_cfg.get("ablation") in ("adaptive_clip", "adaptive_clip_confusion")
         )
+        gate_schedule_cfg = model_cfg.get(
+            "granularity_gate_schedule",
+            clip_sem_cfg.get("granularity_gate_schedule", {}),
+        )
+        if not isinstance(gate_schedule_cfg, dict):
+            raise ValueError("granularity_gate_schedule must be a mapping when provided.")
+        self.granularity_gate_step_schedule = bool(
+            gate_schedule_cfg.get("schedule_type") == "step_temperature"
+            or model_cfg.get("granularity_schedule_type") == "v8_step"
+            or gate_schedule_cfg.get("step_schedule", False)
+            or model_cfg.get("granularity_gate_step_schedule", False)
+        )
+        self.granularity_gate_schedule_enabled = bool(
+            gate_schedule_cfg.get("enabled", False)
+            or self.granularity_gate_step_schedule
+        )
+        self.granularity_gate_uniform_epochs = int(
+            gate_schedule_cfg.get("uniform_epochs", model_cfg.get("granularity_gate_uniform_epochs", 4 if self.granularity_gate_step_schedule else 0))
+        )
+        self.granularity_gate_transition_end_epoch = int(
+            gate_schedule_cfg.get("transition_end_epoch", self.granularity_gate_uniform_epochs)
+        )
+        self.granularity_gate_start_temperature = float(gate_schedule_cfg.get("start_temperature", 1.0))
+        self.granularity_gate_end_temperature = float(gate_schedule_cfg.get("end_temperature", 1.0))
+        if self.granularity_gate_schedule_enabled and not self.granularity_gate_step_schedule:
+            if not self.use_adaptive_granularity:
+                raise ValueError("granularity_gate_schedule requires use_adaptive_granularity=true.")
+            if self.granularity_gate_uniform_epochs < 0:
+                raise ValueError("granularity_gate_schedule.uniform_epochs must be non-negative.")
+            if self.granularity_gate_transition_end_epoch <= self.granularity_gate_uniform_epochs:
+                raise ValueError(
+                    "granularity_gate_schedule.transition_end_epoch must exceed uniform_epochs."
+                )
+            if self.granularity_gate_start_temperature <= 0.0 or self.granularity_gate_end_temperature <= 0.0:
+                raise ValueError("granularity gate temperatures must be positive.")
+        # Legacy V5 configs retain their original variable/checkpoint structure.
+        # The epoch variable exists only when the warm-up schedule is enabled.
+        self.granularity_gate_epoch = None
+        if self.granularity_gate_schedule_enabled:
+            self.granularity_gate_epoch = self.add_weight(
+                name="granularity_gate_epoch",
+                shape=(),
+                dtype=tf.int32,
+                initializer=tf.keras.initializers.Constant(1),
+                trainable=False,
+            )
+        self.lambda_gate_entropy = float(model_cfg.get("lambda_gate_entropy", 0.0))
+        self.gate_entropy_floor = float(model_cfg.get("gate_entropy_floor", 0.80))
         self.use_hard_semantic_loss = bool(
             clip_sem_cfg.get("use_hard_semantic_loss", False)
             or model_cfg.get("use_hard_semantic_loss", False)
@@ -353,6 +414,24 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         self.semantic_logit_scale = float(
             clip_sem_cfg.get("semantic_logit_scale", model_cfg.get("semantic_logit_scale", 20.0))
         )
+        self.semantic_fusion_alpha = float(
+            model_cfg.get(
+                "semantic_fusion_alpha",
+                clip_sem_cfg.get("semantic_fusion_alpha", 0.0),
+            )
+        )
+        self.semantic_fusion_training = bool(
+            model_cfg.get(
+                "semantic_fusion_training",
+                clip_sem_cfg.get("semantic_fusion_training", False),
+            )
+        )
+        if self.semantic_fusion_alpha > 0.0:
+            print(
+                f"[ConvNeXtBaseFace] Semantic Logit Fusion enabled: alpha={self.semantic_fusion_alpha:.3f} "
+                f"(inference_only={not self.semantic_fusion_training})",
+                flush=True,
+            )
 
         default_hard_pairs = {
             0: [4, 2],    # angry -> sad, fear
@@ -365,9 +444,16 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         if hard_pairs_config:
             for c, hard_list in hard_pairs_config.items():
                 c_int = int(c)
+                if c_int < 0 or c_int >= self.num_classes:
+                    raise ValueError(f"hard_pairs class id {c_int} is outside num_classes={self.num_classes}.")
                 if isinstance(hard_list, (list, tuple)):
                     for j in hard_list:
-                        hard_matrix_np[c_int, int(j)] = 1.0
+                        j_int = int(j)
+                        if j_int < 0 or j_int >= self.num_classes:
+                            raise ValueError(
+                                f"hard_pairs target id {j_int} is outside num_classes={self.num_classes}."
+                            )
+                        hard_matrix_np[c_int, j_int] = 1.0
         self.hard_pairs_matrix = tf.constant(hard_matrix_np, dtype=tf.float32, name="hard_pairs_matrix")
 
         self.use_au_region_routed = bool(
@@ -376,13 +462,88 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             or model_cfg.get("ablation") in ("au_region_routed", "adaptive_clip_confusion", "au_routed_clip")
         )
 
+        self.lambda_local_sem = float(
+            model_cfg.get("lambda_local_sem", clip_sem_cfg.get("lambda_local_sem", 0.0))
+        )
+
+        self.use_soft_regional_pooling = bool(model_cfg.get("use_soft_regional_pooling", False))
+        self.semantic_projector_dropout = float(model_cfg.get(
+            "semantic_projector_dropout", model_cfg.get("classifier_dropout1", 0.35)
+        ))
+        if not 0.0 <= self.semantic_projector_dropout < 1.0:
+            raise ValueError("semantic_projector_dropout must be in [0, 1).")
+        if self.use_soft_regional_pooling:
+            if not self.use_semantic_branch or not self.use_au_region_routed:
+                raise ValueError("Soft regional pooling requires routed semantic branches.")
+            from .soft_regional_pooling import SoftRegionalPooling
+            self.soft_pool_upper = SoftRegionalPooling(name="soft_pool_upper")
+            self.soft_pool_lower = SoftRegionalPooling(name="soft_pool_lower")
+            self.soft_pool_au = SoftRegionalPooling(name="soft_pool_au")
+
+        self.use_dynamic_part_attention = bool(model_cfg.get("use_dynamic_part_attention", False))
+        if self.use_dynamic_part_attention:
+            if not self.use_semantic_branch or not self.use_au_region_routed:
+                raise ValueError("Dynamic part attention requires routed semantic branches.")
+            from .dynamic_part_attention import DynamicPartAttention
+            bottleneck = int(model_cfg.get("dynamic_part_bottleneck", 128))
+            self.dynamic_part_attn = DynamicPartAttention(channels=512, bottleneck=bottleneck, name="dynamic_part_attn")
+        else:
+            self.dynamic_part_attn = None
+
+        # ECA variant of v5 Combined Ultimate: recalibrate only the regional
+        # input; the backbone's Stage-4 computation remains unchanged.
+        self.use_stage3_eca = bool(model_cfg.get("use_stage3_eca", False))
+        self.stage3_eca = None
+        if self.use_stage3_eca:
+            if not self.use_dynamic_part_attention or self.use_soft_regional_pooling:
+                raise ValueError("Stage-3 ECA requires dynamic part attention and no soft regional pooling.")
+            self.stage3_eca = ECALayer(channels=512, name="stage3_eca")
+
+        # V6 reuses the semantic branch's dynamic regions in the FER classifier.
+        # Disabled by default so existing v5 weights and forward paths stay valid.
+        self.use_global_regional_fusion = bool(model_cfg.get("use_global_regional_fusion", False))
+        self.global_regional_fusion = None
+        if self.use_global_regional_fusion:
+            if not (self.use_dynamic_part_attention and self.use_semantic_branch and self.use_au_region_routed):
+                raise ValueError("Global regional fusion requires dynamic part attention and routed semantics.")
+            if self.use_soft_regional_pooling:
+                raise ValueError("Global regional fusion uses dynamic parts; disable soft_regional_pooling.")
+            if model_cfg.get("checkpoint_path"):
+                raise ValueError("Initialize v6 from the MS1M backbone; FER checkpoint_path is unsupported.")
+            from .global_regional_fusion import GlobalRegionalFusion
+            self.global_regional_fusion = GlobalRegionalFusion(
+                projection_dim=int(model_cfg.get("global_regional_projection_dim", 256)),
+                dtype="float32", name="global_regional_fusion",
+            )
+
+        self.use_multistage_adaptive_fusion = bool(model_cfg.get("use_multistage_adaptive_fusion", False))
+        self.multistage_fusion = None
+        if self.use_multistage_adaptive_fusion:
+            if not (self.use_dynamic_part_attention and self.use_semantic_branch and self.use_au_region_routed):
+                raise ValueError("Multi-stage fusion requires dynamic parts and routed semantics.")
+            if self.use_global_regional_fusion or self.use_stage3_eca or self.use_eca or self.use_soft_regional_pooling:
+                raise ValueError("Use the isolated multi-stage fusion config without other fusion/ECA variants.")
+            if model_cfg.get("checkpoint_path"):
+                raise ValueError("Initialize multi-stage fusion from MS1M; no FER checkpoint_path.")
+            from .multistage_adaptive_fusion import MultiStageAdaptiveFusion
+            from utils.stage_fusion_metrics import StageFusionMetrics
+            self.multistage_fusion = MultiStageAdaptiveFusion(
+                projection_dim=int(model_cfg.get("multistage_projection_dim", 256)),
+                output_dim=int(model_cfg.get("multistage_output_dim", 512)),
+                gate_hidden_dim=int(model_cfg.get("multistage_gate_hidden_dim", 128)),
+                name="multistage_adaptive_fusion",
+            )
+            # Train metrics share the training strategy. Evaluation creates
+            # fresh accumulators in its own execution scope in train.py.
+            self.stage_fusion_train_metrics = StageFusionMetrics("stage_fusion_train")
+
         if self.use_semantic_branch:
             embed_dim = int(clip_sem_cfg.get("clip_embedding_dim", model_cfg.get("clip_embedding_dim", 512)))
             self.visual_projector = tf.keras.Sequential([
                 tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
                 tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
                 tf.keras.layers.Activation("gelu", name="gelu"),
-                tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                tf.keras.layers.Dropout(self.semantic_projector_dropout, name="drop"),
                 tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
             ], name="visual_semantic_projector")
 
@@ -391,7 +552,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
                     tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
                     tf.keras.layers.Activation("gelu", name="gelu"),
-                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dropout(self.semantic_projector_dropout, name="drop"),
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
                 ], name="visual_projector_upper")
 
@@ -399,7 +560,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
                     tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
                     tf.keras.layers.Activation("gelu", name="gelu"),
-                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dropout(self.semantic_projector_dropout, name="drop"),
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
                 ], name="visual_projector_lower")
 
@@ -407,7 +568,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc1"),
                     tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln"),
                     tf.keras.layers.Activation("gelu", name="gelu"),
-                    tf.keras.layers.Dropout(float(model_cfg.get("classifier_dropout1", 0.35)), name="drop"),
+                    tf.keras.layers.Dropout(self.semantic_projector_dropout, name="drop"),
                     tf.keras.layers.Dense(embed_dim, kernel_initializer="he_normal", name="fc2"),
                 ], name="visual_projector_au")
             else:
@@ -416,13 +577,22 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 self.visual_projector_au = None
 
             if self.use_adaptive_granularity:
-                self.granularity_gate = tf.keras.Sequential([
+                gate_layers = [
                     tf.keras.layers.Dense(256, kernel_initializer="he_normal", name="fc1"),
                     tf.keras.layers.Activation("gelu", name="gelu"),
                     tf.keras.layers.Dropout(0.1, name="drop"),
                     tf.keras.layers.Dense(5, kernel_initializer="he_normal", name="fc2"),
-                    tf.keras.layers.Activation("softmax", name="softmax"),
-                ], name="granularity_gate")
+                ]
+                # Old configs retain their exact softmax layer. V6 needs raw
+                # logits so temperature is applied before softmax in the graph.
+                if not self.granularity_gate_schedule_enabled:
+                    gate_layers.append(tf.keras.layers.Activation("softmax", name="softmax"))
+                self.granularity_gate = tf.keras.Sequential(gate_layers, name="granularity_gate")
+                # Uniform warm-up intentionally does not execute this gate. Build
+                # its variables now so it is included in the head optimizer before
+                # the first graph trace, while receiving no gradients in epochs 1--4.
+                if self.granularity_gate_schedule_enabled:
+                    self.granularity_gate.build((None, self.backbone.dims[-1]))
             else:
                 self.granularity_gate = None
 
@@ -433,12 +603,30 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 cache_path=cache_path,
                 embedding_dim=embed_dim,
                 multi_prototype=self.multi_prototype or self.use_adaptive_granularity,
+                num_classes=self.num_classes,
+                class_names=self.class_names or None,
             )
+            if int(text_proto_array.shape[0]) != self.num_classes:
+                raise ValueError(
+                    f"Text prototype class dimension {text_proto_array.shape[0]} "
+                    f"does not match num_classes={self.num_classes}."
+                )
             self.text_prototypes = tf.constant(text_proto_array, dtype=tf.float32, name="frozen_clip_text_prototypes")
         else:
             self.visual_projector = None
             self.granularity_gate = None
             self.text_prototypes = None
+
+        self.use_adaptive_fusion_gate = bool(
+            model_cfg.get("use_adaptive_fusion_gate", False)
+            or clip_sem_cfg.get("use_adaptive_fusion_gate", False)
+        )
+        if self.use_adaptive_fusion_gate:
+            from .adaptive_fusion_gate import SampleAdaptiveFusionGate
+            max_alpha = float(model_cfg.get("adaptive_fusion_max_alpha", clip_sem_cfg.get("adaptive_fusion_max_alpha", 0.20)))
+            self.adaptive_fusion_gate = SampleAdaptiveFusionGate(max_alpha=max_alpha, name="adaptive_fusion_gate")
+        else:
+            self.adaptive_fusion_gate = None
 
         self.pretrained_load_status = "not_requested"
         pretrained_path = model_cfg.get("convnext_base_pretrained_path") or model_cfg.get("pretrained_path")
@@ -893,6 +1081,87 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         print(f"[ConvNeXtBaseFace] PRETRAINED_LOAD_OK path={resolved} matched={matched}/{total_targets}", flush=True)
         return "loaded"
 
+    def set_granularity_gate_epoch(self, epoch: int) -> None:
+        """Set the 1-based epoch used by the optional granularity-gate schedule."""
+        if int(epoch) < 1:
+            raise ValueError("granularity gate epoch must be 1-based and positive.")
+        if self.granularity_gate_epoch is None:
+            return
+        self.granularity_gate_epoch.assign(int(epoch))
+
+    def _granularity_gate_weights(self, pooled: tf.Tensor, training=False) -> tf.Tensor:
+        """Return five prototype weights while preserving V5 when scheduling is off."""
+        if self.granularity_gate is None:
+            raise RuntimeError("Adaptive granularity is disabled but gate weights were requested.")
+
+        if not self.granularity_gate_schedule_enabled:
+            gate_logits = self.granularity_gate(pooled, training=training)
+            return gate_logits
+
+        if getattr(self, "granularity_gate_step_schedule", False):
+            epoch = tf.identity(self.granularity_gate_epoch)
+            batch_size = tf.shape(pooled)[0]
+            uniform = tf.fill([batch_size, 5], tf.constant(0.2, dtype=tf.float32))
+
+            def _adaptive(temperature: tf.Tensor) -> tf.Tensor:
+                gate_logits = self.granularity_gate(pooled, training=training)
+                return tf.nn.softmax(tf.cast(gate_logits, tf.float32) / temperature, axis=-1)
+
+            def _get_temp():
+                return tf.cond(
+                    epoch <= 10,
+                    lambda: tf.constant(2.0, tf.float32),
+                    lambda: tf.cond(
+                        epoch <= 20,
+                        lambda: tf.constant(1.5, tf.float32),
+                        lambda: tf.constant(1.0, tf.float32),
+                    ),
+                )
+
+            return tf.cond(
+                epoch <= 4,
+                lambda: uniform,
+                lambda: _adaptive(_get_temp()),
+            )
+
+        batch_size = tf.shape(pooled)[0]
+        uniform = tf.fill([batch_size, 5], tf.constant(0.2, dtype=tf.float32))
+        epoch = tf.identity(self.granularity_gate_epoch)
+        uniform_epochs = tf.constant(self.granularity_gate_uniform_epochs, dtype=tf.int32)
+        transition_end_epoch = tf.constant(
+            self.granularity_gate_transition_end_epoch, dtype=tf.int32
+        )
+
+        def _adaptive(temperature: tf.Tensor) -> tf.Tensor:
+            gate_logits = self.granularity_gate(pooled, training=training)
+            return tf.nn.softmax(tf.cast(gate_logits, tf.float32) / temperature, axis=-1)
+
+        def _transition() -> tf.Tensor:
+            # Epoch 5 receives beta=1/6; epoch 9 receives beta=5/6. Epoch 10
+            # takes the fully adaptive branch, exactly matching the V5 softmax.
+            beta = tf.cast(epoch - uniform_epochs, tf.float32) / tf.cast(
+                transition_end_epoch - uniform_epochs, tf.float32
+            )
+            temperature = tf.constant(self.granularity_gate_start_temperature, tf.float32)
+            temperature += beta * tf.constant(
+                self.granularity_gate_end_temperature - self.granularity_gate_start_temperature,
+                tf.float32,
+            )
+            adaptive = _adaptive(temperature)
+            return (1.0 - beta) * uniform + beta * adaptive
+
+        # tf.cond keeps the uniform phase independent of gate_logits in the
+        # runtime graph: the gate receives no loss gradient before epoch 5.
+        return tf.cond(
+            epoch <= uniform_epochs,
+            lambda: uniform,
+            lambda: tf.cond(
+                epoch < transition_end_epoch,
+                _transition,
+                lambda: _adaptive(tf.constant(1.0, tf.float32)),
+            ),
+        )
+
     def _log_shapes_once(self, image, endpoints, pooled, dropped, logits) -> None:
         if self._shape_logged:
             return
@@ -926,6 +1195,12 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             print(f"[ConvNeXtBaseFace]   Backbone trainable params: {backbone_params:,}", flush=True)
             print(f"[ConvNeXtBaseFace]   Total trainable params: {total_params:,}", flush=True)
 
+        if self.use_stage3_eca:
+            print(
+                f"[ConvNeXtBaseFace] Stage-3 regional ECA: kernel={self.stage3_eca.k_size}, "
+                f"params={self.stage3_eca.count_params()}, output={endpoints['stage3_eca'].shape}",
+                flush=True,
+            )
         if self.use_eca and self.stage4_eca is not None:
             eca_params = int(np.sum([np.prod(v.shape) for v in self.stage4_eca.trainable_variables]))
             backbone_params = int(np.sum([np.prod(v.shape) for v in self.backbone.trainable_variables]))
@@ -939,8 +1214,8 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             total_params = int(np.sum([np.prod(v.shape) for v in self.trainable_variables]))
             if self.multi_prototype:
                 v_shape = endpoints.get("visual_projector", pooled).shape
-                r_shape = endpoints.get("raw_semantic_similarity", tf.zeros([1, 7, 5])).shape
-                s_shape = endpoints.get("semantic_logits", tf.zeros([1, 7])).shape
+                r_shape = endpoints.get("raw_semantic_similarity", tf.zeros([1, self.num_classes, 5])).shape
+                s_shape = endpoints.get("semantic_logits", tf.zeros([1, self.num_classes])).shape
                 print("MULTI_PROTOTYPE_CLIP_ENABLED", flush=True)
                 print(f"Text prototypes shape: {tuple(self.text_prototypes.shape)}", flush=True)
                 print(f"Visual embedding shape: ({v_shape[0]}, {v_shape[1]})", flush=True)
@@ -958,7 +1233,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 print(f"[ConvNeXtBaseFace]   semantic_logit_scale: {self.semantic_logit_scale}", flush=True)
             print(f"[ConvNeXtBaseFace]   Total trainable params: {total_params:,}", flush=True)
 
-    def call(self, inputs, training=False, **kwargs):
+    def call(self, inputs, training=False, labels=None, **kwargs):
+        if labels is None:
+            labels = kwargs.get("labels", inputs.get("label", inputs.get("labels", None)) if isinstance(inputs, dict) else None)
         image = inputs["image"] if isinstance(inputs, dict) else inputs
         endpoints = self.backbone(
             image, training=training, return_endpoints=True, stage3_adapter=self.stage3_adapter
@@ -968,8 +1245,12 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             feat = self.stage4_eca(feat, training=training)
             endpoints["stage4_eca"] = feat
         pooled = self.gap(feat)
-        dropped = self.head_dropout(pooled, training=training)
-        logits = self.classifier(dropped)
+        if not (self.use_global_regional_fusion or self.use_multistage_adaptive_fusion):
+            dropped = self.head_dropout(pooled, training=training)
+            if hasattr(self.classifier, "margin"):
+                logits = self.classifier(dropped, labels=labels, training=training)
+            else:
+                logits = self.classifier(dropped)
 
         semantic_logits = None
         agg_sim = None
@@ -977,24 +1258,61 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
 
         if self.use_semantic_branch and self.visual_projector is not None:
             text_protos = tf.cast(self.text_prototypes, dtype=tf.float32)
-            t_norm = tf.math.l2_normalize(text_protos, axis=-1) # [7, 5, dim]
+            # Global mean-centering across class/granularity axes to remove shared template overhead.
+            proto_mean = (
+                tf.reduce_mean(text_protos, axis=[0, 1], keepdims=True)
+                if text_protos.shape.rank == 3
+                else tf.reduce_mean(text_protos, axis=0, keepdims=True)
+            )
+            text_protos_centered = text_protos - proto_mean
+            t_norm = tf.math.l2_normalize(text_protos_centered, axis=-1)
 
             if self.use_au_region_routed and self.visual_projector_upper is not None:
                 # Extract Stage 3 spatial feature maps [B, 14, 14, 512]
                 stage3_feat = endpoints.get("stage3_adapter", endpoints.get("stage3"))
-                z_upper = tf.reduce_mean(stage3_feat[:, 0:8, :, :], axis=[1, 2])
-                z_lower = tf.reduce_mean(stage3_feat[:, 5:14, :, :], axis=[1, 2])
-                z_au = tf.reduce_mean(stage3_feat[:, 3:11, :, :], axis=[1, 2])
+                if self.use_stage3_eca:
+                    stage3_feat = self.stage3_eca(stage3_feat, training=training)
+                    endpoints["stage3_eca"] = stage3_feat
+                if self.use_dynamic_part_attention and self.dynamic_part_attn is not None:
+                    z_upper, z_lower, z_au, attn_maps = self.dynamic_part_attn(stage3_feat, training=training)
+                    endpoints["part_attention_maps"] = attn_maps
+                elif self.use_soft_regional_pooling:
+                    h_feat = tf.shape(stage3_feat)[1]
+                    r_up = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (8.0 / 14.0)), tf.int32)
+                    r_low = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (5.0 / 14.0)), tf.int32)
+                    r_au_start = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (3.0 / 14.0)), tf.int32)
+                    r_au_end = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (11.0 / 14.0)), tf.int32)
+                    z_upper = self.soft_pool_upper(stage3_feat[:, :r_up, :, :])
+                    z_lower = self.soft_pool_lower(stage3_feat[:, r_low:, :, :])
+                    z_au = self.soft_pool_au(stage3_feat[:, r_au_start:r_au_end, :, :])
+                else:
+                    h_feat = tf.shape(stage3_feat)[1]
+                    r_up = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (8.0 / 14.0)), tf.int32)
+                    r_low = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (5.0 / 14.0)), tf.int32)
+                    r_au_start = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (3.0 / 14.0)), tf.int32)
+                    r_au_end = tf.cast(tf.round(tf.cast(h_feat, tf.float32) * (11.0 / 14.0)), tf.int32)
+                    z_upper = tf.reduce_mean(stage3_feat[:, :r_up, :, :], axis=[1, 2])
+                    z_lower = tf.reduce_mean(stage3_feat[:, r_low:, :, :], axis=[1, 2])
+                    z_au = tf.reduce_mean(stage3_feat[:, r_au_start:r_au_end, :, :], axis=[1, 2])
 
-                v_global_proj = self.visual_projector(pooled, training=training)
+                semantic_source = pooled
+                if self.use_multistage_adaptive_fusion:
+                    head_features, stage_weights = self.multistage_fusion(
+                        (endpoints["stage2"], z_upper, z_lower, z_au, pooled),
+                        training=training,
+                    )
+                    semantic_source = head_features
+                    endpoints["stage_fusion_weights"] = stage_weights
+                    endpoints["multistage_features"] = head_features
+                v_global_proj = self.visual_projector(semantic_source, training=training)
                 v_upper_proj = self.visual_projector_upper(z_upper, training=training)
                 v_lower_proj = self.visual_projector_lower(z_lower, training=training)
                 v_au_proj = self.visual_projector_au(z_au, training=training)
 
-                v_global_norm = tf.math.l2_normalize(v_global_proj, axis=-1)
-                v_upper_norm = tf.math.l2_normalize(v_upper_proj, axis=-1)
-                v_lower_norm = tf.math.l2_normalize(v_lower_proj, axis=-1)
-                v_au_norm = tf.math.l2_normalize(v_au_proj, axis=-1)
+                v_global_norm = tf.math.l2_normalize(v_global_proj, axis=-1, epsilon=1e-5)
+                v_upper_norm = tf.math.l2_normalize(v_upper_proj, axis=-1, epsilon=1e-5)
+                v_lower_norm = tf.math.l2_normalize(v_lower_proj, axis=-1, epsilon=1e-5)
+                v_au_norm = tf.math.l2_normalize(v_au_proj, axis=-1, epsilon=1e-5)
 
                 endpoints["visual_projector"] = v_global_proj
                 endpoints["visual_projector_upper"] = v_upper_proj
@@ -1016,10 +1334,22 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 s3 = tf.einsum("bd,cd->bc", v_lower_norm, t_norm[:, 3, :])
                 s4 = tf.einsum("bd,cd->bc", v_global_norm, t_norm[:, 4, :])
 
-                raw_sim = tf.stack([s0, s1, s2, s3, s4], axis=-1)  # [B, 7, 5]
+                raw_sim = tf.stack([s0, s1, s2, s3, s4], axis=-1)  # [B, C, 5]
+
+                # Explicit Local Semantic Logits (scaled for Cross-Entropy loss)
+                scale_f32 = tf.cast(self.semantic_logit_scale, tf.float32)
+                endpoints["s_au"] = tf.cast(s1, tf.float32) * scale_f32
+                endpoints["s_upper"] = tf.cast(s2, tf.float32) * scale_f32
+                endpoints["s_lower"] = tf.cast(s3, tf.float32) * scale_f32
+                endpoints["local_semantic_logits"] = {
+                    "au": endpoints["s_au"],
+                    "upper": endpoints["s_upper"],
+                    "lower": endpoints["s_lower"],
+                }
+                endpoints["lambda_local_sem"] = tf.constant(self.lambda_local_sem, dtype=tf.float32)
             else:
                 v_proj = self.visual_projector(pooled, training=training)
-                v_norm = tf.math.l2_normalize(v_proj, axis=-1)
+                v_norm = tf.math.l2_normalize(v_proj, axis=-1, epsilon=1e-5)
                 t_norm = tf.cast(t_norm, dtype=v_norm.dtype)
                 endpoints["visual_projector"] = v_proj
                 if len(t_norm.shape) == 3 or (hasattr(t_norm.shape, "rank") and t_norm.shape.rank == 3):
@@ -1032,11 +1362,12 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 raw_sim_f32 = tf.cast(raw_sim, tf.float32)
 
                 if self.use_adaptive_granularity and self.granularity_gate is not None:
-                    # Adaptive Multi-Granularity Weighting: Sample-adaptive gate [B, 5]
-                    granularity_weights = self.granularity_gate(pooled, training=training)  # [B, 5]
+                    # Adaptive Multi-Granularity Weighting: sample-adaptive gate [B, 5].
+                    # When configured, the schedule routes this inside the TF graph.
+                    granularity_weights = self._granularity_gate_weights(pooled, training=training)
                     granularity_weights_f32 = tf.cast(granularity_weights, tf.float32)
                     gw_exp = tf.expand_dims(granularity_weights_f32, axis=1)  # [B, 1, 5]
-                    agg_sim = tf.reduce_sum(gw_exp * raw_sim_f32, axis=-1)  # [B, 7]
+                    agg_sim = tf.reduce_sum(gw_exp * raw_sim_f32, axis=-1)  # [B, C]
                     endpoints["granularity_weights"] = granularity_weights
                 else:
                     if self.prototype_aggregation == "logsumexp":
@@ -1054,14 +1385,73 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             else:
                 agg_sim = tf.cast(raw_sim, tf.float32)
                 semantic_logits = agg_sim * tf.cast(self.semantic_logit_scale, tf.float32)
+            
+            agg_sim = tf.where(tf.math.is_finite(agg_sim), agg_sim, tf.zeros_like(agg_sim))
+            semantic_logits = tf.where(tf.math.is_finite(semantic_logits), semantic_logits, tf.zeros_like(semantic_logits))
             endpoints["semantic_logits"] = semantic_logits
 
+        if self.use_global_regional_fusion:
+            head_features = self.global_regional_fusion(
+                (pooled, z_upper, z_lower, z_au), training=training,
+            )
+            dropped = self.head_dropout(head_features, training=training)
+            if hasattr(self.classifier, "margin"):
+                logits = self.classifier(dropped, labels=labels, training=training)
+            else:
+                logits = self.classifier(dropped)
+            endpoints["global_regional_features"] = head_features
+            if not self._shape_logged:
+                print(
+                    f"[GlobalRegionalFusion] global={pooled.shape} "
+                    f"upper={z_upper.shape} lower={z_lower.shape} au={z_au.shape} "
+                    f"concat={head_features.shape} logits={logits.shape}", flush=True,
+                )
+
+        if self.use_multistage_adaptive_fusion:
+            dropped = self.head_dropout(head_features, training=training)
+            if hasattr(self.classifier, "margin"):
+                logits = self.classifier(dropped, labels=labels, training=training)
+            else:
+                logits = self.classifier(dropped)
+            if not self._shape_logged:
+                print(
+                    f"[MultiStageFusion] S2={endpoints['stage2'].shape} "
+                    f"S3-parts=3x{z_upper.shape} S4={pooled.shape} "
+                    f"fused={head_features.shape} weights={stage_weights.shape} "
+                    "order=[S2,S3,S4]; initial softmax=[1/3,1/3,1/3]",
+                    flush=True,
+                )
+
+        visual_logits = tf.cast(logits, tf.float32)
+        if self.use_adaptive_fusion_gate and self.adaptive_fusion_gate is not None and semantic_logits is not None:
+            alpha = self.adaptive_fusion_gate(pooled, training=training)  # [B, 1]
+            endpoints["adaptive_fusion_alpha"] = alpha
+            fused_logits = (1.0 - alpha) * visual_logits + alpha * tf.cast(semantic_logits, tf.float32)
+        else:
+            should_fuse = (self.semantic_fusion_alpha > 0.0) and (not training or self.semantic_fusion_training)
+            if should_fuse and semantic_logits is not None:
+                fused_logits = (1.0 - self.semantic_fusion_alpha) * visual_logits + self.semantic_fusion_alpha * tf.cast(semantic_logits, tf.float32)
+            else:
+                fused_logits = visual_logits
+
+        if granularity_weights is not None:
+            gw_f32 = tf.cast(granularity_weights, tf.float32)
+            gate_entropy = tf.reduce_mean(-tf.reduce_sum(gw_f32 * tf.math.log(gw_f32 + 1e-12), axis=-1))
+            gate_entropy_loss = tf.reduce_mean(tf.nn.relu(tf.constant(getattr(self, "gate_entropy_floor", 0.80), dtype=tf.float32) - (-tf.reduce_sum(gw_f32 * tf.math.log(gw_f32 + 1e-12), axis=-1))))
+        else:
+            gate_entropy = tf.constant(0.0, dtype=tf.float32)
+            gate_entropy_loss = tf.constant(0.0, dtype=tf.float32)
+
         self._log_shapes_once(image, endpoints, pooled, dropped, logits)
-        return {
-            "logits": tf.cast(logits, tf.float32),
+        outputs = {
+            "logits": fused_logits,
+            "visual_logits": visual_logits,
             "semantic_logits": semantic_logits,
             "agg_sim": agg_sim,
             "granularity_weights": granularity_weights,
+            "gate_entropy": gate_entropy,
+            "gate_entropy_loss": gate_entropy_loss,
+            "lambda_gate_entropy": getattr(self, "lambda_gate_entropy", 0.0),
             "lambda_sem": self.lambda_sem,
             "lambda_hard": self.lambda_hard if self.use_hard_semantic_loss else 0.0,
             "hard_margin": self.hard_margin,
@@ -1071,6 +1461,44 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),
             "attention_logits": None,
         }
+        # The loss reads outputs, not backbone endpoints. LGSA remains opt-in
+        # through lambda_local_sem so other configs retain their original loss.
+        if "local_semantic_logits" in endpoints:
+            outputs.update({
+                "s_upper": endpoints["s_upper"],
+                "s_lower": endpoints["s_lower"],
+                "s_au": endpoints["s_au"],
+                "local_semantic_logits": endpoints["local_semantic_logits"],
+                "lambda_local_sem": endpoints["lambda_local_sem"],
+            })
+        if self.use_global_regional_fusion:
+            outputs.update({
+                "global_features": pooled,
+                "regional_features": (z_upper, z_lower, z_au),
+                "global_regional_features": head_features,
+                "part_attention_maps": attn_maps,
+            })
+            if "adaptive_fusion_alpha" in endpoints:
+                outputs["adaptive_fusion_alpha"] = endpoints["adaptive_fusion_alpha"]
+        if self.use_stage3_eca:
+            outputs["part_attention_maps"] = attn_maps
+            outputs["regional_features"] = (z_upper, z_lower, z_au)
+            if "adaptive_fusion_alpha" in endpoints:
+                outputs["adaptive_fusion_alpha"] = endpoints["adaptive_fusion_alpha"]
+        if self.use_multistage_adaptive_fusion:
+            outputs["stage_fusion_weights"] = stage_weights
+            outputs["multistage_features"] = head_features
+            outputs["regional_features"] = (z_upper, z_lower, z_au)
+            outputs["part_attention_maps"] = attn_maps
+            if "adaptive_fusion_alpha" in endpoints:
+                outputs["adaptive_fusion_alpha"] = endpoints["adaptive_fusion_alpha"]
+        if "visual_projector" in endpoints:
+            outputs["visual_projector"] = endpoints["visual_projector"]
+        if "part_attention_maps" in endpoints and "part_attention_maps" not in outputs:
+            outputs["part_attention_maps"] = endpoints["part_attention_maps"]
+        if "adaptive_fusion_alpha" in endpoints and "adaptive_fusion_alpha" not in outputs:
+            outputs["adaptive_fusion_alpha"] = endpoints["adaptive_fusion_alpha"]
+        return outputs
 
 
 
@@ -1225,6 +1653,3 @@ class ConvNeXtBaseImageNetFERBaseline(tf.keras.Model):
             "attn_scores": tf.zeros([tf.shape(image)[0], 1, 1, 1], dtype=logits.dtype),
             "attention_logits": None,
         }
-
-
-

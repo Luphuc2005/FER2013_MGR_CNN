@@ -29,7 +29,7 @@ tta:
   flip_weight: 0.60
 
 data:
-  data_path: "/home/ptbao/projects/FER2013_MGR_CNN/data/raf_db"
+  data_path: "/home/ptbao/projects/FER2013_MGR_CNN/data/rafdb"
   mask_dir: null
   num_classes: 7
   image_size: 112
@@ -66,6 +66,9 @@ model:
   convnext_base_require_pretrained: true
   drop_path_rate: 0.1
   layer_scale_init_value: 0.000001
+  embed_dim: 512
+  num_regions: 6
+  num_heads: 4
 
   use_semantic_branch: true
   use_clip_semantic: true
@@ -128,7 +131,7 @@ stage_transition:
 
 training:
   epochs: 60
-  patience: 15
+  patience: 20
   warmup_epochs: 5
   loss: "cross_entropy"
   label_smoothing: 0.10

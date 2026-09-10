@@ -128,12 +128,18 @@ def main() -> int:
             checkpoint_path = p
         else:
             checkpoint_root = Path(cfg["paths"]["output_dir"]) / "checkpoints"
-            max_to_keep_acc = int(cfg["training"].get("max_to_keep_acc", 5))
-            max_to_keep_loss = int(cfg["training"].get("max_to_keep_loss", 5))
-            best_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "best"), max_to_keep=max_to_keep_acc)
-            best_loss_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "best_loss"), max_to_keep=max_to_keep_loss)
-            last_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "last"), max_to_keep=1)
-            checkpoint_path = best_manager.latest_checkpoint or best_loss_manager.latest_checkpoint or last_manager.latest_checkpoint
+            # Try to get latest modified checkpoint in checkpoints/best/ first
+            best_dir = checkpoint_root / "best"
+            best_ckpts = sorted(best_dir.glob("ckpt-*.index"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if best_ckpts:
+                checkpoint_path = str(best_ckpts[0])[:-6]
+            else:
+                max_to_keep_acc = int(cfg["training"].get("max_to_keep_acc", 5))
+                max_to_keep_loss = int(cfg["training"].get("max_to_keep_loss", 5))
+                best_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "best"), max_to_keep=max_to_keep_acc)
+                best_loss_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "best_loss"), max_to_keep=max_to_keep_loss)
+                last_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "last"), max_to_keep=1)
+                checkpoint_path = best_manager.latest_checkpoint or best_loss_manager.latest_checkpoint or last_manager.latest_checkpoint
         if not checkpoint_path:
             raise FileNotFoundError(f"No checkpoint found in {cfg['paths']['output_dir']}")
         status = checkpoint.restore(checkpoint_path).expect_partial()

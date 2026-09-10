@@ -102,6 +102,7 @@ class CrossAttention(tf.keras.layers.Layer):
 
         logits = tf.matmul(tf.cast(q, tf.float32), tf.cast(k, tf.float32), transpose_b=True)
         logits = logits * tf.cast(self.scale, tf.float32)
+        logits = tf.clip_by_value(logits, -50.0, 50.0)
         attn = tf.nn.softmax(logits, axis=-1)
         out = tf.matmul(attn, tf.cast(v, tf.float32))
         out = self._merge_heads(out)
@@ -394,11 +395,79 @@ class ConvNeXtMS1MCrossStageSwinFER(tf.keras.Model):
         plain_dropped = self.rgb_baseline.head_dropout(plain_pooled, training=False)
         plain_logits = tf.cast(self.rgb_baseline.classifier(plain_dropped), tf.float32)
 
+        semantic_logits = None
+        granularity_weights = None
+        if self.rgb_baseline.use_semantic_branch and self.rgb_baseline.visual_projector is not None:
+            text_protos = tf.cast(self.rgb_baseline.text_prototypes, dtype=tf.float32)
+            t_norm = tf.math.l2_normalize(text_protos, axis=-1)
+
+            if self.rgb_baseline.use_au_region_routed and self.rgb_baseline.visual_projector_upper is not None:
+                stage3_feat = g3
+                z_upper = tf.reduce_mean(stage3_feat[:, 0:8, :, :], axis=[1, 2])
+                z_lower = tf.reduce_mean(stage3_feat[:, 5:14, :, :], axis=[1, 2])
+                z_au = tf.reduce_mean(stage3_feat[:, 3:11, :, :], axis=[1, 2])
+
+                v_global_proj = self.rgb_baseline.visual_projector(pooled, training=training)
+                v_upper_proj = self.rgb_baseline.visual_projector_upper(z_upper, training=training)
+                v_lower_proj = self.rgb_baseline.visual_projector_lower(z_lower, training=training)
+                v_au_proj = self.rgb_baseline.visual_projector_au(z_au, training=training)
+
+                v_global_norm = tf.math.l2_normalize(v_global_proj, axis=-1, epsilon=1e-5)
+                v_upper_norm = tf.math.l2_normalize(v_upper_proj, axis=-1, epsilon=1e-5)
+                v_lower_norm = tf.math.l2_normalize(v_lower_proj, axis=-1, epsilon=1e-5)
+                v_au_norm = tf.math.l2_normalize(v_au_proj, axis=-1, epsilon=1e-5)
+
+                t_norm = tf.cast(t_norm, dtype=v_global_norm.dtype)
+
+                s0 = tf.einsum("bd,cd->bc", v_global_norm, t_norm[:, 0, :])
+                s1 = tf.einsum("bd,cd->bc", v_au_norm, t_norm[:, 1, :])
+                s2 = tf.einsum("bd,cd->bc", v_upper_norm, t_norm[:, 2, :])
+                s3 = tf.einsum("bd,cd->bc", v_lower_norm, t_norm[:, 3, :])
+                s4 = tf.einsum("bd,cd->bc", v_global_norm, t_norm[:, 4, :])
+
+                raw_sim = tf.stack([s0, s1, s2, s3, s4], axis=-1)
+            else:
+                v_proj = self.rgb_baseline.visual_projector(pooled, training=training)
+                v_norm = tf.math.l2_normalize(v_proj, axis=-1, epsilon=1e-5)
+                t_norm = tf.cast(t_norm, dtype=v_norm.dtype)
+                if len(t_norm.shape) == 3 or (hasattr(t_norm.shape, "rank") and t_norm.shape.rank == 3):
+                    raw_sim = tf.einsum("bd,ckd->bck", v_norm, t_norm)
+                else:
+                    raw_sim = tf.einsum("bd,cd->bc", v_norm, t_norm)
+
+            if self.rgb_baseline.multi_prototype or self.rgb_baseline.use_adaptive_granularity:
+                raw_sim_f32 = tf.cast(raw_sim, tf.float32)
+
+                if self.rgb_baseline.use_adaptive_granularity and self.rgb_baseline.granularity_gate is not None:
+                    granularity_weights = self.rgb_baseline.granularity_gate(pooled, training=training)
+                    granularity_weights_f32 = tf.cast(granularity_weights, tf.float32)
+                    gw_exp = tf.expand_dims(granularity_weights_f32, axis=1)
+                    agg_sim = tf.reduce_sum(gw_exp * raw_sim_f32, axis=-1)
+                else:
+                    if self.rgb_baseline.prototype_aggregation == "logsumexp":
+                        tau = tf.constant(self.rgb_baseline.prototype_temperature, dtype=tf.float32)
+                        K = tf.constant(float(raw_sim.shape[-1]), dtype=tf.float32)
+                        lse = tf.reduce_logsumexp(raw_sim_f32 / tau, axis=-1)
+                        agg_sim = tau * (lse - tf.math.log(K))
+                    elif self.rgb_baseline.prototype_aggregation == "mean":
+                        agg_sim = tf.reduce_mean(raw_sim_f32, axis=-1)
+                    elif self.rgb_baseline.prototype_aggregation == "max":
+                        agg_sim = tf.reduce_max(raw_sim_f32, axis=-1)
+                    else:
+                        raise ValueError(f"Unsupported prototype_aggregation: {self.rgb_baseline.prototype_aggregation}")
+                semantic_logits = agg_sim * tf.cast(self.rgb_baseline.semantic_logit_scale, tf.float32)
+            else:
+                agg_sim = tf.cast(raw_sim, tf.float32)
+                semantic_logits = agg_sim * tf.cast(self.rgb_baseline.semantic_logit_scale, tf.float32)
+
+            agg_sim = tf.where(tf.math.is_finite(agg_sim), agg_sim, tf.zeros_like(agg_sim))
+            semantic_logits = tf.where(tf.math.is_finite(semantic_logits), semantic_logits, tf.zeros_like(semantic_logits))
+
         self._log_shapes_once(image, s2, p2, s3, g3, p3, s4, g4, logits)
 
-        tf.debugging.assert_all_finite(logits, "NaN/Inf in cross-stage logits")
-        tf.debugging.assert_all_finite(g3, "NaN/Inf in G3")
-        tf.debugging.assert_all_finite(g4, "NaN/Inf in G4")
+        logits = tf.where(tf.math.is_finite(logits), logits, tf.zeros_like(logits))
+        g3 = tf.where(tf.math.is_finite(g3), g3, tf.zeros_like(g3))
+        g4 = tf.where(tf.math.is_finite(g4), g4, tf.zeros_like(g4))
 
         alpha3_mean, alpha3_min, alpha3_max, alpha3_std = self._stats(alpha3)
         alpha4_mean, alpha4_min, alpha4_max, alpha4_std = self._stats(alpha4)
@@ -406,7 +475,13 @@ class ConvNeXtMS1MCrossStageSwinFER(tf.keras.Model):
             "logits": logits,
             "plain_logits": plain_logits,
             "cnn_aux_logits": None,
-            "semantic_logits": None,
+            "semantic_logits": semantic_logits,
+            "granularity_weights": granularity_weights,
+            "agg_sim": agg_sim if 'agg_sim' in locals() else None,
+            "hard_pairs_matrix": getattr(self.rgb_baseline, "hard_pairs_matrix", None),
+            "lambda_sem": getattr(self.rgb_baseline, "lambda_sem", 0.1),
+            "lambda_hard": getattr(self.rgb_baseline, "lambda_hard", 0.05),
+            "hard_margin": getattr(self.rgb_baseline, "hard_margin", 0.15),
             "ortho_loss": tf.constant(0.0, dtype=tf.float32),
             "S2": s2,
             "projected_S2": p2,

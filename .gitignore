@@ -30,3 +30,10 @@ MISSING_PACKAGES.txt
 *.pth
 *.pt
 *.onnx
+*.md
+/checkpoints-down
+*.ipynb
+*.png
+
+# Runnable V5 LGSA + R-Drop experiment documentation
+!scripts/README_rafdb_v5_lgsa_rdrop.md
