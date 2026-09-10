@@ -48,6 +48,7 @@ def supervised_mgr_loss(
     *,
     num_classes: int,
     label_smoothing: float = 0.0,
+    smooth_auxiliary: bool = False,
     class_weights: Optional[tf.Tensor] = None,
     class_weight_reduction: str = "sum_weights",
     logit_adj_offsets: Optional[tf.Tensor] = None,
@@ -83,7 +84,7 @@ def supervised_mgr_loss(
     cnn_aux_logits = outputs.get("cnn_aux_logits")
     if cnn_aux_logits is not None:
         cnn_aux_logits = tf.cast(cnn_aux_logits, tf.float32)
-        if label_smoothing > 0.0:
+        if smooth_auxiliary and label_smoothing > 0.0:
             targets = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
             targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
             aux = tf.keras.losses.categorical_crossentropy(targets, cnn_aux_logits, from_logits=True)
@@ -98,7 +99,7 @@ def supervised_mgr_loss(
     semantic_logits = outputs.get("semantic_logits")
     if semantic_logits is not None:
         semantic_logits = tf.cast(semantic_logits, tf.float32)
-        if label_smoothing > 0.0:
+        if smooth_auxiliary and label_smoothing > 0.0:
             targets = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
             targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
             sem = tf.keras.losses.categorical_crossentropy(targets, semantic_logits, from_logits=True)
@@ -140,7 +141,7 @@ def supervised_mgr_loss(
         s_upper_f32 = tf.cast(s_upper, tf.float32)
         s_lower_f32 = tf.cast(s_lower, tf.float32)
         s_au_f32 = tf.cast(s_au, tf.float32)
-        if label_smoothing > 0.0:
+        if smooth_auxiliary and label_smoothing > 0.0:
             targets = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
             targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
             loss_upper = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(targets, s_upper_f32, from_logits=True))

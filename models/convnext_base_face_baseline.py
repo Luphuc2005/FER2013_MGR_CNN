@@ -291,6 +291,41 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             or model_cfg.get("use_adaptive_granularity", False)
             or model_cfg.get("ablation") in ("adaptive_clip", "adaptive_clip_confusion")
         )
+        gate_schedule_cfg = model_cfg.get(
+            "granularity_gate_schedule",
+            clip_sem_cfg.get("granularity_gate_schedule", {}),
+        )
+        if not isinstance(gate_schedule_cfg, dict):
+            raise ValueError("granularity_gate_schedule must be a mapping when provided.")
+        self.granularity_gate_schedule_enabled = bool(gate_schedule_cfg.get("enabled", False))
+        self.granularity_gate_uniform_epochs = int(gate_schedule_cfg.get("uniform_epochs", 0))
+        self.granularity_gate_transition_end_epoch = int(
+            gate_schedule_cfg.get("transition_end_epoch", self.granularity_gate_uniform_epochs)
+        )
+        self.granularity_gate_start_temperature = float(gate_schedule_cfg.get("start_temperature", 1.0))
+        self.granularity_gate_end_temperature = float(gate_schedule_cfg.get("end_temperature", 1.0))
+        if self.granularity_gate_schedule_enabled:
+            if not self.use_adaptive_granularity:
+                raise ValueError("granularity_gate_schedule requires use_adaptive_granularity=true.")
+            if self.granularity_gate_uniform_epochs < 0:
+                raise ValueError("granularity_gate_schedule.uniform_epochs must be non-negative.")
+            if self.granularity_gate_transition_end_epoch <= self.granularity_gate_uniform_epochs:
+                raise ValueError(
+                    "granularity_gate_schedule.transition_end_epoch must exceed uniform_epochs."
+                )
+            if self.granularity_gate_start_temperature <= 0.0 or self.granularity_gate_end_temperature <= 0.0:
+                raise ValueError("granularity gate temperatures must be positive.")
+        # Legacy V5 configs retain their original variable/checkpoint structure.
+        # The epoch variable exists only when the V6 warm-up schedule is enabled.
+        self.granularity_gate_epoch = None
+        if self.granularity_gate_schedule_enabled:
+            self.granularity_gate_epoch = self.add_weight(
+                name="granularity_gate_epoch",
+                shape=(),
+                dtype=tf.int32,
+                initializer=tf.keras.initializers.Constant(1),
+                trainable=False,
+            )
         self.use_hard_semantic_loss = bool(
             clip_sem_cfg.get("use_hard_semantic_loss", False)
             or model_cfg.get("use_hard_semantic_loss", False)
@@ -477,13 +512,22 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 self.visual_projector_au = None
 
             if self.use_adaptive_granularity:
-                self.granularity_gate = tf.keras.Sequential([
+                gate_layers = [
                     tf.keras.layers.Dense(256, kernel_initializer="he_normal", name="fc1"),
                     tf.keras.layers.Activation("gelu", name="gelu"),
                     tf.keras.layers.Dropout(0.1, name="drop"),
                     tf.keras.layers.Dense(5, kernel_initializer="he_normal", name="fc2"),
-                    tf.keras.layers.Activation("softmax", name="softmax"),
-                ], name="granularity_gate")
+                ]
+                # Old configs retain their exact softmax layer. V6 needs raw
+                # logits so temperature is applied before softmax in the graph.
+                if not self.granularity_gate_schedule_enabled:
+                    gate_layers.append(tf.keras.layers.Activation("softmax", name="softmax"))
+                self.granularity_gate = tf.keras.Sequential(gate_layers, name="granularity_gate")
+                # Uniform warm-up intentionally does not execute this gate. Build
+                # its variables now so it is included in the head optimizer before
+                # the first graph trace, while receiving no gradients in epochs 1--4.
+                if self.granularity_gate_schedule_enabled:
+                    self.granularity_gate.build((None, self.backbone.dims[-1]))
             else:
                 self.granularity_gate = None
 
@@ -972,6 +1016,61 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         print(f"[ConvNeXtBaseFace] PRETRAINED_LOAD_OK path={resolved} matched={matched}/{total_targets}", flush=True)
         return "loaded"
 
+    def set_granularity_gate_epoch(self, epoch: int) -> None:
+        """Set the 1-based epoch used by the optional granularity-gate schedule."""
+        if int(epoch) < 1:
+            raise ValueError("granularity gate epoch must be 1-based and positive.")
+        if self.granularity_gate_epoch is None:
+            return
+        self.granularity_gate_epoch.assign(int(epoch))
+
+    def _granularity_gate_weights(self, pooled: tf.Tensor, training=False) -> tf.Tensor:
+        """Return five prototype weights while preserving V5 when scheduling is off."""
+        if self.granularity_gate is None:
+            raise RuntimeError("Adaptive granularity is disabled but gate weights were requested.")
+
+        if not self.granularity_gate_schedule_enabled:
+            gate_logits = self.granularity_gate(pooled, training=training)
+            return gate_logits
+
+        batch_size = tf.shape(pooled)[0]
+        uniform = tf.fill([batch_size, 5], tf.constant(0.2, dtype=tf.float32))
+        epoch = tf.identity(self.granularity_gate_epoch)
+        uniform_epochs = tf.constant(self.granularity_gate_uniform_epochs, dtype=tf.int32)
+        transition_end_epoch = tf.constant(
+            self.granularity_gate_transition_end_epoch, dtype=tf.int32
+        )
+
+        def _adaptive(temperature: tf.Tensor) -> tf.Tensor:
+            gate_logits = self.granularity_gate(pooled, training=training)
+            return tf.nn.softmax(tf.cast(gate_logits, tf.float32) / temperature, axis=-1)
+
+        def _transition() -> tf.Tensor:
+            # Epoch 5 receives beta=1/6; epoch 9 receives beta=5/6. Epoch 10
+            # takes the fully adaptive branch, exactly matching the V5 softmax.
+            beta = tf.cast(epoch - uniform_epochs, tf.float32) / tf.cast(
+                transition_end_epoch - uniform_epochs, tf.float32
+            )
+            temperature = tf.constant(self.granularity_gate_start_temperature, tf.float32)
+            temperature += beta * tf.constant(
+                self.granularity_gate_end_temperature - self.granularity_gate_start_temperature,
+                tf.float32,
+            )
+            adaptive = _adaptive(temperature)
+            return (1.0 - beta) * uniform + beta * adaptive
+
+        # tf.cond keeps the uniform phase independent of gate_logits in the
+        # runtime graph: the gate receives no loss gradient before epoch 5.
+        return tf.cond(
+            epoch <= uniform_epochs,
+            lambda: uniform,
+            lambda: tf.cond(
+                epoch < transition_end_epoch,
+                _transition,
+                lambda: _adaptive(tf.constant(1.0, tf.float32)),
+            ),
+        )
+
     def _log_shapes_once(self, image, endpoints, pooled, dropped, logits) -> None:
         if self._shape_logged:
             return
@@ -1167,8 +1266,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 raw_sim_f32 = tf.cast(raw_sim, tf.float32)
 
                 if self.use_adaptive_granularity and self.granularity_gate is not None:
-                    # Adaptive Multi-Granularity Weighting: Sample-adaptive gate [B, 5]
-                    granularity_weights = self.granularity_gate(pooled, training=training)  # [B, 5]
+                    # Adaptive Multi-Granularity Weighting: sample-adaptive gate [B, 5].
+                    # When configured, the schedule routes this inside the TF graph.
+                    granularity_weights = self._granularity_gate_weights(pooled, training=training)
                     granularity_weights_f32 = tf.cast(granularity_weights, tf.float32)
                     gw_exp = tf.expand_dims(granularity_weights_f32, axis=1)  # [B, 1, 5]
                     agg_sim = tf.reduce_sum(gw_exp * raw_sim_f32, axis=-1)  # [B, C]

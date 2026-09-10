@@ -250,6 +250,127 @@ def split_variables(model: MGRConvNeXtFER) -> Tuple[List[tf.Variable], List[tf.V
     return backbone, head
 
 
+# ---------------------------------------------------------------------------
+# Progressive Unfreezing
+# ---------------------------------------------------------------------------
+
+def _var_belongs_to_stage(var_name: str, stage_num: int) -> bool:
+    """Check if a backbone variable belongs to a given ConvNeXt stage (1-4).
+
+    Backbone naming conventions in ConvNeXtBaseFRBackbone:
+      stem:  stem_conv, stem_norm
+      stage1: stage1_block0..2
+      downsample_stage2: norm, conv  (between stage1 and stage2)
+      stage2: stage2_block0..2
+      downsample_stage3: norm, conv  (between stage2 and stage3)
+      stage3: stage3_block0..26
+      downsample_stage4: norm, conv  (between stage3 and stage4)
+      stage4: stage4_block0..2
+
+    We group each downsample layer with the NEXT stage (the stage it feeds into),
+    so unfreezing stage4 also unfreezes downsample_stage4.
+    """
+    lower = var_name.lower()
+    if stage_num == 1:
+        return "stage1_block" in lower or "stem_conv" in lower or "stem_norm" in lower
+    elif stage_num == 2:
+        return "stage2_block" in lower or "downsample_stage2" in lower
+    elif stage_num == 3:
+        return "stage3_block" in lower or "downsample_stage3" in lower
+    elif stage_num == 4:
+        return "stage4_block" in lower or "downsample_stage4" in lower
+    return False
+
+
+def resolve_progressive_unfreeze_mask(
+    cfg: Dict,
+    epoch_number: int,
+    backbone_vars: List[tf.Variable],
+) -> Tuple[Dict[str, bool], List[int]]:
+    """Return (mask_dict, trainable_stages) for the current epoch.
+
+    mask_dict: maps variable_key(v) -> True if variable should receive gradients.
+    trainable_stages: list of stage numbers that are trainable (e.g. [3, 4]).
+    """
+    prog_cfg = cfg.get("model", {}).get("progressive_unfreeze", {})
+    if not prog_cfg.get("enabled", False):
+        # Progressive unfreezing disabled => all backbone vars trainable
+        return {variable_key(v): True for v in backbone_vars}, [1, 2, 3, 4]
+
+    schedule = prog_cfg.get("schedule", [])
+    trainable_stages: List[int] = []
+    for phase in schedule:
+        start = int(phase.get("start_epoch", 1))
+        end = int(phase.get("end_epoch", 9999))
+        if start <= epoch_number <= end:
+            trainable_stages = [int(s) for s in phase.get("trainable_stages", [])]
+            break
+
+    mask = {}
+    for v in backbone_vars:
+        v_key = variable_key(v)
+        v_name = getattr(v, "name", str(v_key))
+        is_trainable = any(_var_belongs_to_stage(v_name, s) for s in trainable_stages)
+        mask[v_key] = is_trainable
+    return mask, trainable_stages
+
+
+def compute_stage_lr_scales(
+    cfg: Dict,
+    backbone_vars: List[tf.Variable],
+    trainable_stages: List[int],
+) -> Dict[str, float]:
+    """Return per-variable LR scale factors for discriminative LR."""
+    prog_cfg = cfg.get("model", {}).get("progressive_unfreeze", {})
+    stage_mults = prog_cfg.get("stage_lr_multipliers", {})
+    scales = {}
+    for v in backbone_vars:
+        v_key = variable_key(v)
+        v_name = getattr(v, "name", str(v_key))
+        scale = 1.0
+        for s in trainable_stages:
+            if _var_belongs_to_stage(v_name, s):
+                scale = float(stage_mults.get(str(s), 1.0))
+                break
+        scales[v_key] = scale
+    return scales
+
+
+def log_unfreeze_state(
+    epoch_number: int,
+    trainable_stages: List[int],
+    backbone_vars: List[tf.Variable],
+    mask: Dict[str, bool],
+    lr_scales: Dict[str, float],
+    base_backbone_lr: float,
+) -> None:
+    """Log detailed progressive unfreeze diagnostics."""
+    frozen_stages = [s for s in [1, 2, 3, 4] if s not in trainable_stages]
+    trainable_count = sum(1 for v in backbone_vars if mask.get(variable_key(v), False))
+    trainable_params = sum(
+        int(np.prod(v.shape)) for v in backbone_vars if mask.get(variable_key(v), False)
+    )
+    frozen_count = len(backbone_vars) - trainable_count
+    frozen_params = sum(
+        int(np.prod(v.shape)) for v in backbone_vars if not mask.get(variable_key(v), False)
+    )
+    print(f"\n{'='*70}", flush=True)
+    print(f"[PROGRESSIVE_UNFREEZE] Epoch {epoch_number}", flush=True)
+    print(f"  Trainable stages: {trainable_stages if trainable_stages else 'NONE (head only)'}", flush=True)
+    print(f"  Frozen stages:    {frozen_stages}", flush=True)
+    print(f"  Backbone trainable vars: {trainable_count} ({trainable_params:,} params)", flush=True)
+    print(f"  Backbone frozen vars:    {frozen_count} ({frozen_params:,} params)", flush=True)
+    for s in trainable_stages:
+        mult = lr_scales.get(next(
+            (variable_key(v) for v in backbone_vars
+             if _var_belongs_to_stage(getattr(v, "name", ""), s)),
+            None,
+        ), 1.0) if backbone_vars else 1.0
+        effective_lr = base_backbone_lr * mult
+        print(f"  Stage {s}: LR = {effective_lr:.2e} (mult={mult})", flush=True)
+    print(f"{'='*70}\n", flush=True)
+
+
 def build_model(cfg: Dict) -> tf.keras.Model:
     arch = str(cfg.get("model", {}).get("arch", "convnext_tiny")).lower()
     name = str(cfg.get("model", {}).get("name", "")).lower()
@@ -584,6 +705,8 @@ def make_step_function(
     lambda_sem_runtime: Optional[tf.Variable] = None,
     rdrop_metrics=None,
     vlm_kd_metrics=None,
+    backbone_grad_mask: Optional[Dict[str, bool]] = None,
+    backbone_lr_scales: Optional[Dict[str, float]] = None,
 ):
     loss_cfg = cfg["training"]
     from losses.vlm_kd import validate_kd_settings
@@ -621,6 +744,7 @@ def make_step_function(
         gw_sum = tf.zeros([5], dtype=tf.float32)
         gw_sq_sum = tf.zeros([5], dtype=tf.float32)
         entropy_sum = tf.constant(0.0, dtype=tf.float32)
+        gw_max = tf.constant(0.0, dtype=tf.float32)
         gw = outputs.get("granularity_weights")
         if gw is not None:
             gw_f32 = tf.cast(gw, tf.float32)
@@ -628,6 +752,7 @@ def make_step_function(
             gw_sq_sum = tf.reduce_sum(tf.square(gw_f32), axis=0)
             ent = -tf.reduce_sum(gw_f32 * tf.math.log(gw_f32 + 1e-9), axis=-1)
             entropy_sum = tf.reduce_sum(ent)
+            gw_max = tf.reduce_max(gw_f32)
 
         if rdrop_metrics is not None and lambda_rdrop > 0.0:
             rdrop_metrics.update_state(parts, count)
@@ -635,7 +760,7 @@ def make_step_function(
             vlm_kd_metrics.update_state(parts, count)
         if outputs.get("stage_fusion_weights") is not None:
             model.stage_fusion_train_metrics.update_state(outputs)
-        return correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum
+        return correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, gw_max
 
     def _clip_gradients(grads):
         if grad_clip_norm:
@@ -646,7 +771,22 @@ def make_step_function(
         grads = _clip_gradients(grads)
         backbone_ids = {variable_key(v) for v in backbone_vars}
         head_grads = [(g, v) for g, v in zip(grads, trainable_vars) if variable_key(v) not in backbone_ids and g is not None]
-        backbone_grads = [(g, v) for g, v in zip(grads, trainable_vars) if variable_key(v) in backbone_ids and g is not None]
+        backbone_grads_raw = [(g, v) for g, v in zip(grads, trainable_vars) if variable_key(v) in backbone_ids and g is not None]
+        # Apply progressive unfreeze mask: zero out gradients for frozen stages
+        if backbone_grad_mask is not None:
+            backbone_grads = []
+            for g, v in backbone_grads_raw:
+                v_key = variable_key(v)
+                if backbone_grad_mask.get(v_key, False):
+                    # Variable is trainable; apply per-stage LR scale if configured
+                    if backbone_lr_scales is not None:
+                        scale = backbone_lr_scales.get(v_key, 1.0)
+                        if scale != 1.0:
+                            g = g * scale
+                    backbone_grads.append((g, v))
+                # else: variable is frozen, skip its gradient entirely
+        else:
+            backbone_grads = backbone_grads_raw
         if head_grads:
             optimizer_head.apply_gradients(head_grads)
         if optimizer_backbone is not None and backbone_grads:
@@ -674,8 +814,8 @@ def make_step_function(
 
         if not use_sam:
             _apply_gradients(grads, trainable_vars)
-            fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum = _batch_stats(outputs, labels, parts)
-            return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, tf.constant(1, tf.int32)
+            fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, gw_max = _batch_stats(outputs, labels, parts)
+            return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, gw_max, tf.constant(1, tf.int32)
 
         grads = _clip_gradients(grads)
         grad_norm = tf.linalg.global_norm([g for g in grads if g is not None])
@@ -719,8 +859,8 @@ def make_step_function(
             grads_2 = [tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)) if g is not None else None for g in grads_2]
 
         _apply_gradients(grads_2, trainable_vars)
-        fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum = _batch_stats(outputs, labels, parts)
-        return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, tf.constant(1, tf.int32)
+        fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, gw_max = _batch_stats(outputs, labels, parts)
+        return raw_loss, parts["ce"], parts["semantic"], hard_loss, fer_correct, sem_correct, count, gw_sum, gw_sq_sum, entropy_sum, gw_max, tf.constant(1, tf.int32)
 
     def train_step_head(features, labels):
         return _step_impl(features, labels, head_vars)
@@ -737,7 +877,7 @@ def make_distributed_train_step(strategy: tf.distribute.Strategy, train_step):
         (
             per_loss, per_ce, per_sem, per_hard,
             per_correct, per_sem_correct, per_count,
-            per_gw_sum, per_gw_sq_sum, per_ent_sum, per_ok
+            per_gw_sum, per_gw_sq_sum, per_ent_sum, per_gw_max, per_ok
         ) = strategy.run(train_step, args=batch)
         ok = strategy.reduce(tf.distribute.ReduceOp.SUM, per_ok, axis=None)
         loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_loss, axis=None)
@@ -750,7 +890,8 @@ def make_distributed_train_step(strategy: tf.distribute.Strategy, train_step):
         gw_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_gw_sum, axis=None)
         gw_sq_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_gw_sq_sum, axis=None)
         ent_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_ent_sum, axis=None)
-        return loss, ce, sem, hard, correct, sem_correct, count, gw_sum, gw_sq_sum, ent_sum, ok
+        gw_max = strategy.reduce(tf.distribute.ReduceOp.MAX, per_gw_max, axis=None)
+        return loss, ce, sem, hard, correct, sem_correct, count, gw_sum, gw_sq_sum, ent_sum, gw_max, ok
 
     return distributed_step
 
@@ -858,16 +999,21 @@ def evaluate_dataset(
             semantic_correct_orig = tf.constant(0, dtype=tf.int32)
             semantic_correct_tta = tf.constant(0, dtype=tf.int32)
 
+        # Calibration diagnostics: max softmax probability per sample
+        probs_tta = tf.nn.softmax(tf.cast(outputs_tta["logits"], tf.float32), axis=-1)
+        max_probs_tta = tf.reduce_max(probs_tta, axis=-1)  # [B]
+
         return (
             total_l_orig, parts_orig["ce"], parts_orig["semantic"], parts_orig.get("hard_semantic", tf.constant(0.0, tf.float32)), fer_preds_orig,
             total_l_tta, parts_tta["ce"], parts_tta["semantic"], parts_tta.get("hard_semantic", tf.constant(0.0, tf.float32)), fer_preds_tta,
             semantic_correct_orig, semantic_correct_tta,
-            tf.shape(labels)[0], labels
+            tf.shape(labels)[0], labels, max_probs_tta
         )
 
     y_true: List[int] = []
     y_pred_orig: List[int] = []
     y_pred_tta: List[int] = []
+    max_probs_all: List[float] = []  # For calibration diagnostics
 
     total_loss_orig = 0.0
     total_ce_orig = 0.0
@@ -890,10 +1036,10 @@ def evaluate_dataset(
                 loc_tot_o, loc_ce_o, loc_sem_o, loc_hd_o, loc_p_o,
                 loc_tot_t, loc_ce_t, loc_sem_t, loc_hd_t, loc_p_t,
                 loc_sem_correct_o, loc_sem_correct_t,
-                loc_cnts, loc_lbs
+                loc_cnts, loc_lbs, loc_max_probs
             ) = strategy.run(_eval_step, args=batch)
 
-            for l_tot_o, l_ce_o, l_sem_o, l_hd_o, l_p_o, l_tot_t, l_ce_t, l_sem_t, l_hd_t, l_p_t, l_sem_correct_o, l_sem_correct_t, l_cnt, l_lb in zip(
+            for l_tot_o, l_ce_o, l_sem_o, l_hd_o, l_p_o, l_tot_t, l_ce_t, l_sem_t, l_hd_t, l_p_t, l_sem_correct_o, l_sem_correct_t, l_cnt, l_lb, l_mp in zip(
                 strategy.experimental_local_results(loc_tot_o),
                 strategy.experimental_local_results(loc_ce_o),
                 strategy.experimental_local_results(loc_sem_o),
@@ -908,6 +1054,7 @@ def evaluate_dataset(
                 strategy.experimental_local_results(loc_sem_correct_t),
                 strategy.experimental_local_results(loc_cnts),
                 strategy.experimental_local_results(loc_lbs),
+                strategy.experimental_local_results(loc_max_probs),
             ):
                 count = int(l_cnt.numpy())
                 if count == 0:
@@ -928,15 +1075,17 @@ def evaluate_dataset(
                 y_true.extend(l_lb.numpy().tolist())
                 y_pred_orig.extend(l_p_o.numpy().tolist())
                 y_pred_tta.extend(l_p_t.numpy().tolist())
+                max_probs_all.extend(l_mp.numpy().tolist())
 
     else:
         for batch in dataset:
             inputs, labels = batch
-            tot_o, ce_o, sem_o, hd_o, p_o, tot_t, ce_t, sem_t, hd_t, p_t, sem_correct_o, sem_correct_t, count, _ = _eval_step(inputs, labels)
+            tot_o, ce_o, sem_o, hd_o, p_o, tot_t, ce_t, sem_t, hd_t, p_t, sem_correct_o, sem_correct_t, count, _, max_probs_batch = _eval_step(inputs, labels)
             c = int(count.numpy())
             y_true.extend(labels.numpy().tolist())
             y_pred_orig.extend(p_o.numpy().tolist())
             y_pred_tta.extend(p_t.numpy().tolist())
+            max_probs_all.extend(max_probs_batch.numpy().tolist())
 
             total_loss_orig += float(tot_o.numpy()) * c
             total_ce_orig += float(ce_o.numpy()) * c
@@ -978,6 +1127,36 @@ def evaluate_dataset(
     metrics_tta["no_tta_weighted_sem_loss"] = eval_lambda_sem * metrics_tta["no_tta_semantic_loss"]
     metrics_tta["no_tta_semantic_accuracy"] = total_semantic_correct_orig / c_norm
     metrics_tta["no_tta_hard_semantic_loss"] = total_hard_orig / c_norm
+
+    # --- Calibration Diagnostics (post-hoc, no backprop) ---
+    if max_probs_all:
+        mp_arr = np.array(max_probs_all, dtype=np.float64)
+        yt_arr = np.array(y_true, dtype=np.int64)
+        yp_arr = np.array(y_pred_tta, dtype=np.int64)
+        mean_confidence = float(np.mean(mp_arr))
+        nll = float(metrics_tta["loss"])  # Already computed
+        # ECE with 15 bins
+        n_bins = 15
+        bin_boundaries = np.linspace(0.0, 1.0, n_bins + 1)
+        correct = (yp_arr == yt_arr).astype(np.float64)
+        ece = 0.0
+        for i in range(n_bins):
+            in_bin = (mp_arr > bin_boundaries[i]) & (mp_arr <= bin_boundaries[i + 1])
+            if i == 0:
+                in_bin = in_bin | (mp_arr == bin_boundaries[i])
+            bin_count = int(np.sum(in_bin))
+            if bin_count > 0:
+                bin_acc = float(np.mean(correct[in_bin]))
+                bin_conf = float(np.mean(mp_arr[in_bin]))
+                ece += (bin_count / len(mp_arr)) * abs(bin_acc - bin_conf)
+        metrics_tta["mean_max_confidence"] = mean_confidence
+        metrics_tta["nll"] = nll
+        metrics_tta["ece"] = float(ece)
+        print(
+            f"  CALIBRATION - Mean confidence: {mean_confidence:.4f} | "
+            f"NLL: {nll:.4f} | ECE: {ece:.4f}",
+            flush=True,
+        )
 
     print(f"[EVALUATION SUMMARY]", flush=True)
     print(
@@ -1162,21 +1341,46 @@ def main() -> int:
     if backbone_vars:
         print(f"Backbone trainable vars: {len(backbone_vars)}")
     print(f"Head trainable vars: {len(head_vars)}")
+    print(f"[CONFIG] label_smoothing={float(cfg['training'].get('label_smoothing', 0.0))}", flush=True)
 
     loss_scale = 1.0 / float(max(int(strategy.num_replicas_in_sync), 1))
     print(f"[INFO] Distributed gradient loss scale: {loss_scale:.6f}")
-    train_step_head, train_step_full = make_step_function(
-        cfg,
-        model,
-        optimizer_head,
-        optimizer_backbone,
-        loss_scale=loss_scale,
-        lambda_sem_runtime=lambda_sem_runtime,
-        rdrop_metrics=rdrop_train_tracker,
-        vlm_kd_metrics=vlm_kd_tracker,
+
+    # --- Progressive Unfreezing Initialization ---
+    prog_unfreeze_enabled = bool(cfg.get("model", {}).get("progressive_unfreeze", {}).get("enabled", False))
+    if prog_unfreeze_enabled:
+        print("[PROGRESSIVE_UNFREEZE] Enabled", flush=True)
+    prev_trainable_stages: Optional[List[int]] = None  # Track stage transitions
+
+    def _build_step_functions(grad_mask, lr_scales):
+        """Build train step functions with the given gradient mask."""
+        step_head, step_full = make_step_function(
+            cfg,
+            model,
+            optimizer_head,
+            optimizer_backbone,
+            loss_scale=loss_scale,
+            lambda_sem_runtime=lambda_sem_runtime,
+            rdrop_metrics=rdrop_train_tracker,
+            vlm_kd_metrics=vlm_kd_tracker,
+            backbone_grad_mask=grad_mask,
+            backbone_lr_scales=lr_scales,
+        )
+        dist_head = make_distributed_train_step(strategy, step_head)
+        dist_full = make_distributed_train_step(strategy, step_full)
+        return step_head, step_full, dist_head, dist_full
+
+    # Initial step functions (will be rebuilt at unfreeze boundaries)
+    initial_mask, initial_stages = resolve_progressive_unfreeze_mask(
+        cfg, start_epoch + 1, backbone_vars
+    ) if prog_unfreeze_enabled else (None, [1, 2, 3, 4])
+    initial_lr_scales = compute_stage_lr_scales(
+        cfg, backbone_vars, initial_stages
+    ) if prog_unfreeze_enabled else None
+
+    train_step_head, train_step_full, distributed_train_step_head, distributed_train_step_full = _build_step_functions(
+        initial_mask, initial_lr_scales
     )
-    distributed_train_step_head = make_distributed_train_step(strategy, train_step_head)
-    distributed_train_step_full = make_distributed_train_step(strategy, train_step_full)
     start_epoch = int(ckpt_epoch.numpy())
     monitor_name = str(cfg["training"].get("monitor", "val_macro_f1"))
     best_score = float(ckpt_best_metric.numpy())
@@ -1202,11 +1406,16 @@ def main() -> int:
         history_csv=csv_path,
     )
     macro_manager = None
-    if cfg["training"].get("weighted_ce", {}).get("enabled", False) and monitor_name == "val_macro_f1":
+    _create_macro_mgr = (
+        (cfg["training"].get("weighted_ce", {}).get("enabled", False) and monitor_name == "val_macro_f1")
+        or bool(cfg["training"].get("save_best_macro_f1", False))
+    )
+    if _create_macro_mgr:
         macro_manager = RankedCheckpointManager(
             checkpoint=checkpoint, directory=checkpoint_root / "best_macro_f1",
             max_to_keep=1, metric_name="val_macro_f1", mode="max", history_csv=csv_path,
         )
+        print("[CHECKPOINT] Best Macro-F1 checkpoint manager enabled", flush=True)
     progress_interval = int(cfg["training"].get("progress_interval", 0) or 0)
     periodic_interval = int(cfg["training"].get("periodic_checkpoint_interval", 10) or 0)
     eval_strategy = strategy if bool(cfg["runtime"].get("distributed_eval", False)) else None
@@ -1234,18 +1443,57 @@ def main() -> int:
         epoch_number = epoch + 1
         current_lambda_sem = resolve_lambda_sem(cfg, epoch_number)
         lambda_sem_runtime.assign(current_lambda_sem)
+        if bool(getattr(model, "granularity_gate_schedule_enabled", False)):
+            model.set_granularity_gate_epoch(epoch_number)
+            print(f"[GRANULARITY_GATE] Epoch {epoch_number}: schedule epoch set", flush=True)
+
         print(
             f"[SEMANTIC_SCHEDULE] Epoch {epoch_number}: lambda_sem={current_lambda_sem:.4f}",
             flush=True,
         )
         train_backbone = bool(cfg["model"].get("unfreeze_backbone", True)) and epoch >= freeze_epochs
-        phase_transitioned = bool(train_backbone and epoch == freeze_epochs)
-        if phase_transitioned:
-            patience_anchor_epoch = epoch + 1
-            print(
-                f"[INFO] Unfreezing backbone at epoch {epoch+1}; resetting early-stopping patience counter",
-                flush=True,
+        phase_transitioned = False
+
+        # --- Progressive Unfreezing ---
+        if prog_unfreeze_enabled:
+            current_mask, current_stages = resolve_progressive_unfreeze_mask(
+                cfg, epoch_number, backbone_vars
             )
+            current_lr_scales = compute_stage_lr_scales(cfg, backbone_vars, current_stages)
+
+            # Detect stage transition
+            if prev_trainable_stages is None or current_stages != prev_trainable_stages:
+                phase_transitioned = True
+                log_unfreeze_state(
+                    epoch_number, current_stages, backbone_vars, current_mask,
+                    current_lr_scales,
+                    float(cfg["training"].get("visual_extractor_lr", cfg["training"]["lr"])),
+                )
+                # Rebuild step functions with new gradient mask
+                train_step_head, train_step_full, distributed_train_step_head, distributed_train_step_full = _build_step_functions(
+                    current_mask, current_lr_scales
+                )
+                if prev_trainable_stages is not None:
+                    patience_anchor_epoch = epoch + 1
+                    print(
+                        f"[INFO] Progressive unfreeze transition at epoch {epoch_number}; "
+                        f"resetting early-stopping patience counter",
+                        flush=True,
+                    )
+                prev_trainable_stages = list(current_stages)
+
+            # If any stages are trainable, use full step (backbone gets masked gradients)
+            train_backbone = len(current_stages) > 0
+        else:
+            # Legacy freeze/unfreeze behavior
+            if train_backbone and epoch == freeze_epochs:
+                phase_transitioned = True
+                patience_anchor_epoch = epoch + 1
+                print(
+                    f"[INFO] Unfreezing backbone at epoch {epoch+1}; resetting early-stopping patience counter",
+                    flush=True,
+                )
+
         train_step = train_step_full if train_backbone else train_step_head
         distributed_train_step = distributed_train_step_full if train_backbone else distributed_train_step_head
         # Dynamic 2-Stage Transition check
@@ -1295,12 +1543,13 @@ def main() -> int:
         total_gw_sum = np.zeros(5, dtype=np.float64)
         total_gw_sq_sum = np.zeros(5, dtype=np.float64)
         total_entropy_sum = 0.0
+        max_gate_alpha = 0.0
         fer_correct = 0
         sem_correct = 0
         seen = 0
         total_steps = int(tf.data.experimental.cardinality(train_ds).numpy())
         for step_index, batch in enumerate(train_loop_ds, start=1):
-            loss, ce_l, sem_l, hard_l, batch_correct, batch_sem_correct, batch_count, gw_sum, gw_sq_sum, ent_sum, ok = distributed_train_step(batch)
+            loss, ce_l, sem_l, hard_l, batch_correct, batch_sem_correct, batch_count, gw_sum, gw_sq_sum, ent_sum, gw_max, ok = distributed_train_step(batch)
             if int(ok.numpy()) == 0:
                 continue
             b_cnt = int(batch_count.numpy())
@@ -1314,6 +1563,7 @@ def main() -> int:
             total_gw_sum += gw_sum.numpy().astype(np.float64)
             total_gw_sq_sum += gw_sq_sum.numpy().astype(np.float64)
             total_entropy_sum += float(ent_sum.numpy())
+            max_gate_alpha = max(max_gate_alpha, float(gw_max.numpy()))
             if progress_interval and step_index % progress_interval == 0:
                 print(
                     f"Epoch {epoch+1}/{cfg['training']['epochs']} "
@@ -1356,6 +1606,7 @@ def main() -> int:
         gw_var = np.maximum(0.0, (total_gw_sq_sum / n_samples) - (gw_means ** 2))
         gw_stds = np.sqrt(gw_var)
         gate_entropy = total_entropy_sum / n_samples
+        gate_max_alpha = float(max_gate_alpha)
 
         # Collapse check: warn if any weight > 0.90
         for k_idx, gw_m in enumerate(gw_means):
@@ -1517,6 +1768,7 @@ def main() -> int:
             "gw_std_2": float(gw_stds[2]),
             "gw_std_3": float(gw_stds[3]),
             "gw_std_4": float(gw_stds[4]),
+            "gate_max_alpha": gate_max_alpha,
             "gate_entropy": float(gate_entropy),
             "lr_head": lr,
             "lr_backbone": backbone_lr,
@@ -1529,6 +1781,9 @@ def main() -> int:
             "patience": f"{patience_counter}/{patience_limit}",
             "phase_transitioned": int(phase_transitioned),
             "improved": int(improved),
+            "val_mean_confidence": float(val_metrics.get("mean_max_confidence", 0.0)),
+            "val_ece": float(val_metrics.get("ece", 0.0)),
+            "val_nll": float(val_metrics.get("nll", val_metrics.get("loss", 0.0))),
         }
         if cfg["training"].get("weighted_ce", {}).get("enabled", False):
             for class_name in ("fear", "disgust"):
@@ -1566,7 +1821,7 @@ def main() -> int:
             f"val_sem_loss={row['val_semantic_loss']:.4f} val_weighted_sem_loss={row['val_weighted_sem_loss']:.4f} "
             f"val_sem_acc={row['val_semantic_accuracy']:.4f} lambda_sem={current_lambda_sem:.4f} "
             f"val_macro_f1={row['val_macro_f1']:.4f} "
-            f"gw_means=[{gw_means_str}] ent={gate_entropy:.3f} "
+            f"gw_means=[{gw_means_str}] ent={gate_entropy:.3f} max_alpha={gate_max_alpha:.3f} "
             f"throughput={train_samples_per_sec:.1f} samples/s "
             f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f} "
             f"patience={patience_counter}/{patience_limit} "
@@ -1586,16 +1841,25 @@ def main() -> int:
     else:
         print("[INFO] No new training epochs were run; skipping training_history.csv update.", flush=True)
 
-    selection_manager = macro_manager if macro_manager is not None else best_manager
+    if monitor_name == "val_macro_f1" and macro_manager is not None:
+        selection_manager = macro_manager
+        sel_metric_name = "val_macro_f1"
+    elif monitor_name in ("val_loss", "loss") and best_loss_manager is not None:
+        selection_manager = best_loss_manager
+        sel_metric_name = "val_loss"
+    else:
+        selection_manager = best_manager
+        sel_metric_name = "val_accuracy"
+
     if val_ds is not None and (selection_manager.latest_checkpoint or last_manager.latest_checkpoint):
         best_ckpt = selection_manager.latest_checkpoint or last_manager.latest_checkpoint
-        if macro_manager is not None and macro_manager.entries:
-            best_epoch = int(macro_manager.entries[0]["epoch"])
-            best_score = float(macro_manager.entries[0]["metric"])
-            print(f"[SELECTED_ON_VALIDATION] metric=val_macro_f1 epoch={best_epoch} score={best_score:.8f}", flush=True)
+        if selection_manager.entries:
+            best_epoch = int(selection_manager.entries[0]["epoch"])
+            best_score = float(selection_manager.entries[0]["metric"])
+            print(f"[SELECTED_ON_VALIDATION] metric={sel_metric_name} epoch={best_epoch} score={best_score:.8f}", flush=True)
         if best_ckpt:
             checkpoint.restore(best_ckpt).expect_partial()
-            print(f"[INFO] Restored best checkpoint: {best_ckpt}", flush=True)
+            print(f"[INFO] Restored best checkpoint ({sel_metric_name}): {best_ckpt}", flush=True)
     else:
         best_ckpt = last_manager.latest_checkpoint
         best_epoch = max(int(ckpt_epoch.numpy()), 1)
@@ -1609,6 +1873,9 @@ def main() -> int:
     final_class_names = get_class_names(cfg)
     final_lambda_epoch = best_epoch if best_epoch >= 1 else max(int(ckpt_epoch.numpy()), 1)
     final_lambda_sem = resolve_lambda_sem(cfg, final_lambda_epoch)
+    if bool(getattr(model, "granularity_gate_schedule_enabled", False)):
+        model.set_granularity_gate_epoch(final_lambda_epoch)
+        print(f"[GRANULARITY_GATE] Final evaluation uses epoch {final_lambda_epoch}", flush=True)
     print(
         f"[SEMANTIC_SCHEDULE] Final checkpoint epoch {final_lambda_epoch}: "
         f"lambda_sem={final_lambda_sem:.4f}",
