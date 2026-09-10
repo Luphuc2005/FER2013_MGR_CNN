@@ -93,6 +93,15 @@ model:
 
   use_adaptive_granularity: true
 
+  # V5: Dynamic Part-Aware Attention (Stage 3)
+  use_dynamic_part_attention: true
+  dynamic_part_bottleneck: 128
+  use_soft_regional_pooling: false
+
+  # V5: Sample-Adaptive Logit Fusion Gate alpha(x) (Stage 4)
+  use_adaptive_fusion_gate: true
+  adaptive_fusion_max_alpha: 0.20
+
   use_hard_semantic_loss: true
   lambda_sem: 0.1
   lambda_hard: 0.05
