@@ -3,8 +3,8 @@
 #SBATCH --partition=gpu-queue
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
-#SBATCH --gres=gpu:v100:1
-#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:v100:2
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FERPLUS_SIGLIP2_8CLS_%j.out
 #SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FERPLUS_SIGLIP2_8CLS_%j.err
@@ -18,6 +18,7 @@ mkdir -p logs outputs/papers/ferplus_siglip2_confusion_majority8
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
+export OMP_NUM_THREADS=16
 
 FER_PY="/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/bin/python"
 CONFIG="$ROOT/config_ferplus_convnext_base_ms1m_adaptive_siglip2_confusion.yaml"
