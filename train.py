@@ -1375,6 +1375,7 @@ def main() -> int:
     prev_trainable_stages: Optional[List[int]] = None  # Track stage transitions
     prev_lr_scales: Optional[Dict[str, float]] = None
     gate_collapse_consecutive_epochs: int = 0
+    severe_overfit_counter: int = 0
 
     def _build_step_functions(grad_mask, lr_scales):
         """Build train step functions with the given gradient mask."""
@@ -1644,20 +1645,16 @@ def main() -> int:
         gate_entropy = total_entropy_sum / n_samples
         gate_max_alpha = float(max_gate_alpha)
 
-        # Collapse check: warn if any weight > 0.90
-        any_weight_above_90 = False
-        for k_idx, gw_m in enumerate(gw_means):
-            if gw_m > 0.90:
-                any_weight_above_90 = True
-                print(
-                    f"[WARNING] Granularity weight {k_idx} mean ({gw_m:.4f}) > 0.90 at Epoch {epoch+1}! Gate may be collapsing.",
-                    flush=True,
-                )
-        if any_weight_above_90:
+        # Collapse check: warn if mean max gate weight > 0.85 or gate entropy < 0.80
+        max_gw_mean = float(np.max(gw_means))
+        gate_collapsed = max_gw_mean > 0.85 or gate_entropy < 0.80
+        if gate_collapsed:
             gate_collapse_consecutive_epochs += 1
             if gate_collapse_consecutive_epochs >= 2:
                 print(
-                    f"[GATE_COLLAPSE_WARNING] Gate weight mean > 0.90 for {gate_collapse_consecutive_epochs} consecutive epochs (Epoch {epoch+1})! Means: {np.round(gw_means, 4).tolist()}",
+                    f"[GATE_COLLAPSE_WARNING] Mean max gate weight ({max_gw_mean:.4f} > 0.85) or "
+                    f"gate entropy ({gate_entropy:.4f} < 0.80) for {gate_collapse_consecutive_epochs} "
+                    f"consecutive epochs (Epoch {epoch+1})! Means: {np.round(gw_means, 4).tolist()}",
                     flush=True,
                 )
         else:
@@ -1816,6 +1813,7 @@ def main() -> int:
             "gw_std_3": float(gw_stds[3]),
             "gw_std_4": float(gw_stds[4]),
             "gate_max_alpha": gate_max_alpha,
+            "max_gate_weight": gate_max_alpha,
             "gate_entropy": float(gate_entropy),
             "lr_head": lr,
             "lr_backbone": backbone_lr,
@@ -1832,6 +1830,49 @@ def main() -> int:
             "val_ece": float(val_metrics.get("ece", 0.0)),
             "val_nll": float(val_metrics.get("nll", val_metrics.get("loss", 0.0))),
         }
+        # Compute Stage LRs for logging
+        stage_lrs = {}
+        for s in [1, 2, 3, 4]:
+            if prog_unfreeze_enabled:
+                if s in current_stages:
+                    mult = 1.0
+                    if current_lr_scales and backbone_vars:
+                        mult = current_lr_scales.get(next(
+                            (variable_key(v) for v in backbone_vars
+                             if _var_belongs_to_stage(getattr(v, "name", ""), s)),
+                            None,
+                        ), 1.0)
+                    stage_lrs[s] = backbone_lr * mult
+                else:
+                    stage_lrs[s] = 0.0
+            else:
+                stage_lrs[s] = backbone_lr if train_backbone else 0.0
+
+        gate_temp = getattr(model, "get_granularity_gate_temperature", lambda: 1.0)()
+        gen_gap = float(train_acc - float(val_metrics.get("accuracy", 0.0)))
+        if gen_gap > 0.12:
+            print(
+                f"[OVERFIT_WARNING] Epoch {epoch+1}: generalization_gap={gen_gap:.4f} > 0.12 "
+                f"(train_acc={train_acc:.4f}, val_acc={float(val_metrics.get('accuracy', 0.0)):.4f})",
+                flush=True,
+            )
+        if gen_gap > 0.18:
+            severe_overfit_counter += 1
+            if severe_overfit_counter >= 3:
+                print(
+                    f"[SEVERE_OVERFIT_WARNING] Epoch {epoch+1}: generalization_gap > 0.18 for {severe_overfit_counter} consecutive epochs! (gap={gen_gap:.4f})",
+                    flush=True,
+                )
+        else:
+            severe_overfit_counter = 0
+
+        row["generalization_gap"] = round(gen_gap, 4)
+        row["gate_temperature"] = gate_temp
+        row["lr_stage1"] = stage_lrs[1]
+        row["lr_stage2"] = stage_lrs[2]
+        row["lr_stage3"] = stage_lrs[3]
+        row["lr_stage4"] = stage_lrs[4]
+
         if cfg["training"].get("weighted_ce", {}).get("enabled", False):
             for class_name in ("fear", "disgust"):
                 class_metrics = val_metrics["classification_report"][class_name]
@@ -1862,15 +1903,14 @@ def main() -> int:
         gw_means_str = ",".join([f"{m:.3f}" for m in gw_means])
         print(
             f"Epoch {epoch+1}/{cfg['training']['epochs']} [{time_str}] "
-            f"loss={train_loss:.4f} sem_loss={train_sem_loss:.4f} weighted_sem_loss={row['train_weighted_sem_loss']:.4f} "
+            f"loss={train_loss:.4f} ce_loss={train_ce_loss:.4f} sem_loss={train_sem_loss:.4f} "
             f"hard_loss={train_hard_loss:.4f} acc={train_acc:.4f} sem_acc={train_sem_acc:.4f} "
             f"val_loss={row['val_loss']:.4f} val_acc={row['val_accuracy']:.4f} "
-            f"val_sem_loss={row['val_semantic_loss']:.4f} val_weighted_sem_loss={row['val_weighted_sem_loss']:.4f} "
-            f"val_sem_acc={row['val_semantic_accuracy']:.4f} lambda_sem={current_lambda_sem:.4f} "
-            f"val_macro_f1={row['val_macro_f1']:.4f} "
-            f"gw_means=[{gw_means_str}] ent={gate_entropy:.3f} max_alpha={gate_max_alpha:.3f} "
-            f"throughput={train_samples_per_sec:.1f} samples/s "
-            f"lr_head={lr:.6f} lr_backbone={backbone_lr:.6f} "
+            f"val_macro_f1={row['val_macro_f1']:.4f} val_weighted_f1={row['val_weighted_f1']:.4f} "
+            f"val_sem_loss={row['val_semantic_loss']:.4f} val_sem_acc={row['val_semantic_accuracy']:.4f} "
+            f"gap={gen_gap:.4f} "
+            f"T_gate={gate_temp} gw_means=[{gw_means_str}] ent={gate_entropy:.3f} max_gw={gate_max_alpha:.3f} "
+            f"lr_head={lr:.6f} S1_lr={stage_lrs[1]:.1e} S2_lr={stage_lrs[2]:.1e} S3_lr={stage_lrs[3]:.1e} S4_lr={stage_lrs[4]:.1e} "
             f"patience={patience_counter}/{patience_limit} "
             f"{monitor_name}={monitor:.4f}",
             flush=True,

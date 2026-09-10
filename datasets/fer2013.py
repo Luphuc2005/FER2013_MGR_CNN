@@ -471,19 +471,40 @@ def _rotate_tensor(tensor: tf.Tensor, radians: tf.Tensor, interpolation: str = "
     return _affine_transform_tensor(tensor, radians, zero, zero, one, interpolation=interpolation, fill_mode=fill_mode)
 
 
-def _augment_minority_img(image: tf.Tensor) -> tf.Tensor:
-    flip = tf.random.uniform([]) < 0.50
-    image = tf.cond(flip, lambda: tf.image.flip_left_right(image), lambda: image)
+def _augment_minority_img(image: tf.Tensor, min_aug_cfg: Dict) -> tf.Tensor:
+    flip_prob = float(min_aug_cfg.get("flip_prob", 0.50))
+    if flip_prob > 0.0:
+        flip = tf.random.uniform([]) < flip_prob
+        image = tf.cond(flip, lambda: tf.image.flip_left_right(image), lambda: image)
 
-    radians = tf.random.uniform([], minval=-10.0, maxval=10.0) * (np.pi / 180.0)
-    shift_h = tf.random.uniform([], minval=-0.05, maxval=0.05)
-    shift_w = tf.random.uniform([], minval=-0.05, maxval=0.05)
-    zoom = tf.random.uniform([], minval=0.90, maxval=1.10)
+    rot_deg = float(min_aug_cfg.get("rotation_range", 7.0))
+    if rot_deg > 0.0:
+        radians = tf.random.uniform([], minval=-rot_deg, maxval=rot_deg) * (np.pi / 180.0)
+    else:
+        radians = tf.constant(0.0, dtype=tf.float32)
+
+    trans = float(min_aug_cfg.get("translation_fraction", 0.03))
+    shift_h = tf.random.uniform([], minval=-trans, maxval=trans) if trans > 0.0 else tf.constant(0.0, dtype=tf.float32)
+    shift_w = tf.random.uniform([], minval=-trans, maxval=trans) if trans > 0.0 else tf.constant(0.0, dtype=tf.float32)
+    scale_min = float(min_aug_cfg.get("scale_lower", 0.95))
+    scale_max = float(min_aug_cfg.get("scale_upper", 1.05))
+    zoom = tf.random.uniform([], minval=scale_min, maxval=scale_max) if scale_max > scale_min else tf.constant(1.0, dtype=tf.float32)
     image = _affine_transform_tensor(image, radians, shift_h, shift_w, zoom, interpolation="BILINEAR", fill_mode="REFLECT")
 
-    brightness = tf.random.uniform([], minval=0.80, maxval=1.20)
-    image = image * brightness
-    image = tf.image.random_contrast(image, lower=0.80, upper=1.20)
+    b_delta = float(min_aug_cfg.get("brightness_delta", 0.10))
+    if b_delta > 0.0:
+        brightness = tf.random.uniform(
+            [],
+            minval=max(0.0, 1.0 - b_delta),
+            maxval=1.0 + b_delta,
+        )
+        image = image * brightness
+
+    c_low = float(min_aug_cfg.get("contrast_lower", 0.90))
+    c_up = float(min_aug_cfg.get("contrast_upper", 1.10))
+    if c_up > c_low:
+        image = tf.image.random_contrast(image, lower=c_low, upper=c_up)
+
     return tf.clip_by_value(image, 0.0, 255.0)
 
 
@@ -545,19 +566,20 @@ def _augment_standard_img(image: tf.Tensor, aug_cfg: Dict) -> tf.Tensor:
     return tf.clip_by_value(image, 0.0, 255.0)
 
 
-def _augment_pair(image, mask, sample_id, aug_cfg, split: str, is_minority=False):
+def _augment_pair(image, mask, sample_id, aug_cfg, split: str, is_minority=False, min_aug_cfg=None):
     if split != "train":
         return image, mask
 
+    min_aug = min_aug_cfg if min_aug_cfg is not None else {}
     if tf.is_tensor(is_minority):
         image = tf.cond(
             is_minority,
-            lambda: _augment_minority_img(image),
+            lambda: _augment_minority_img(image, min_aug),
             lambda: _augment_standard_img(image, aug_cfg),
         )
     else:
         if bool(is_minority):
-            image = _augment_minority_img(image)
+            image = _augment_minority_img(image, min_aug)
         else:
             image = _augment_standard_img(image, aug_cfg)
 
@@ -591,21 +613,11 @@ def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dic
             float(cfg["model"].get("mask_floor", 0.05)),
             cfg["data"].get("mask_region_permutation"),
         )
-    image, mask = _augment_pair(image, mask, sample_id, cfg["augmentation"], split, is_minority=is_minority)
+    min_aug_cfg = cfg.get("data", {}).get("minority_aug", {})
+    image, mask = _augment_pair(image, mask, sample_id, cfg["augmentation"], split, is_minority=is_minority, min_aug_cfg=min_aug_cfg)
     image = _normalize_image(image, int(cfg["data"]["channels"]))
     if split == "train":
-        if tf.is_tensor(is_minority):
-            image = tf.cond(
-                is_minority,
-                lambda: tf.cond(
-                    tf.random.uniform([]) < 0.25,
-                    lambda: _random_erasing(image, cfg["augmentation"]),
-                    lambda: image,
-                ),
-                lambda: _random_erasing(image, cfg["augmentation"]),
-            )
-        else:
-            image = _random_erasing(image, cfg["augmentation"])
+        image = _random_erasing(image, cfg["augmentation"])
     features = {"image": image}
     if mask is not None:
         features["mask"] = mask
@@ -686,13 +698,18 @@ def _make_minority_oversampled_dataset(
     num_classes = int(cfg["data"].get("num_classes", len(EMOTION_NAMES)))
     labels_arr = np.asarray(records.labels, dtype=np.int64)
     counts = np.bincount(labels_arr, minlength=num_classes)[:num_classes]
-    target_minority_count = int(cfg["data"].get("target_minority_count", 1200))
+    target_minority_count = int(cfg["data"].get("target_minority_count", 650))
+    minority_classes = cfg["data"].get("minority_classes", None)
+    if minority_classes is not None:
+        minority_classes = set(int(c) for c in minority_classes)
     seed = int(cfg["seed"].get("random_seed", 42))
 
     oversampled_counts = np.zeros(num_classes, dtype=np.int64)
     extra_indices_list = []
 
     for c in range(num_classes):
+        if minority_classes is not None and c not in minority_classes:
+            continue
         if counts[c] < target_minority_count:
             shortfall = target_minority_count - counts[c]
             oversampled_counts[c] = shortfall
@@ -707,6 +724,7 @@ def _make_minority_oversampled_dataset(
     distribution = (effective_counts / total_effective).round(4).tolist()
 
     _OVERSAMPLE_STATS = {
+        "enabled": True,
         "original_class_counts": counts.tolist(),
         "effective_class_counts": effective_counts.tolist(),
         "oversampled_counts": oversampled_counts.tolist(),
@@ -725,7 +743,10 @@ def _make_minority_oversampled_dataset(
 
     if extra_indices_list:
         all_extra = np.concatenate(extra_indices_list, axis=0)
-        orig_minority_flag = np.array([counts[l] < target_minority_count for l in labels_arr], dtype=bool)
+        if minority_classes is not None:
+            orig_minority_flag = np.array([l in minority_classes for l in labels_arr], dtype=bool)
+        else:
+            orig_minority_flag = np.array([counts[l] < target_minority_count for l in labels_arr], dtype=bool)
         extra_minority_flag = np.ones(len(all_extra), dtype=bool)
         full_is_minority = np.concatenate([orig_minority_flag, extra_minority_flag], axis=0)
 
@@ -737,9 +758,14 @@ def _make_minority_oversampled_dataset(
         combined_tensors["is_minority_aug"] = tf.convert_to_tensor(full_is_minority, dtype=tf.bool)
     else:
         combined_tensors = dict(tensors)
-        combined_tensors["is_minority_aug"] = tf.convert_to_tensor(
-            np.array([counts[l] < target_minority_count for l in labels_arr], dtype=bool), dtype=tf.bool
-        )
+        if minority_classes is not None:
+            combined_tensors["is_minority_aug"] = tf.convert_to_tensor(
+                np.array([l in minority_classes for l in labels_arr], dtype=bool), dtype=tf.bool
+            )
+        else:
+            combined_tensors["is_minority_aug"] = tf.convert_to_tensor(
+                np.array([counts[l] < target_minority_count for l in labels_arr], dtype=bool), dtype=tf.bool
+            )
 
     ds = tf.data.Dataset.from_tensor_slices(combined_tensors)
     shuffle_buffer = int(cfg["data"].get("shuffle_buffer", max(4096, total_effective)))
@@ -922,8 +948,34 @@ def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.D
         from utils.logit_adjustment import configure_training_logit_adjustment
         configure_training_logit_adjustment(cfg, records["train"].labels)
 
-    return (
-        make_dataset(records["train"], cfg, split="train", training=True, replicas=replicas),
-        make_dataset(records["val"], cfg, split="val", training=False, replicas=replicas) if records.get("val") is not None else None,
-        make_dataset(records["test"], cfg, split="test", training=False, replicas=replicas),
-    )
+    if "rafdb" in str(cfg.get("data", {}).get("data_path", "")).lower() and not bool(cfg.get("data", {}).get("full_train", False)):
+        train_len = len(records["train"].images)
+        val_len = len(records["val"].images) if records.get("val") is not None else 0
+        test_len = len(records["test"].images) if records.get("test") is not None else 0
+        if not cfg["data"].get("max_train_samples") and not cfg["data"].get("max_val_samples"):
+            if train_len == 11043:
+                assert val_len == 1228, f"RAF-DB val must be 1228, got {val_len}"
+                assert test_len == 3068, f"RAF-DB test must be 3068, got {test_len}"
+                assert train_len + val_len == 12271, f"RAF-DB train + val must be 12271, got {train_len + val_len}"
+
+                train_paths = set(records["train"].images.tolist()) if isinstance(records["train"].images, np.ndarray) else set(records["train"].images)
+                val_paths = set(records["val"].images.tolist()) if records.get("val") is not None else set()
+                test_paths = set(records["test"].images.tolist()) if records.get("test") is not None else set()
+                assert len(train_paths.intersection(val_paths)) == 0, "Train and Val overlap must be 0!"
+                assert len(train_paths.intersection(test_paths)) == 0, "Train and Test overlap must be 0!"
+                assert len(val_paths.intersection(test_paths)) == 0, "Val and Test overlap must be 0!"
+                print(f"[SANITY_CHECK_OK] RAF-DB train={train_len}, val={val_len}, test={test_len}, train+val={train_len+val_len}, 0 overlap across splits.", flush=True)
+
+    train_ds = make_dataset(records["train"], cfg, split="train", training=True, replicas=replicas)
+    val_ds = make_dataset(records["val"], cfg, split="val", training=False, replicas=replicas) if records.get("val") is not None else None
+    test_ds = make_dataset(records["test"], cfg, split="test", training=False, replicas=replicas)
+
+    if "rafdb" in str(cfg.get("data", {}).get("data_path", "")).lower():
+        _ov = get_oversample_stats()
+        if _ov and _ov.get("enabled", False):
+            if int(cfg["data"].get("target_minority_count", 0)) == 650:
+                assert _ov["total_samples"] == 11461, f"Effective train must be 11461, got {_ov['total_samples']}"
+                assert _ov["effective_class_counts"] == [650, 650, 650, 4295, 1784, 1161, 2271], f"Effective counts mismatch: {_ov['effective_class_counts']}"
+                print(f"[SANITY_CHECK_OK] Effective oversampled train=11461, class_counts={_ov['effective_class_counts']}", flush=True)
+
+    return train_ds, val_ds, test_ds
