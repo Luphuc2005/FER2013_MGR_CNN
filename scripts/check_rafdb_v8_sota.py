@@ -198,7 +198,7 @@ def check_runtime_tf(cfg):
     tf.keras.mixed_precision.set_global_policy("mixed_float16")
 
     # 1. ArcMarginProduct Unit Test
-    arc = ArcMarginProduct(num_classes=7, embed_dim=1024, s=30.0, m=0.30, easy_margin=False)
+    arc = ArcMarginProduct(num_classes=7, embed_dim=1024, scale=30.0, margin=0.30, easy_margin=False)
     dummy_feat = tf.random.normal([4, 1024])
     dummy_lbl = tf.constant([0, 1, 2, 3], tf.int32)
     eval_logits = arc(dummy_feat, training=False)

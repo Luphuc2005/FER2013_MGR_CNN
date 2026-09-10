@@ -28,20 +28,27 @@ class ArcMarginProduct(tf.keras.layers.Layer):
         scale: float = 30.0,
         margin: float = 0.30,
         easy_margin: bool = False,
+        embed_dim: Optional[int] = None,
+        s: Optional[float] = None,
+        m: Optional[float] = None,
         name: Optional[str] = "arcmargin_classifier",
         **kwargs,
     ):
-        super().__init__(name=name, dtype="float32", **kwargs)
+        super().__init__(name=name, dtype="float32")
         self.num_classes = int(num_classes)
-        self.scale = float(scale)
-        self.margin = float(margin)
+        self.scale = float(s if s is not None else scale)
+        self.margin = float(m if m is not None else margin)
         self.easy_margin = bool(easy_margin)
+        self.embed_dim = int(embed_dim) if embed_dim is not None else None
 
         # Precompute trigonometric constants
         self.cos_m = float(math.cos(self.margin))
         self.sin_m = float(math.sin(self.margin))
         self.th = float(math.cos(math.pi - self.margin))
         self.mm = float(math.sin(math.pi - self.margin) * self.margin)
+
+        if self.embed_dim is not None:
+            self.build((None, self.embed_dim))
 
     def build(self, input_shape):
         feat_dim = int(input_shape[-1])

@@ -272,9 +272,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             arcmargin_cfg = model_cfg.get("arcmargin", {})
             self.classifier = ArcMarginProduct(
                 num_classes=self.num_classes,
-                scale=float(arcmargin_cfg.get("scale", 30.0)),
-                margin=float(arcmargin_cfg.get("margin", 0.30)),
-                easy_margin=bool(arcmargin_cfg.get("easy_margin", False)),
+                scale=float(arcmargin_cfg.get("scale", model_cfg.get("arcmargin_scale", 30.0))),
+                margin=float(arcmargin_cfg.get("margin", model_cfg.get("arcmargin_margin", 0.30))),
+                easy_margin=bool(arcmargin_cfg.get("easy_margin", model_cfg.get("arcmargin_easy_margin", False))),
                 name="fer_classifier",
             )
         else:
