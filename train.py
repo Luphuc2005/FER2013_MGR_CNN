@@ -1346,6 +1346,13 @@ def main() -> int:
     loss_scale = 1.0 / float(max(int(strategy.num_replicas_in_sync), 1))
     print(f"[INFO] Distributed gradient loss scale: {loss_scale:.6f}")
 
+    start_epoch = int(ckpt_epoch.numpy())
+    monitor_name = str(cfg["training"].get("monitor", "val_macro_f1"))
+    best_score = float(ckpt_best_metric.numpy())
+    best_epoch = start_epoch if best_score >= 0.0 else -1
+    best_checkpoint_start_epoch = int(cfg["training"].get("best_checkpoint_start_epoch", 1) or 1)
+    patience_anchor_epoch = best_epoch if best_score >= 0.0 else max(start_epoch, best_checkpoint_start_epoch - 1)
+
     # --- Progressive Unfreezing Initialization ---
     prog_unfreeze_enabled = bool(cfg.get("model", {}).get("progressive_unfreeze", {}).get("enabled", False))
     if prog_unfreeze_enabled:
@@ -1381,12 +1388,6 @@ def main() -> int:
     train_step_head, train_step_full, distributed_train_step_head, distributed_train_step_full = _build_step_functions(
         initial_mask, initial_lr_scales
     )
-    start_epoch = int(ckpt_epoch.numpy())
-    monitor_name = str(cfg["training"].get("monitor", "val_macro_f1"))
-    best_score = float(ckpt_best_metric.numpy())
-    best_epoch = start_epoch if best_score >= 0.0 else -1
-    best_checkpoint_start_epoch = int(cfg["training"].get("best_checkpoint_start_epoch", 1) or 1)
-    patience_anchor_epoch = best_epoch if best_score >= 0.0 else max(start_epoch, best_checkpoint_start_epoch - 1)
     history = []
     csv_path = run_dir / "training_history.csv"
     best_manager = RankedCheckpointManager(
