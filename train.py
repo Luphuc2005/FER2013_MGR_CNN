@@ -890,7 +890,7 @@ def make_distributed_train_step(strategy: tf.distribute.Strategy, train_step):
         gw_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_gw_sum, axis=None)
         gw_sq_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_gw_sq_sum, axis=None)
         ent_sum = strategy.reduce(tf.distribute.ReduceOp.SUM, per_ent_sum, axis=None)
-        gw_max = strategy.reduce(tf.distribute.ReduceOp.MAX, per_gw_max, axis=None)
+        gw_max = tf.reduce_max(tf.stack(strategy.experimental_local_results(per_gw_max)))
         return loss, ce, sem, hard, correct, sem_correct, count, gw_sum, gw_sq_sum, ent_sum, gw_max, ok
 
     return distributed_step
