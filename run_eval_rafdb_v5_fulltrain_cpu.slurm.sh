@@ -1,14 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=EVAL_RAFDB_V5_CPU
-#SBATCH --partition=gpu-queue
-#SBATCH --account=sokhcn
-#SBATCH --qos=gpu-q
+#SBATCH --partition=compute
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/EVAL_RAFDB_V5_CPU_%j.out
 #SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/EVAL_RAFDB_V5_CPU_%j.err
 
-# NOTE: Pure CPU evaluation (100% CPU, 0 MB GPU VRAM used, does NOT affect training GPU jobs).
+# NOTE: Pure CPU evaluation on 'compute' partition (0 GPU, no QOSMaxGRES conflict with GPU jobs).
 
 set -euo pipefail
 
