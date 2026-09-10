@@ -1,5 +1,5 @@
 seed:
-  random_seed: 42
+  random_seed: 123
 
 source:
   note: "ConvNeXt-Base MS1M with Adaptive Multi-Granularity SigLIP2 Semantic Alignment + Confusion-Aware Hard Semantic Separation."
