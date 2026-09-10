@@ -46,8 +46,10 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 cp "$CONFIG" "$OUTPUT_DIR/launch_config.yaml"
-git rev-parse HEAD > "$OUTPUT_DIR/launch_git_commit.txt"
-git diff --binary > "$OUTPUT_DIR/launch_worktree.patch"
+if command -v git >/dev/null 2>&1; then
+    git rev-parse HEAD > "$OUTPUT_DIR/launch_git_commit.txt" || true
+    git diff --binary > "$OUTPUT_DIR/launch_worktree.patch" || true
+fi
 "$FER_PY" -u train.py --config "$CONFIG" --no-auto-increment
 echo "V7_TRAIN_COMPLETE: $OUTPUT_DIR"
 echo 'Primary report: test_metrics_tta_hflip.json. Secondary: test_metrics_no_tta.json.'
