@@ -1429,6 +1429,8 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             "logits": fused_logits,
             "visual_logits": visual_logits,
             "semantic_logits": semantic_logits,
+            "pooled": pooled,
+            "features": pooled,
             "agg_sim": agg_sim,
             "granularity_weights": granularity_weights,
             "gate_entropy": gate_entropy,

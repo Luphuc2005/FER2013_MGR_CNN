@@ -199,13 +199,14 @@ def check_model_and_runtime(cfg):
 
     # 3. Granularity Gate Schedule: Epoch 1-4 uniform, Epoch 5+ adaptive
     model.set_granularity_gate_epoch(1)
-    pooled = tf.cast(outputs["pooled"], tf.float32)
-    w_ep1 = model._granularity_gate_weights(pooled, training=False)
+    out_ep1 = model(dummy_imgs, training=False)
+    w_ep1 = out_ep1["granularity_weights"]
     np.testing.assert_allclose(w_ep1.numpy(), np.full((bs, 5), 0.2), atol=1e-5)
     assert model.get_granularity_gate_temperature() == 2.0
 
     model.set_granularity_gate_epoch(5)
-    w_ep5 = model._granularity_gate_weights(pooled, training=False)
+    out_ep5 = model(dummy_imgs, training=False)
+    w_ep5 = out_ep5["granularity_weights"]
     assert not np.allclose(w_ep5.numpy(), np.full((bs, 5), 0.2)), "Epoch 5 should NOT be uniform"
     assert model.get_granularity_gate_temperature() == 2.0
 
