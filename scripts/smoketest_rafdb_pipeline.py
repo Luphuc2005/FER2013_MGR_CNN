@@ -155,17 +155,19 @@ def main():
             batch_labels = labels
             break
         assert batch_feat is not None, "[FAIL] train_ds returned no batches!"
+        expected_bs = int(cfg["runtime"]["batch_size_per_gpu"])
         batch_images = batch_feat["image"]
         print(f"[3/5] Batch Parsing Verification:")
-        print(f"      - Batch image shape: {batch_images.shape} (Expected: [16, 112, 112, 3])")
-        print(f"      - Batch label shape: {batch_labels.shape} (Expected: [16])")
+        print(f"      - Batch image shape: {batch_images.shape} (Expected: [{expected_bs}, 112, 112, 3])")
+        print(f"      - Batch label shape: {batch_labels.shape} (Expected: [{expected_bs}])")
         print(f"      - Batch label values: {batch_labels.numpy()[:8]}")
-        assert batch_images.shape == (16, 112, 112, 3), f"Invalid batch image shape {batch_images.shape}"
-        assert batch_labels.shape == (16,), f"Invalid batch label shape {batch_labels.shape}"
+        assert batch_images.shape == (expected_bs, 112, 112, 3), f"Invalid batch image shape {batch_images.shape}"
+        assert batch_labels.shape == (expected_bs,), f"Invalid batch label shape {batch_labels.shape}"
     else:
         print("[2/5] Skipping live RAF-DB CSV reading (Directory not found on local machine, will run on server).")
-        batch_images = tf.random.normal([16, 112, 112, 3])
-        batch_labels = tf.random.uniform([16], minval=0, maxval=7, dtype=tf.int32)
+        expected_bs = int(cfg["runtime"]["batch_size_per_gpu"])
+        batch_images = tf.random.normal([expected_bs, 112, 112, 3])
+        batch_labels = tf.random.uniform([expected_bs], minval=0, maxval=7, dtype=tf.int32)
         batch_feat = {"image": batch_images}
         
     print(f"[4/5] Model & SigLIP2 Prototypes Initialization:")
@@ -185,7 +187,7 @@ def main():
             logits = outputs
         loss, loss_dict = compute_loss(outputs, batch_labels, cfg, model=model)
         
-    print(f"      - Logits shape: {logits.shape} (Expected: [16, 7])")
+    print(f"      - Logits shape: {logits.shape} (Expected: [{expected_bs}, 7])")
     print(f"      - Computed Loss: {float(loss):.4f}")
     if isinstance(loss_dict, dict):
         for k, v in loss_dict.items():
