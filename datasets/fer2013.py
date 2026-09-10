@@ -717,6 +717,27 @@ def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.D
     records["val"] = _limit_records(records["val"], cfg["data"].get("max_val_samples"))
     records["test"] = _limit_records(records["test"], cfg["data"].get("max_test_samples"))
 
+    if bool(cfg.get("data", {}).get("full_train", False)):
+        train_rec = records["train"]
+        val_rec = records.get("val")
+        if val_rec is not None:
+            comb_images = np.concatenate([train_rec.images, val_rec.images], axis=0)
+            comb_labels = np.concatenate([train_rec.labels, val_rec.labels], axis=0)
+            comb_sids = np.arange(len(comb_images), dtype=np.int64)
+            comb_mpaths = None
+            if train_rec.mask_paths is not None and val_rec.mask_paths is not None:
+                comb_mpaths = np.concatenate([train_rec.mask_paths, val_rec.mask_paths], axis=0)
+            comb_masks = None
+            if train_rec.masks is not None and val_rec.masks is not None:
+                comb_masks = np.concatenate([train_rec.masks, val_rec.masks], axis=0)
+            records["train"] = SplitRecords(comb_images, comb_labels, comb_sids, comb_mpaths, comb_masks)
+            records["val"] = None
+            print(
+                f"[FULL_TRAIN] Merged train ({len(train_rec.images)}) + val ({len(val_rec.images)}) "
+                f"-> Total Full Train: {len(records['train'].images)} samples (Expected: 12271). "
+                f"Validation split disabled (val_ds=None). Test set untouched ({len(records['test'].images)} samples)."
+            )
+
     if bool(cfg["data"].get("use_synthetic_diffusion", False)):
         syn_meta_path = _resolve_path(cfg["data"].get("synthetic_metadata_json"))
         if syn_meta_path and syn_meta_path.exists():
@@ -759,6 +780,6 @@ def build_datasets(cfg: Dict, replicas: int) -> Tuple[tf.data.Dataset, tf.data.D
 
     return (
         make_dataset(records["train"], cfg, split="train", training=True, replicas=replicas),
-        make_dataset(records["val"], cfg, split="val", training=False, replicas=replicas),
+        make_dataset(records["val"], cfg, split="val", training=False, replicas=replicas) if records.get("val") is not None else None,
         make_dataset(records["test"], cfg, split="test", training=False, replicas=replicas),
     )

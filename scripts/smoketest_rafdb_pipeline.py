@@ -58,65 +58,110 @@ def main():
         n_train_val = n_train + n_val
         n_test = len(test_rec.labels)
 
-        train_unique = set(train_rec.labels.tolist())
-        val_unique = set(val_rec.labels.tolist())
-        test_unique = set(test_rec.labels.tolist())
+        is_full_train = bool(cfg.get("data", {}).get("full_train", False))
+        if is_full_train:
+            full_train_rec_images = np.concatenate([train_rec.images, val_rec.images], axis=0)
+            full_train_rec_labels = np.concatenate([train_rec.labels, val_rec.labels], axis=0)
+            n_train = len(full_train_rec_labels)
+            n_val = 0
+            n_test = len(test_rec.labels)
+            train_unique = set(full_train_rec_labels.tolist())
+            test_unique = set(test_rec.labels.tolist())
+            train_counts = np.bincount(full_train_rec_labels, minlength=7).tolist()
+            test_counts = np.bincount(test_rec.labels, minlength=7).tolist()
 
-        train_counts = np.bincount(train_rec.labels, minlength=7).tolist()
-        val_counts = np.bincount(val_rec.labels, minlength=7).tolist()
-        test_counts = np.bincount(test_rec.labels, minlength=7).tolist()
+            print(f"[2/5] RAF-DB Benchmark Dataset Verification (FINAL FULL-TRAIN PROTOCOL):")
+            print(f"      - Train samples: {n_train} (Expected: 12271) | Unique labels: {sorted(list(train_unique))}")
+            print(f"      - Val samples:   {n_val}   (Expected: 0 - No Validation Split)")
+            print(f"      - Test samples:  {n_test}  (Expected: 3068) | Unique labels: {sorted(list(test_unique))}")
+            print(f"      - Class Distribution [0..6] (angry, disgust, fear, happy, sad, surprise, neutral):")
+            print(f"        * Train: {train_counts}")
+            print(f"        * Test:  {test_counts}")
 
-        print(f"[2/5] RAF-DB Benchmark Dataset Verification:")
-        print(f"      - Train samples: {n_train} | Unique labels: {sorted(list(train_unique))}")
-        print(f"      - Val samples:   {n_val}   | Unique labels: {sorted(list(val_unique))}")
-        print(f"      - Train + Val:   {n_train_val} (Expected: 12271)")
-        print(f"      - Test samples:  {n_test}  (Expected: 3068) | Unique labels: {sorted(list(test_unique))}")
-        print(f"      - Class Distribution [0..6] (angry, disgust, fear, happy, sad, surprise, neutral):")
-        print(f"        * Train: {train_counts}")
-        print(f"        * Val:   {val_counts}")
-        print(f"        * Test:  {test_counts}")
+            assert n_train == 12271, f"[FAIL] Full train count is {n_train}, expected exactly 12,271!"
+            assert n_test == 3068, f"[FAIL] Test count is {n_test}, expected exactly 3,068!"
 
-        # Verification 1: Exact sample count checks
-        assert n_train_val == 12271, f"[FAIL] Train + Val count is {n_train_val}, expected exactly 12,271!"
-        assert n_test == 3068, f"[FAIL] Test count is {n_test}, expected exactly 3,068!"
+            expected_classes = {0, 1, 2, 3, 4, 5, 6}
+            assert train_unique == expected_classes, f"[FAIL] Train set missing classes: {expected_classes - train_unique}"
+            assert test_unique == expected_classes, f"[FAIL] Test set missing classes: {expected_classes - test_unique}"
 
-        # Verification 2: All 7 classes [0..6] present in every split
-        expected_classes = {0, 1, 2, 3, 4, 5, 6}
-        assert train_unique == expected_classes, f"[FAIL] Train set missing classes: {expected_classes - train_unique}"
-        assert val_unique == expected_classes, f"[FAIL] Val set missing classes: {expected_classes - val_unique}"
-        assert test_unique == expected_classes, f"[FAIL] Test set missing classes: {expected_classes - test_unique}"
+            train_ids = set(full_train_rec_images)
+            test_ids = set(test_rec.images)
+            overlap_tt = train_ids.intersection(test_ids)
+            print(f"      - Leakage Check:")
+            print(f"        * Train / Test overlap: {len(overlap_tt)}")
+            assert len(overlap_tt) == 0, f"[FAIL] Data leakage detected between Train and Test! ({len(overlap_tt)} samples)"
 
-        # Verification 3: Data leakage check across all pairs (Train/Val, Train/Test, Val/Test)
-        train_ids = set(train_rec.images)
-        val_ids = set(val_rec.images)
-        test_ids = set(test_rec.images)
+            print("      [PASSED] All Benchmark Checks Succeeded!")
+            print("      [CONFIRMED] Full Train = 12271 and Test = 3068 (Zero Validation Split, Zero Test Leakage).")
+        else:
+            train_unique = set(train_rec.labels.tolist())
+            val_unique = set(val_rec.labels.tolist())
+            test_unique = set(test_rec.labels.tolist())
 
-        overlap_tv = train_ids.intersection(val_ids)
-        overlap_tt = train_ids.intersection(test_ids)
-        overlap_vt = val_ids.intersection(test_ids)
+            train_counts = np.bincount(train_rec.labels, minlength=7).tolist()
+            val_counts = np.bincount(val_rec.labels, minlength=7).tolist()
+            test_counts = np.bincount(test_rec.labels, minlength=7).tolist()
 
-        print(f"      - Leakage Check:")
-        print(f"        * Train / Val overlap:  {len(overlap_tv)}")
-        print(f"        * Train / Test overlap: {len(overlap_tt)}")
-        print(f"        * Val / Test overlap:   {len(overlap_vt)}")
+            print(f"[2/5] RAF-DB Benchmark Dataset Verification:")
+            print(f"      - Train samples: {n_train} | Unique labels: {sorted(list(train_unique))}")
+            print(f"      - Val samples:   {n_val}   | Unique labels: {sorted(list(val_unique))}")
+            print(f"      - Train + Val:   {n_train_val} (Expected: 12271)")
+            print(f"      - Test samples:  {n_test}  (Expected: 3068) | Unique labels: {sorted(list(test_unique))}")
+            print(f"      - Class Distribution [0..6] (angry, disgust, fear, happy, sad, surprise, neutral):")
+            print(f"        * Train: {train_counts}")
+            print(f"        * Val:   {val_counts}")
+            print(f"        * Test:  {test_counts}")
 
-        assert len(overlap_tv) == 0, f"[FAIL] Data leakage detected between Train and Val! ({len(overlap_tv)} samples)"
-        assert len(overlap_tt) == 0, f"[FAIL] Data leakage detected between Train and Test! ({len(overlap_tt)} samples)"
-        assert len(overlap_vt) == 0, f"[FAIL] Data leakage detected between Val and Test! ({len(overlap_vt)} samples)"
+            # Verification 1: Exact sample count checks
+            assert n_train_val == 12271, f"[FAIL] Train + Val count is {n_train_val}, expected exactly 12,271!"
+            assert n_test == 3068, f"[FAIL] Test count is {n_test}, expected exactly 3,068!"
 
-        print("      [PASSED] All Benchmark Checks Succeeded!")
-        print("      [CONFIRMED] Train + Val = 12271 and Test = 3068.")
+            # Verification 2: All 7 classes [0..6] present in every split
+            expected_classes = {0, 1, 2, 3, 4, 5, 6}
+            assert train_unique == expected_classes, f"[FAIL] Train set missing classes: {expected_classes - train_unique}"
+            assert val_unique == expected_classes, f"[FAIL] Val set missing classes: {expected_classes - val_unique}"
+            assert test_unique == expected_classes, f"[FAIL] Test set missing classes: {expected_classes - test_unique}"
+
+            # Verification 3: Data leakage check across all pairs (Train/Val, Train/Test, Val/Test)
+            train_ids = set(train_rec.images)
+            val_ids = set(val_rec.images)
+            test_ids = set(test_rec.images)
+
+            overlap_tv = train_ids.intersection(val_ids)
+            overlap_tt = train_ids.intersection(test_ids)
+            overlap_vt = val_ids.intersection(test_ids)
+
+            print(f"      - Leakage Check:")
+            print(f"        * Train / Val overlap:  {len(overlap_tv)}")
+            print(f"        * Train / Test overlap: {len(overlap_tt)}")
+            print(f"        * Val / Test overlap:   {len(overlap_vt)}")
+
+            assert len(overlap_tv) == 0, f"[FAIL] Data leakage detected between Train and Val! ({len(overlap_tv)} samples)"
+            assert len(overlap_tt) == 0, f"[FAIL] Data leakage detected between Train and Test! ({len(overlap_tt)} samples)"
+            assert len(overlap_vt) == 0, f"[FAIL] Data leakage detected between Val and Test! ({len(overlap_vt)} samples)"
+
+            print("      [PASSED] All Benchmark Checks Succeeded!")
+            print("      [CONFIRMED] Train + Val = 12271 and Test = 3068.")
         
         # Build TF datasets
         train_ds, val_ds, test_ds = build_datasets(cfg, replicas=1)
-        for batch_feat, batch_labels in train_ds.take(1):
-            batch_images = batch_feat["image"]
-            print(f"[3/5] Batch Parsing Verification:")
-            print(f"      - Batch image shape: {batch_images.shape} (Expected: [16, 112, 112, 3])")
-            print(f"      - Batch label shape: {batch_labels.shape} (Expected: [16])")
-            print(f"      - Batch label values: {batch_labels.numpy()[:8]}")
-            assert batch_images.shape == (16, 112, 112, 3), f"Invalid batch image shape {batch_images.shape}"
-            assert batch_labels.shape == (16,), f"Invalid batch label shape {batch_labels.shape}"
+        if is_full_train:
+            assert val_ds is None, f"[FAIL] val_ds should be None in full-train protocol, got {val_ds}"
+        batch_feat = None
+        batch_labels = None
+        for feat, labels in train_ds.take(1):
+            batch_feat = feat
+            batch_labels = labels
+            break
+        assert batch_feat is not None, "[FAIL] train_ds returned no batches!"
+        batch_images = batch_feat["image"]
+        print(f"[3/5] Batch Parsing Verification:")
+        print(f"      - Batch image shape: {batch_images.shape} (Expected: [16, 112, 112, 3])")
+        print(f"      - Batch label shape: {batch_labels.shape} (Expected: [16])")
+        print(f"      - Batch label values: {batch_labels.numpy()[:8]}")
+        assert batch_images.shape == (16, 112, 112, 3), f"Invalid batch image shape {batch_images.shape}"
+        assert batch_labels.shape == (16,), f"Invalid batch label shape {batch_labels.shape}"
     else:
         print("[2/5] Skipping live RAF-DB CSV reading (Directory not found on local machine, will run on server).")
         batch_images = tf.random.normal([16, 112, 112, 3])

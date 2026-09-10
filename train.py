@@ -1374,93 +1374,104 @@ def main() -> int:
                 + format_stage_fusion(fusion_train_values), flush=True,
             )
 
-        print(f"[INFO] Epoch {epoch+1}: starting validation", flush=True)
-        val_metrics = evaluate_dataset(
-            model,
-            val_ds,
-            cfg,
-            strategy=eval_strategy,
-            use_tta_hflip=bool(cfg["runtime"].get("train_val_tta_hflip", False)),
-            lambda_sem_override=current_lambda_sem,
-        )
-        print(f"[INFO] Epoch {epoch+1}: validation finished", flush=True)
-        # --- LR Escape State Update ---
-        if lr_escape_enabled and (epoch + 1) >= int(lr_esc_cfg.get("start_epoch", 81)):
-            best_score, best_epoch, patience_anchor_epoch = _update_lr_escape_state(
-                lr_esc_state, lr_esc_cfg, val_metrics, train_loss,
-                epoch, best_score, best_epoch, patience_anchor_epoch,
-                checkpoint, best_manager,
+        if val_ds is not None:
+            print(f"[INFO] Epoch {epoch+1}: starting validation", flush=True)
+            val_metrics = evaluate_dataset(
+                model,
+                val_ds,
+                cfg,
+                strategy=eval_strategy,
+                use_tta_hflip=bool(cfg["runtime"].get("train_val_tta_hflip", False)),
+                lambda_sem_override=current_lambda_sem,
             )
-        monitor = resolve_monitor_value(val_metrics, monitor_name)
-        checkpoint_eligible = (epoch + 1) >= best_checkpoint_start_epoch
-        val_loss_val = float(val_metrics['loss'])
-        val_acc_val = float(val_metrics['accuracy'])
-        ckpt_epoch.assign(epoch + 1)
-        improved = bool(checkpoint_eligible and monitor > best_score)
-        if improved:
-            best_score = monitor
-            best_epoch = epoch + 1
-            patience_anchor_epoch = epoch + 1
-            ckpt_best_metric.assign(best_score)
-            print(
-                f"[INFO] New all-time best at ep {epoch+1}, val_loss: {val_loss_val:.4f}, "
-                f"val_accuracy: {val_acc_val:.4f}, monitor: {monitor_name}",
-                flush=True,
-            )
-        elif not checkpoint_eligible:
-            print(
-                f"[INFO] Epoch {epoch+1}: best checkpoint is not considered before epoch "
-                f"{best_checkpoint_start_epoch}",
-                flush=True,
-            )
-        if checkpoint_eligible and val_loss_val < best_val_loss_tracked:
-            best_val_loss_tracked = val_loss_val
-            print(
-                f"[INFO] New all-time lowest val_loss at ep {epoch+1}: "
-                f"val_loss={val_loss_val:.4f}, val_accuracy={val_acc_val:.4f}",
-                flush=True,
-            )
-        if checkpoint_eligible:
-            if macro_manager is not None:
-                macro_decision = macro_manager.consider(
-                    epoch=epoch + 1, metric=float(val_metrics["macro_f1"]),
+            print(f"[INFO] Epoch {epoch+1}: validation finished", flush=True)
+            # --- LR Escape State Update ---
+            if lr_escape_enabled and (epoch + 1) >= int(lr_esc_cfg.get("start_epoch", 81)):
+                best_score, best_epoch, patience_anchor_epoch = _update_lr_escape_state(
+                    lr_esc_state, lr_esc_cfg, val_metrics, train_loss,
+                    epoch, best_score, best_epoch, patience_anchor_epoch,
+                    checkpoint, best_manager,
+                )
+            monitor = resolve_monitor_value(val_metrics, monitor_name)
+            checkpoint_eligible = (epoch + 1) >= best_checkpoint_start_epoch
+            val_loss_val = float(val_metrics['loss'])
+            val_acc_val = float(val_metrics['accuracy'])
+            ckpt_epoch.assign(epoch + 1)
+            improved = bool(checkpoint_eligible and monitor > best_score)
+            if improved:
+                best_score = monitor
+                best_epoch = epoch + 1
+                patience_anchor_epoch = epoch + 1
+                ckpt_best_metric.assign(best_score)
+                print(
+                    f"[INFO] New all-time best at ep {epoch+1}, val_loss: {val_loss_val:.4f}, "
+                    f"val_accuracy: {val_acc_val:.4f}, monitor: {monitor_name}",
+                    flush=True,
+                )
+            elif not checkpoint_eligible:
+                print(
+                    f"[INFO] Epoch {epoch+1}: best checkpoint is not considered before epoch "
+                    f"{best_checkpoint_start_epoch}",
+                    flush=True,
+                )
+            if checkpoint_eligible and val_loss_val < best_val_loss_tracked:
+                best_val_loss_tracked = val_loss_val
+                print(
+                    f"[INFO] New all-time lowest val_loss at ep {epoch+1}: "
+                    f"val_loss={val_loss_val:.4f}, val_accuracy={val_acc_val:.4f}",
+                    flush=True,
+                )
+            if checkpoint_eligible:
+                if macro_manager is not None:
+                    macro_decision = macro_manager.consider(
+                        epoch=epoch + 1, metric=float(val_metrics["macro_f1"]),
+                        metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
+                    )
+                    if macro_decision["saved"]:
+                        print(f"[BEST_MACRO_F1] Saved ckpt-{epoch+1}: val_macro_f1={val_metrics['macro_f1']:.8f}", flush=True)
+                acc_decision = best_manager.consider(
+                    epoch=epoch + 1,
+                    metric=val_acc_val,
                     metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
                 )
-                if macro_decision["saved"]:
-                    print(f"[BEST_MACRO_F1] Saved ckpt-{epoch+1}: val_macro_f1={val_metrics['macro_f1']:.8f}", flush=True)
-            acc_decision = best_manager.consider(
-                epoch=epoch + 1,
-                metric=val_acc_val,
-                metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
-            )
-            loss_decision = best_loss_manager.consider(
-                epoch=epoch + 1,
-                metric=val_loss_val,
-                metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
-            )
-            for label, metric_value, decision in (
-                ("TOP5_ACC", val_acc_val, acc_decision),
-                ("TOP5_LOSS", val_loss_val, loss_decision),
-            ):
-                if decision["saved"]:
-                    removed = decision.get("removed")
-                    removed_text = (
-                        f", removed={removed['checkpoint']} ({removed['metric']:.6f})"
-                        if removed else ""
-                    )
-                    print(
-                        f"[{label}] Saved ckpt-{epoch+1} at rank {decision['rank']}: "
-                        f"metric={metric_value:.6f}{removed_text}",
-                        flush=True,
-                    )
-                else:
-                    threshold = decision.get("threshold")
-                    threshold_text = f"{threshold:.6f}" if threshold is not None else "N/A"
-                    print(
-                        f"[{label}] Skipped ckpt-{epoch+1}: metric={metric_value:.6f}, "
-                        f"rank-5 threshold={threshold_text}, reason={decision['reason']}",
-                        flush=True,
-                    )
+                loss_decision = best_loss_manager.consider(
+                    epoch=epoch + 1,
+                    metric=val_loss_val,
+                    metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
+                )
+                for label, metric_value, decision in (
+                    ("TOP5_ACC", val_acc_val, acc_decision),
+                    ("TOP5_LOSS", val_loss_val, loss_decision),
+                ):
+                    if decision["saved"]:
+                        removed = decision.get("removed")
+                        removed_text = (
+                            f", removed={removed['checkpoint']} ({removed['metric']:.6f})"
+                            if removed else ""
+                        )
+                        print(
+                            f"[{label}] Saved ckpt-{epoch+1} at rank {decision['rank']}: "
+                            f"metric={metric_value:.6f}{removed_text}",
+                            flush=True,
+                        )
+                    else:
+                        threshold = decision.get("threshold")
+                        threshold_text = f"{threshold:.6f}" if threshold is not None else "N/A"
+                        print(
+                            f"[{label}] Skipped ckpt-{epoch+1}: metric={metric_value:.6f}, "
+                            f"rank-5 threshold={threshold_text}, reason={decision['reason']}",
+                            flush=True,
+                        )
+        else:
+            # Full-train protocol: no validation split, zero test leakage
+            val_metrics = {}
+            monitor = train_loss
+            val_loss_val = train_loss
+            val_acc_val = train_acc
+            checkpoint_eligible = True
+            improved = False
+            ckpt_epoch.assign(epoch + 1)
+            print(f"[INFO] Epoch {epoch+1}: full-train protocol (all 12,271 images, no validation split).", flush=True)
         print(f"[INFO] Epoch {epoch+1}: saving last checkpoint", flush=True)
         last_manager.save(checkpoint_number=epoch + 1)
         if periodic_interval and (epoch + 1) % periodic_interval == 0:
@@ -1576,14 +1587,21 @@ def main() -> int:
         print("[INFO] No new training epochs were run; skipping training_history.csv update.", flush=True)
 
     selection_manager = macro_manager if macro_manager is not None else best_manager
-    best_ckpt = selection_manager.latest_checkpoint or last_manager.latest_checkpoint
-    if macro_manager is not None and macro_manager.entries:
-        best_epoch = int(macro_manager.entries[0]["epoch"])
-        best_score = float(macro_manager.entries[0]["metric"])
-        print(f"[SELECTED_ON_VALIDATION] metric=val_macro_f1 epoch={best_epoch} score={best_score:.8f}", flush=True)
-    if best_ckpt:
-        checkpoint.restore(best_ckpt).expect_partial()
-        print(f"[INFO] Restored best checkpoint: {best_ckpt}", flush=True)
+    if val_ds is not None and (selection_manager.latest_checkpoint or last_manager.latest_checkpoint):
+        best_ckpt = selection_manager.latest_checkpoint or last_manager.latest_checkpoint
+        if macro_manager is not None and macro_manager.entries:
+            best_epoch = int(macro_manager.entries[0]["epoch"])
+            best_score = float(macro_manager.entries[0]["metric"])
+            print(f"[SELECTED_ON_VALIDATION] metric=val_macro_f1 epoch={best_epoch} score={best_score:.8f}", flush=True)
+        if best_ckpt:
+            checkpoint.restore(best_ckpt).expect_partial()
+            print(f"[INFO] Restored best checkpoint: {best_ckpt}", flush=True)
+    else:
+        best_ckpt = last_manager.latest_checkpoint
+        best_epoch = max(int(ckpt_epoch.numpy()), 1)
+        if best_ckpt:
+            checkpoint.restore(best_ckpt).expect_partial()
+            print(f"[INFO] Restored final full-train checkpoint (epoch {best_epoch}): {best_ckpt}", flush=True)
 
     print("\n" + "=" * 70, flush=True)
     print("  FINAL TEST EVALUATION", flush=True)
