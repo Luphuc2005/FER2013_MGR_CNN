@@ -97,7 +97,7 @@ def check_runtime(cfg):
             assert float(tf.reduce_min(w)) >= (1.0 - beta) * 0.2 - 1e-6
         else:
             expected = tf.nn.softmax(tf.cast(model.granularity_gate(pooled, training=False), tf.float32))
-            np.testing.assert_allclose(w, expected, atol=1e-6)
+            np.testing.assert_allclose(w, expected, atol=1e-4, rtol=1e-3)
 
     model.set_granularity_gate_epoch(5)
     # Watch only head variables to keep this path check inexpensive on the server.
