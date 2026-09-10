@@ -19,7 +19,11 @@ def verify_sota_contract(cfg_path: Path) -> None:
     train_cfg = cfg["training"]
     aug_cfg = cfg["augmentation"]
 
-    assert model_cfg["name"] == "rafdb_siglip2_semantic_stable_v5_combined_ultimate_sota"
+    valid_names = [
+        "rafdb_siglip2_semantic_stable_v5_combined_ultimate_sota",
+        "rafdb_siglip2_semantic_stable_v5_combined_ultimate_sota_logit_adj",
+    ]
+    assert model_cfg["name"] in valid_names, f"Unexpected model name: {model_cfg['name']}"
     assert model_cfg["use_dynamic_part_attention"] is True, "Dynamic Part Attention must be True"
     assert model_cfg["dynamic_part_bottleneck"] == 128
     assert model_cfg["use_adaptive_fusion_gate"] is True, "Adaptive Fusion Gate must be True"
@@ -36,7 +40,11 @@ def verify_sota_contract(cfg_path: Path) -> None:
     assert aug_cfg["random_erasing_prob"] == 0.15, "random_erasing_prob should be 0.15"
 
     assert Path(cfg["data"]["data_path"]) == ROOT / "data/rafdb"
-    assert Path(cfg["paths"]["output_dir"]) == ROOT / "outputs/papers/rafdb_siglip2_semantic_stable_v5_combined_ultimate_sota"
+    expected_output_dirs = [
+        ROOT / "outputs/papers/rafdb_siglip2_semantic_stable_v5_combined_ultimate_sota",
+        ROOT / "outputs/papers/rafdb_siglip2_semantic_stable_v5_combined_ultimate_sota_logit_adj",
+    ]
+    assert Path(cfg["paths"]["output_dir"]) in expected_output_dirs, f"Unexpected output_dir: {cfg['paths']['output_dir']}"
 
     print(f"[OK] SOTA Contract successfully verified for: {cfg_path.name}")
 

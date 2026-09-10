@@ -26,13 +26,16 @@ SITE_PACKAGES=$("$FER_PY" -c 'import sysconfig; print(sysconfig.get_paths()["pur
 NVIDIA_LIB="$SITE_PACKAGES/nvidia"
 export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVIDIA_LIB/cudnn/lib:$NVIDIA_LIB/cufft/lib:$NVIDIA_LIB/curand/lib:$NVIDIA_LIB/cusolver/lib:$NVIDIA_LIB/cusparse/lib:${LD_LIBRARY_PATH:-}"
 
-if [[ -d "$OUTPUT_DIR" ]] && [[ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]]; then
-    echo "Output already nonempty: $OUTPUT_DIR. Refusing overwrite/resume."
-    exit 1
+if [[ -d "$OUTPUT_DIR" ]] && [[ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+    BACKUP_DIR="${OUTPUT_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
+    echo "[INFO] Output dir already nonempty: $OUTPUT_DIR. Moving to backup: $BACKUP_DIR"
+    mv "$OUTPUT_DIR" "$BACKUP_DIR"
 fi
 nvidia-smi
 echo "Config=$CONFIG Output=$OUTPUT_DIR Job=${SLURM_JOB_ID:-standalone}"
+"$FER_PY" -u scripts/check_rafdb_v5_sota.py --config "$CONFIG"
 "$FER_PY" -u scripts/check_logit_adjustment.py
+"$FER_PY" -u scripts/smoketest_rafdb_pipeline.py "$CONFIG"
 
 "$FER_PY" -u train.py --config "$CONFIG" --no-auto-increment
 echo "Finished: $OUTPUT_DIR (v5 SOTA + Logit Adjustment)."
