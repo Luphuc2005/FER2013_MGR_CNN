@@ -137,26 +137,32 @@ model:
   unfreeze_backbone: true
   freeze_unfrozen_batchnorm: true
 
-  # V6: Progressive unfreezing schedule
+  # V6: Progressive unfreezing schedule (4-Phase: Late full-unfreeze with micro-LR)
   progressive_unfreeze:
     enabled: true
     schedule:
-      # Epoch 1-8: freeze entire backbone, train head only
+      # Phase 1 (Epoch 1-8): freeze entire backbone, train head only
       - start_epoch: 1
         end_epoch: 8
         trainable_stages: []
-      # Epoch 9-15: unfreeze stage4 + downsample_stage4 only
+      # Phase 2 (Epoch 9-15): unfreeze stage4 + downsample_stage4 only
       - start_epoch: 9
         end_epoch: 15
         trainable_stages: [4]
-      # Epoch 16+: unfreeze stage3 + downsample_stage3 + stage4 + downsample_stage4
+      # Phase 3 (Epoch 16-25): unfreeze stage3 + downsample_stage3 + stage4 + downsample_stage4
       - start_epoch: 16
-        end_epoch: 999
+        end_epoch: 25
         trainable_stages: [3, 4]
-    # Per-stage LR multipliers relative to visual_extractor_lr
+      # Phase 4 (Epoch 26-60): unfreeze FULL backbone (stages 1, 2, 3, 4) with micro-LR
+      - start_epoch: 26
+        end_epoch: 999
+        trainable_stages: [1, 2, 3, 4]
+    # Per-stage LR multipliers relative to visual_extractor_lr (1e-5)
     stage_lr_multipliers:
       "4": 1.0    # stage4 gets full visual_extractor_lr = 1e-5
       "3": 0.5    # stage3 gets 0.5 * visual_extractor_lr = 5e-6
+      "2": 0.2    # stage2 gets 0.2 * visual_extractor_lr = 2e-6 (micro-LR)
+      "1": 0.1    # stage1 gets 0.1 * visual_extractor_lr = 1e-6 (micro-LR)
 
 stage_transition:
   enable_2stage_switching: false

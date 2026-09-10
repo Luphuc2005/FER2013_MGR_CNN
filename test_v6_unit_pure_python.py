@@ -115,7 +115,7 @@ class V6PurePythonTest(unittest.TestCase):
                     self.assertFalse(is_trainable, f"{name} should be frozen in phase 2")
 
     def test_progressive_schedule_phase3(self):
-        for ep in [16, 20, 45, 60]:
+        for ep in [16, 20, 25]:
             mask, stages = resolve_progressive_unfreeze_mask(self.cfg, ep, self.mock_backbone_vars)
             self.assertEqual(stages, [3, 4])
             for name, is_trainable in mask.items():
@@ -124,13 +124,24 @@ class V6PurePythonTest(unittest.TestCase):
                 else:
                     self.assertFalse(is_trainable, f"{name} should be frozen in phase 3")
 
+    def test_progressive_schedule_phase4_full_unfreeze(self):
+        for ep in [26, 30, 45, 60]:
+            mask, stages = resolve_progressive_unfreeze_mask(self.cfg, ep, self.mock_backbone_vars)
+            self.assertEqual(stages, [1, 2, 3, 4])
+            # All backbone stages should be trainable
+            self.assertTrue(all(mask.values()), f"All vars should be trainable in phase 4 at ep {ep}")
+
     def test_discriminative_lr_scales(self):
-        scales = compute_stage_lr_scales(self.cfg, self.mock_backbone_vars, [3, 4])
+        scales = compute_stage_lr_scales(self.cfg, self.mock_backbone_vars, [1, 2, 3, 4])
         for name, scale in scales.items():
             if "stage4" in name:
                 self.assertEqual(scale, 1.0)
             elif "stage3" in name:
                 self.assertEqual(scale, 0.5)
+            elif "stage2" in name:
+                self.assertEqual(scale, 0.2)
+            elif "stage1" in name or "stem" in name:
+                self.assertEqual(scale, 0.1)
 
     def test_ece_computation(self):
         # Deterministic test of ECE logic
