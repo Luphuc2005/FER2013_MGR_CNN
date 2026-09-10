@@ -471,40 +471,33 @@ def _rotate_tensor(tensor: tf.Tensor, radians: tf.Tensor, interpolation: str = "
     return _affine_transform_tensor(tensor, radians, zero, zero, one, interpolation=interpolation, fill_mode=fill_mode)
 
 
-def _augment_pair(image, mask, sample_id, aug_cfg, split: str, is_minority=False):
-    if split != "train":
-        return image, mask
+def _augment_minority_img(image: tf.Tensor) -> tf.Tensor:
+    flip = tf.random.uniform([]) < 0.50
+    image = tf.cond(flip, lambda: tf.image.flip_left_right(image), lambda: image)
 
-    # V8 minority augmentation: safe transforms preserving facial landmarks
-    if bool(is_minority):
-        degrees = 10.0
-        trans_h = 0.05
-        trans_w = 0.05
-        zoom_min = 0.90
-        zoom_max = 1.10
-        brightness_delta = 0.20
-        contrast_lower = 0.80
-        contrast_upper = 1.20
-        gamma_prob = 0.0
-        do_hflip = True
-    else:
-        degrees = float(aug_cfg.get("rotation_degrees", 0.0))
-        trans_h = float(aug_cfg.get("translation_height", 0.0))
-        trans_w = float(aug_cfg.get("translation_width", 0.0))
-        zoom_min = float(aug_cfg.get("zoom_min", 1.0))
-        zoom_max = float(aug_cfg.get("zoom_max", 1.0))
-        brightness_delta = float(aug_cfg.get("brightness_delta", 0.0))
-        contrast_lower = float(aug_cfg.get("contrast_lower", 1.0))
-        contrast_upper = float(aug_cfg.get("contrast_upper", 1.0))
-        gamma_prob = float(aug_cfg.get("gamma_prob", 0.0))
-        do_hflip = aug_cfg.get("horizontal_flip", True)
+    radians = tf.random.uniform([], minval=-10.0, maxval=10.0) * (np.pi / 180.0)
+    shift_h = tf.random.uniform([], minval=-0.05, maxval=0.05)
+    shift_w = tf.random.uniform([], minval=-0.05, maxval=0.05)
+    zoom = tf.random.uniform([], minval=0.90, maxval=1.10)
+    image = _affine_transform_tensor(image, radians, shift_h, shift_w, zoom, interpolation="BILINEAR", fill_mode="REFLECT")
 
+    brightness = tf.random.uniform([], minval=0.80, maxval=1.20)
+    image = image * brightness
+    image = tf.image.random_contrast(image, lower=0.80, upper=1.20)
+    return tf.clip_by_value(image, 0.0, 255.0)
+
+
+def _augment_standard_img(image: tf.Tensor, aug_cfg: Dict) -> tf.Tensor:
+    do_hflip = bool(aug_cfg.get("horizontal_flip", True))
     if do_hflip:
         flip = tf.random.uniform([]) < 0.50
         image = tf.cond(flip, lambda: tf.image.flip_left_right(image), lambda: image)
-        if mask is not None:
-            mask = tf.cond(flip, lambda: tf.image.flip_left_right(mask), lambda: mask)
 
+    degrees = float(aug_cfg.get("rotation_degrees", 0.0))
+    trans_h = float(aug_cfg.get("translation_height", 0.0))
+    trans_w = float(aug_cfg.get("translation_width", 0.0))
+    zoom_min = float(aug_cfg.get("zoom_min", 1.0))
+    zoom_max = float(aug_cfg.get("zoom_max", 1.0))
     has_affine = (degrees > 0.0 or trans_h > 0.0 or trans_w > 0.0 or zoom_min != 1.0 or zoom_max != 1.0)
     if has_affine:
         fill_mode = str(aug_cfg.get("fill_mode", "REFLECT" if (trans_h > 0 or trans_w > 0 or zoom_min != 1.0 or zoom_max != 1.0) else "CONSTANT")).upper()
@@ -525,12 +518,8 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str, is_minority=False
             if zoom_max > zoom_min else tf.constant(1.0, dtype=tf.float32)
         )
         image = _affine_transform_tensor(image, radians, shift_h, shift_w, zoom, interpolation="BILINEAR", fill_mode=fill_mode)
-        if mask is not None:
-            mask = tf.clip_by_value(
-                _affine_transform_tensor(mask, radians, shift_h, shift_w, zoom, interpolation="BILINEAR", fill_mode="CONSTANT"),
-                0.0,
-                1.0,
-            )
+
+    brightness_delta = float(aug_cfg.get("brightness_delta", 0.0))
     if brightness_delta > 0.0:
         brightness = tf.random.uniform(
             [],
@@ -538,16 +527,47 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str, is_minority=False
             maxval=1.0 + brightness_delta,
         )
         image = image * brightness
+
+    contrast_lower = float(aug_cfg.get("contrast_lower", 1.0))
+    contrast_upper = float(aug_cfg.get("contrast_upper", 1.0))
     if contrast_upper > contrast_lower:
         image = tf.image.random_contrast(image, lower=contrast_lower, upper=contrast_upper)
     image = tf.clip_by_value(image, 0.0, 255.0)
+
+    gamma_prob = float(aug_cfg.get("gamma_prob", 0.0))
     if gamma_prob > 0.0:
         use_gamma = tf.random.uniform([]) < gamma_prob
         def gamma_aug():
             gamma = tf.random.uniform([], minval=float(aug_cfg.get("gamma_min", 0.5)), maxval=float(aug_cfg.get("gamma_max", 2.0)))
             return tf.image.adjust_gamma(tf.clip_by_value(image, 0.0, 255.0) / 255.0, gamma=gamma) * 255.0
         image = tf.cond(use_gamma, gamma_aug, lambda: image)
-    return tf.clip_by_value(image, 0.0, 255.0), mask
+
+    return tf.clip_by_value(image, 0.0, 255.0)
+
+
+def _augment_pair(image, mask, sample_id, aug_cfg, split: str, is_minority=False):
+    if split != "train":
+        return image, mask
+
+    if tf.is_tensor(is_minority):
+        image = tf.cond(
+            is_minority,
+            lambda: _augment_minority_img(image),
+            lambda: _augment_standard_img(image, aug_cfg),
+        )
+    else:
+        if bool(is_minority):
+            image = _augment_minority_img(image)
+        else:
+            image = _augment_standard_img(image, aug_cfg)
+
+    if mask is not None:
+        do_hflip = bool(aug_cfg.get("horizontal_flip", True))
+        if do_hflip:
+            flip = tf.random.uniform([]) < 0.50
+            mask = tf.cond(flip, lambda: tf.image.flip_left_right(mask), lambda: mask)
+
+    return image, mask
 
 
 def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dict, split: str, is_minority=False):
@@ -573,8 +593,16 @@ def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dic
         )
     image, mask = _augment_pair(image, mask, sample_id, cfg["augmentation"], split, is_minority=is_minority)
     image = _normalize_image(image, int(cfg["data"]["channels"]))
-    if split == "train" and not bool(is_minority):
-        image = _random_erasing(image, cfg["augmentation"])
+    if split == "train":
+        if tf.is_tensor(is_minority):
+            image = tf.cond(
+                is_minority,
+                lambda: image,
+                lambda: _random_erasing(image, cfg["augmentation"]),
+            )
+        else:
+            if not bool(is_minority):
+                image = _random_erasing(image, cfg["augmentation"])
     features = {"image": image}
     if mask is not None:
         features["mask"] = mask
