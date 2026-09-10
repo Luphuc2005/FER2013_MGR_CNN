@@ -106,6 +106,10 @@ model:
 
   # Anti-collapse Granularity Gate Schedule
   use_adaptive_granularity: true
+  granularity_gate_schedule:
+    enabled: true
+    step_schedule: true
+    uniform_epochs: 4
   granularity_gate_step_schedule: true
   granularity_gate_uniform_epochs: 4
   granularity_gate_temperature_steps:

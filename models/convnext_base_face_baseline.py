@@ -309,14 +309,25 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         )
         if not isinstance(gate_schedule_cfg, dict):
             raise ValueError("granularity_gate_schedule must be a mapping when provided.")
-        self.granularity_gate_schedule_enabled = bool(gate_schedule_cfg.get("enabled", False))
-        self.granularity_gate_uniform_epochs = int(gate_schedule_cfg.get("uniform_epochs", 0))
+        self.granularity_gate_step_schedule = bool(
+            gate_schedule_cfg.get("schedule_type") == "step_temperature"
+            or model_cfg.get("granularity_schedule_type") == "v8_step"
+            or gate_schedule_cfg.get("step_schedule", False)
+            or model_cfg.get("granularity_gate_step_schedule", False)
+        )
+        self.granularity_gate_schedule_enabled = bool(
+            gate_schedule_cfg.get("enabled", False)
+            or self.granularity_gate_step_schedule
+        )
+        self.granularity_gate_uniform_epochs = int(
+            gate_schedule_cfg.get("uniform_epochs", model_cfg.get("granularity_gate_uniform_epochs", 4 if self.granularity_gate_step_schedule else 0))
+        )
         self.granularity_gate_transition_end_epoch = int(
             gate_schedule_cfg.get("transition_end_epoch", self.granularity_gate_uniform_epochs)
         )
         self.granularity_gate_start_temperature = float(gate_schedule_cfg.get("start_temperature", 1.0))
         self.granularity_gate_end_temperature = float(gate_schedule_cfg.get("end_temperature", 1.0))
-        if self.granularity_gate_schedule_enabled:
+        if self.granularity_gate_schedule_enabled and not self.granularity_gate_step_schedule:
             if not self.use_adaptive_granularity:
                 raise ValueError("granularity_gate_schedule requires use_adaptive_granularity=true.")
             if self.granularity_gate_uniform_epochs < 0:
@@ -328,7 +339,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             if self.granularity_gate_start_temperature <= 0.0 or self.granularity_gate_end_temperature <= 0.0:
                 raise ValueError("granularity gate temperatures must be positive.")
         # Legacy V5 configs retain their original variable/checkpoint structure.
-        # The epoch variable exists only when the V6 warm-up schedule is enabled.
+        # The epoch variable exists only when the warm-up schedule is enabled.
         self.granularity_gate_epoch = None
         if self.granularity_gate_schedule_enabled:
             self.granularity_gate_epoch = self.add_weight(
@@ -340,11 +351,6 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             )
         self.lambda_gate_entropy = float(model_cfg.get("lambda_gate_entropy", 0.0))
         self.gate_entropy_floor = float(model_cfg.get("gate_entropy_floor", 0.80))
-        self.granularity_gate_step_schedule = bool(
-            gate_schedule_cfg.get("schedule_type") == "step_temperature"
-            or model_cfg.get("granularity_schedule_type") == "v8_step"
-            or gate_schedule_cfg.get("step_schedule", False)
-        )
         self.use_hard_semantic_loss = bool(
             clip_sem_cfg.get("use_hard_semantic_loss", False)
             or model_cfg.get("use_hard_semantic_loss", False)
