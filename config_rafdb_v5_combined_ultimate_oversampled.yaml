@@ -45,8 +45,8 @@ data:
   cache: false
   # Class-aware stochastic augmented minority oversampling (train only)
   sampling_strategy: "class_aware_minority_oversample"
-  target_minority_count: 1200
-  minority_classes: [0, 1, 2, 5]
+  target_minority_count: 650
+  minority_classes: [0, 1, 2]
   minority_aug:
     flip_prob: 0.50
     rotation_range: 10.0
@@ -95,14 +95,27 @@ model:
 
   # CẢI TIẾN 2: Sample-Adaptive Logit Fusion Gate alpha(x) (Stage 4)
   use_adaptive_fusion_gate: true
-  adaptive_fusion_max_alpha: 0.20
+  adaptive_fusion_max_alpha: 0.10
 
-  # Sample-adaptive granularity weighting across 5 prototypes
+  # Sample-adaptive granularity weighting across 5 prototypes with Anti-Collapse Schedule
   use_adaptive_granularity: true
+  granularity_gate_schedule:
+    enabled: true
+    step_schedule: true
+    uniform_epochs: 4
+  granularity_gate_step_schedule: true
+  granularity_gate_uniform_epochs: 4
+  granularity_gate_temperature_steps:
+    - [4, 1.0]
+    - [10, 2.0]
+    - [20, 1.5]
+    - [999, 1.0]
+  lambda_gate_entropy: 0.01
+  gate_entropy_floor: 0.80
 
   use_hard_semantic_loss: true
-  lambda_sem: 0.10
-  lambda_hard: 0.10
+  lambda_sem: 0.05
+  lambda_hard: 0.05
   hard_margin: 0.15
   hard_pairs:
     0: [1, 4]
@@ -125,8 +138,8 @@ model:
     clip_embedding_dim: 768
     clip_prototypes_path: "pretrained/siglip2_text_prototypes_7emotions_multigranularity_multi5.npy"
     semantic_logit_scale: 20.0
-    lambda_sem: 0.10
-    lambda_hard: 0.10
+    lambda_sem: 0.05
+    lambda_hard: 0.05
     hard_margin: 0.15
 
   checkpoint_path: null
@@ -164,7 +177,7 @@ training:
   sam_adaptive: false
   lr: 0.0003
   finetune_lr: 0.0003
-  visual_extractor_lr: 0.00001
+  visual_extractor_lr: 0.000005
   weight_decay: 0.05
   scheduler: "cosine"
   grad_clip_norm: 1.0
@@ -174,14 +187,9 @@ training:
   best_checkpoint_start_epoch: 1
   periodic_checkpoint_interval: 10
   progress_interval: 100
+  # Semantic loss kept stable at 0.05 to prevent explosion
   lambda_sem_schedule:
-    enabled: true
-    before_value: 0.10
-    start_epoch: 5
-    end_epoch: 10
-    start_value: 0.10
-    end_value: 0.15
-    after_value: 0.15
+    enabled: false
 
 paths:
   output_dir: "outputs/papers/rafdb_v5_combined_ultimate_oversampled"

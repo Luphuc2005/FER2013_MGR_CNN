@@ -597,12 +597,15 @@ def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dic
         if tf.is_tensor(is_minority):
             image = tf.cond(
                 is_minority,
-                lambda: image,
+                lambda: tf.cond(
+                    tf.random.uniform([]) < 0.25,
+                    lambda: _random_erasing(image, cfg["augmentation"]),
+                    lambda: image,
+                ),
                 lambda: _random_erasing(image, cfg["augmentation"]),
             )
         else:
-            if not bool(is_minority):
-                image = _random_erasing(image, cfg["augmentation"])
+            image = _random_erasing(image, cfg["augmentation"])
     features = {"image": image}
     if mask is not None:
         features["mask"] = mask
