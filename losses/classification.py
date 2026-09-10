@@ -154,6 +154,12 @@ def supervised_mgr_loss(
         local_sem_loss = (loss_upper + loss_lower + loss_au) / 3.0
         total = total + lambda_local_sem * local_sem_loss
 
+    # Gate Entropy Floor Regularization (Anti-Collapse)
+    gate_entropy_loss = outputs.get("gate_entropy_loss")
+    lambda_gate_entropy = float(outputs.get("lambda_gate_entropy", 0.0))
+    if gate_entropy_loss is not None and lambda_gate_entropy > 0.0:
+        total = total + tf.cast(lambda_gate_entropy, tf.float32) * tf.cast(gate_entropy_loss, tf.float32)
+
     return total, {
         "ce": ce,
         "ortho": ortho,
@@ -161,4 +167,5 @@ def supervised_mgr_loss(
         "semantic": sem_loss,
         "hard_semantic": hard_loss,
         "local_semantic": local_sem_loss,
+        "gate_entropy": outputs.get("gate_entropy", tf.constant(0.0, dtype=tf.float32)),
     }

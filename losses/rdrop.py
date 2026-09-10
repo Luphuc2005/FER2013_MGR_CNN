@@ -48,7 +48,7 @@ def forward_training_loss(
         student_features = {k: v for k, v in features.items() if k != "teacher_logits"}
 
     def forward_once():
-        outputs = model(student_features, training=True)
+        outputs = model(student_features, training=True, labels=labels)
         loss_outputs = dict(outputs)
         if lambda_sem_runtime is not None and outputs.get("semantic_logits") is not None:
             loss_outputs["lambda_sem"] = lambda_sem_runtime.read_value()

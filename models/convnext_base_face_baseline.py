@@ -266,11 +266,23 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             float(model_cfg.get("classifier_dropout1", 0.35)),
             name="fer_dropout",
         )
-        self.classifier = tf.keras.layers.Dense(
-            self.num_classes,
-            kernel_initializer="he_normal",
-            name="fer_classifier",
-        )
+        classifier_type = str(model_cfg.get("classifier_type", "linear")).lower()
+        if classifier_type in ("arcmargin", "arcface", "arcmarginproduct"):
+            from .arcmargin import ArcMarginProduct
+            arcmargin_cfg = model_cfg.get("arcmargin", {})
+            self.classifier = ArcMarginProduct(
+                num_classes=self.num_classes,
+                scale=float(arcmargin_cfg.get("scale", 30.0)),
+                margin=float(arcmargin_cfg.get("margin", 0.30)),
+                easy_margin=bool(arcmargin_cfg.get("easy_margin", False)),
+                name="fer_classifier",
+            )
+        else:
+            self.classifier = tf.keras.layers.Dense(
+                self.num_classes,
+                kernel_initializer="he_normal",
+                name="fer_classifier",
+            )
 
         clip_sem_cfg = model_cfg.get("clip_semantic", {})
         if not isinstance(clip_sem_cfg, dict):
@@ -326,6 +338,13 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 initializer=tf.keras.initializers.Constant(1),
                 trainable=False,
             )
+        self.lambda_gate_entropy = float(model_cfg.get("lambda_gate_entropy", 0.0))
+        self.gate_entropy_floor = float(model_cfg.get("gate_entropy_floor", 0.80))
+        self.granularity_gate_step_schedule = bool(
+            gate_schedule_cfg.get("schedule_type") == "step_temperature"
+            or model_cfg.get("granularity_schedule_type") == "v8_step"
+            or gate_schedule_cfg.get("step_schedule", False)
+        )
         self.use_hard_semantic_loss = bool(
             clip_sem_cfg.get("use_hard_semantic_loss", False)
             or model_cfg.get("use_hard_semantic_loss", False)
@@ -1033,6 +1052,32 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             gate_logits = self.granularity_gate(pooled, training=training)
             return gate_logits
 
+        if getattr(self, "granularity_gate_step_schedule", False):
+            epoch = tf.identity(self.granularity_gate_epoch)
+            batch_size = tf.shape(pooled)[0]
+            uniform = tf.fill([batch_size, 5], tf.constant(0.2, dtype=tf.float32))
+
+            def _adaptive(temperature: tf.Tensor) -> tf.Tensor:
+                gate_logits = self.granularity_gate(pooled, training=training)
+                return tf.nn.softmax(tf.cast(gate_logits, tf.float32) / temperature, axis=-1)
+
+            def _get_temp():
+                return tf.cond(
+                    epoch <= 10,
+                    lambda: tf.constant(2.0, tf.float32),
+                    lambda: tf.cond(
+                        epoch <= 20,
+                        lambda: tf.constant(1.5, tf.float32),
+                        lambda: tf.constant(1.0, tf.float32),
+                    ),
+                )
+
+            return tf.cond(
+                epoch <= 4,
+                lambda: uniform,
+                lambda: _adaptive(_get_temp()),
+            )
+
         batch_size = tf.shape(pooled)[0]
         uniform = tf.fill([batch_size, 5], tf.constant(0.2, dtype=tf.float32))
         epoch = tf.identity(self.granularity_gate_epoch)
@@ -1142,7 +1187,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 print(f"[ConvNeXtBaseFace]   semantic_logit_scale: {self.semantic_logit_scale}", flush=True)
             print(f"[ConvNeXtBaseFace]   Total trainable params: {total_params:,}", flush=True)
 
-    def call(self, inputs, training=False, **kwargs):
+    def call(self, inputs, training=False, labels=None, **kwargs):
+        if labels is None:
+            labels = kwargs.get("labels", inputs.get("label", inputs.get("labels", None)) if isinstance(inputs, dict) else None)
         image = inputs["image"] if isinstance(inputs, dict) else inputs
         endpoints = self.backbone(
             image, training=training, return_endpoints=True, stage3_adapter=self.stage3_adapter
@@ -1154,7 +1201,10 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
         pooled = self.gap(feat)
         if not (self.use_global_regional_fusion or self.use_multistage_adaptive_fusion):
             dropped = self.head_dropout(pooled, training=training)
-            logits = self.classifier(dropped)
+            if hasattr(self.classifier, "margin"):
+                logits = self.classifier(dropped, labels=labels, training=training)
+            else:
+                logits = self.classifier(dropped)
 
         semantic_logits = None
         agg_sim = None
@@ -1299,7 +1349,10 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
                 (pooled, z_upper, z_lower, z_au), training=training,
             )
             dropped = self.head_dropout(head_features, training=training)
-            logits = self.classifier(dropped)
+            if hasattr(self.classifier, "margin"):
+                logits = self.classifier(dropped, labels=labels, training=training)
+            else:
+                logits = self.classifier(dropped)
             endpoints["global_regional_features"] = head_features
             if not self._shape_logged:
                 print(
@@ -1310,7 +1363,10 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
 
         if self.use_multistage_adaptive_fusion:
             dropped = self.head_dropout(head_features, training=training)
-            logits = self.classifier(dropped)
+            if hasattr(self.classifier, "margin"):
+                logits = self.classifier(dropped, labels=labels, training=training)
+            else:
+                logits = self.classifier(dropped)
             if not self._shape_logged:
                 print(
                     f"[MultiStageFusion] S2={endpoints['stage2'].shape} "
@@ -1332,6 +1388,14 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             else:
                 fused_logits = visual_logits
 
+        if granularity_weights is not None:
+            gw_f32 = tf.cast(granularity_weights, tf.float32)
+            gate_entropy = tf.reduce_mean(-tf.reduce_sum(gw_f32 * tf.math.log(gw_f32 + 1e-12), axis=-1))
+            gate_entropy_loss = tf.reduce_mean(tf.nn.relu(tf.constant(getattr(self, "gate_entropy_floor", 0.80), dtype=tf.float32) - (-tf.reduce_sum(gw_f32 * tf.math.log(gw_f32 + 1e-12), axis=-1))))
+        else:
+            gate_entropy = tf.constant(0.0, dtype=tf.float32)
+            gate_entropy_loss = tf.constant(0.0, dtype=tf.float32)
+
         self._log_shapes_once(image, endpoints, pooled, dropped, logits)
         outputs = {
             "logits": fused_logits,
@@ -1339,6 +1403,9 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             "semantic_logits": semantic_logits,
             "agg_sim": agg_sim,
             "granularity_weights": granularity_weights,
+            "gate_entropy": gate_entropy,
+            "gate_entropy_loss": gate_entropy_loss,
+            "lambda_gate_entropy": getattr(self, "lambda_gate_entropy", 0.0),
             "lambda_sem": self.lambda_sem,
             "lambda_hard": self.lambda_hard if self.use_hard_semantic_loss else 0.0,
             "hard_margin": self.hard_margin,

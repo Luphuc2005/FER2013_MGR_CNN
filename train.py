@@ -319,10 +319,20 @@ def compute_stage_lr_scales(
     cfg: Dict,
     backbone_vars: List[tf.Variable],
     trainable_stages: List[int],
+    epoch_number: int = 1,
 ) -> Dict[str, float]:
     """Return per-variable LR scale factors for discriminative LR."""
     prog_cfg = cfg.get("model", {}).get("progressive_unfreeze", {})
-    stage_mults = prog_cfg.get("stage_lr_multipliers", {})
+    stage_mults = None
+    for phase in prog_cfg.get("schedule", []):
+        start = int(phase.get("start_epoch", 1))
+        end = int(phase.get("end_epoch", 9999))
+        if start <= epoch_number <= end:
+            if "stage_lr_multipliers" in phase:
+                stage_mults = phase["stage_lr_multipliers"]
+            break
+    if stage_mults is None:
+        stage_mults = prog_cfg.get("stage_lr_multipliers", {})
     scales = {}
     for v in backbone_vars:
         v_key = variable_key(v)
@@ -475,6 +485,8 @@ def resolve_phase_lrs(cfg: Dict, epoch: int, train_backbone: bool) -> Tuple[floa
     training_cfg = cfg["training"]
     total_epochs = int(training_cfg["epochs"])
     warmup_epochs = int(training_cfg.get("warmup_epochs", 5))
+    min_lr = float(training_cfg.get("min_lr", 1e-6))
+    head_decay_epochs = training_cfg.get("head_decay_epochs", None)
     stage_tr = cfg.get("stage_transition", {})
     if bool(stage_tr.get("enable_2stage_switching", False)) and epoch >= int(stage_tr.get("stage1_end_epoch", 60)):
         stage2_start = int(stage_tr.get("stage1_end_epoch", 60))
@@ -483,19 +495,22 @@ def resolve_phase_lrs(cfg: Dict, epoch: int, train_backbone: bool) -> Tuple[floa
         head_base_lr = float(stage_tr.get("stage2_finetune_lr", training_cfg.get("finetune_lr", 0.00004)))
         visual_base_lr = float(stage_tr.get("stage2_visual_extractor_lr", training_cfg.get("visual_extractor_lr", 0.000002)))
         return (
-            cosine_lr(head_base_lr, phase2_epoch, phase2_total, warmup_epochs=min(warmup_epochs, phase2_total)),
-            cosine_lr(visual_base_lr, phase2_epoch, phase2_total, warmup_epochs=min(warmup_epochs, phase2_total)),
+            cosine_lr(head_base_lr, phase2_epoch, phase2_total, min_lr=min_lr, warmup_epochs=min(warmup_epochs, phase2_total)),
+            cosine_lr(visual_base_lr, phase2_epoch, phase2_total, min_lr=min_lr, warmup_epochs=min(warmup_epochs, phase2_total)),
         )
     if train_backbone:
         freeze_epochs = int(cfg["model"].get("freeze_backbone_epochs", 0) or 0)
         phase_epoch = max(0, int(epoch) - freeze_epochs)
         head_base_lr = float(training_cfg.get("finetune_lr", training_cfg["lr"]))
         visual_base_lr = float(training_cfg.get("visual_extractor_lr", head_base_lr))
-        return (
-            cosine_lr(head_base_lr, phase_epoch, total_epochs, warmup_epochs=warmup_epochs),
-            cosine_lr(visual_base_lr, phase_epoch, total_epochs, warmup_epochs=warmup_epochs),
-        )
-    return cosine_lr(float(training_cfg["lr"]), int(epoch), total_epochs, warmup_epochs=warmup_epochs), 0.0
+        if head_decay_epochs is not None:
+            head_lr = cosine_lr(head_base_lr, int(epoch), int(head_decay_epochs), min_lr=min_lr, warmup_epochs=warmup_epochs)
+        else:
+            head_lr = cosine_lr(head_base_lr, phase_epoch, total_epochs, min_lr=min_lr, warmup_epochs=warmup_epochs)
+        backbone_lr = cosine_lr(visual_base_lr, phase_epoch, total_epochs, min_lr=min_lr, warmup_epochs=warmup_epochs)
+        return (head_lr, backbone_lr)
+    head_total = int(head_decay_epochs) if head_decay_epochs is not None else total_epochs
+    return cosine_lr(float(training_cfg["lr"]), int(epoch), head_total, min_lr=min_lr, warmup_epochs=warmup_epochs), 0.0
 
 
 def resolve_monitor_value(metrics: Dict[str, object], monitor_name: str) -> float:
@@ -1358,6 +1373,8 @@ def main() -> int:
     if prog_unfreeze_enabled:
         print("[PROGRESSIVE_UNFREEZE] Enabled", flush=True)
     prev_trainable_stages: Optional[List[int]] = None  # Track stage transitions
+    prev_lr_scales: Optional[Dict[str, float]] = None
+    gate_collapse_consecutive_epochs: int = 0
 
     def _build_step_functions(grad_mask, lr_scales):
         """Build train step functions with the given gradient mask."""
@@ -1382,7 +1399,7 @@ def main() -> int:
         cfg, start_epoch + 1, backbone_vars
     ) if prog_unfreeze_enabled else (None, [1, 2, 3, 4])
     initial_lr_scales = compute_stage_lr_scales(
-        cfg, backbone_vars, initial_stages
+        cfg, backbone_vars, initial_stages, epoch_number=start_epoch + 1
     ) if prog_unfreeze_enabled else None
 
     train_step_head, train_step_full, distributed_train_step_head, distributed_train_step_full = _build_step_functions(
@@ -1452,6 +1469,17 @@ def main() -> int:
             f"[SEMANTIC_SCHEDULE] Epoch {epoch_number}: lambda_sem={current_lambda_sem:.4f}",
             flush=True,
         )
+        try:
+            from datasets.fer2013 import get_oversample_stats
+            _ov_stats = get_oversample_stats()
+            if _ov_stats.get("enabled", False):
+                print(
+                    f"[DATASET_OVERSAMPLE] Epoch {epoch_number}: effective_counts={_ov_stats.get('effective_class_counts')} "
+                    f"total_samples={_ov_stats.get('total_samples')}",
+                    flush=True,
+                )
+        except Exception:
+            pass
         train_backbone = bool(cfg["model"].get("unfreeze_backbone", True)) and epoch >= freeze_epochs
         phase_transitioned = False
 
@@ -1460,10 +1488,16 @@ def main() -> int:
             current_mask, current_stages = resolve_progressive_unfreeze_mask(
                 cfg, epoch_number, backbone_vars
             )
-            current_lr_scales = compute_stage_lr_scales(cfg, backbone_vars, current_stages)
+            current_lr_scales = compute_stage_lr_scales(
+                cfg, backbone_vars, current_stages, epoch_number=epoch_number
+            )
 
-            # Detect stage transition
-            if prev_trainable_stages is None or current_stages != prev_trainable_stages:
+            # Detect stage transition or LR scale multiplier changes
+            if (
+                prev_trainable_stages is None
+                or current_stages != prev_trainable_stages
+                or current_lr_scales != prev_lr_scales
+            ):
                 phase_transitioned = True
                 log_unfreeze_state(
                     epoch_number, current_stages, backbone_vars, current_mask,
@@ -1482,6 +1516,7 @@ def main() -> int:
                         flush=True,
                     )
                 prev_trainable_stages = list(current_stages)
+                prev_lr_scales = dict(current_lr_scales)
 
             # If any stages are trainable, use full step (backbone gets masked gradients)
             train_backbone = len(current_stages) > 0
@@ -1610,12 +1645,23 @@ def main() -> int:
         gate_max_alpha = float(max_gate_alpha)
 
         # Collapse check: warn if any weight > 0.90
+        any_weight_above_90 = False
         for k_idx, gw_m in enumerate(gw_means):
             if gw_m > 0.90:
+                any_weight_above_90 = True
                 print(
                     f"[WARNING] Granularity weight {k_idx} mean ({gw_m:.4f}) > 0.90 at Epoch {epoch+1}! Gate may be collapsing.",
                     flush=True,
                 )
+        if any_weight_above_90:
+            gate_collapse_consecutive_epochs += 1
+            if gate_collapse_consecutive_epochs >= 2:
+                print(
+                    f"[GATE_COLLAPSE_WARNING] Gate weight mean > 0.90 for {gate_collapse_consecutive_epochs} consecutive epochs (Epoch {epoch+1})! Means: {np.round(gw_means, 4).tolist()}",
+                    flush=True,
+                )
+        else:
+            gate_collapse_consecutive_epochs = 0
 
         fusion_train_values = None
         if fusion_train_tracker is not None:

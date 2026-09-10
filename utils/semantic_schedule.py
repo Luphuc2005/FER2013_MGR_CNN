@@ -23,6 +23,17 @@ def resolve_lambda_sem(cfg: Dict[str, Any], epoch_number: int) -> float:
     if epoch_number < 1:
         raise ValueError(f"epoch_number must be >= 1, got {epoch_number}.")
 
+    # V8 piecewise step decay schedule support
+    decay_steps = schedule_cfg.get("decay_steps") or schedule_cfg.get("steps")
+    if decay_steps:
+        for step in decay_steps:
+            if isinstance(step, (list, tuple)) and len(step) >= 2:
+                step_end = int(step[0])
+                step_val = float(step[1])
+                if epoch_number <= step_end:
+                    return step_val
+        return float(decay_steps[-1][1])
+
     start_epoch = int(schedule_cfg.get("start_epoch", 5))
     end_epoch = int(schedule_cfg.get("end_epoch", 10))
     start_value = float(schedule_cfg.get("start_value", base_value))

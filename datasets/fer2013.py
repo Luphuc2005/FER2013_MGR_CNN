@@ -471,19 +471,40 @@ def _rotate_tensor(tensor: tf.Tensor, radians: tf.Tensor, interpolation: str = "
     return _affine_transform_tensor(tensor, radians, zero, zero, one, interpolation=interpolation, fill_mode=fill_mode)
 
 
-def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
+def _augment_pair(image, mask, sample_id, aug_cfg, split: str, is_minority=False):
     if split != "train":
         return image, mask
-    if aug_cfg.get("horizontal_flip", True):
-        flip = tf.random.uniform([]) < 0.5
+
+    # V8 minority augmentation: safe transforms preserving facial landmarks
+    if bool(is_minority):
+        degrees = 10.0
+        trans_h = 0.05
+        trans_w = 0.05
+        zoom_min = 0.90
+        zoom_max = 1.10
+        brightness_delta = 0.20
+        contrast_lower = 0.80
+        contrast_upper = 1.20
+        gamma_prob = 0.0
+        do_hflip = True
+    else:
+        degrees = float(aug_cfg.get("rotation_degrees", 0.0))
+        trans_h = float(aug_cfg.get("translation_height", 0.0))
+        trans_w = float(aug_cfg.get("translation_width", 0.0))
+        zoom_min = float(aug_cfg.get("zoom_min", 1.0))
+        zoom_max = float(aug_cfg.get("zoom_max", 1.0))
+        brightness_delta = float(aug_cfg.get("brightness_delta", 0.0))
+        contrast_lower = float(aug_cfg.get("contrast_lower", 1.0))
+        contrast_upper = float(aug_cfg.get("contrast_upper", 1.0))
+        gamma_prob = float(aug_cfg.get("gamma_prob", 0.0))
+        do_hflip = aug_cfg.get("horizontal_flip", True)
+
+    if do_hflip:
+        flip = tf.random.uniform([]) < 0.50
         image = tf.cond(flip, lambda: tf.image.flip_left_right(image), lambda: image)
         if mask is not None:
             mask = tf.cond(flip, lambda: tf.image.flip_left_right(mask), lambda: mask)
-    degrees = float(aug_cfg.get("rotation_degrees", 0.0))
-    trans_h = float(aug_cfg.get("translation_height", 0.0))
-    trans_w = float(aug_cfg.get("translation_width", 0.0))
-    zoom_min = float(aug_cfg.get("zoom_min", 1.0))
-    zoom_max = float(aug_cfg.get("zoom_max", 1.0))
+
     has_affine = (degrees > 0.0 or trans_h > 0.0 or trans_w > 0.0 or zoom_min != 1.0 or zoom_max != 1.0)
     if has_affine:
         fill_mode = str(aug_cfg.get("fill_mode", "REFLECT" if (trans_h > 0 or trans_w > 0 or zoom_min != 1.0 or zoom_max != 1.0) else "CONSTANT")).upper()
@@ -510,7 +531,6 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
                 0.0,
                 1.0,
             )
-    brightness_delta = float(aug_cfg.get("brightness_delta", 0.0))
     if brightness_delta > 0.0:
         brightness = tf.random.uniform(
             [],
@@ -518,12 +538,9 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
             maxval=1.0 + brightness_delta,
         )
         image = image * brightness
-    contrast_lower = float(aug_cfg.get("contrast_lower", 1.0))
-    contrast_upper = float(aug_cfg.get("contrast_upper", 1.0))
     if contrast_upper > contrast_lower:
         image = tf.image.random_contrast(image, lower=contrast_lower, upper=contrast_upper)
     image = tf.clip_by_value(image, 0.0, 255.0)
-    gamma_prob = float(aug_cfg.get("gamma_prob", 0.0))
     if gamma_prob > 0.0:
         use_gamma = tf.random.uniform([]) < gamma_prob
         def gamma_aug():
@@ -533,7 +550,7 @@ def _augment_pair(image, mask, sample_id, aug_cfg, split: str):
     return tf.clip_by_value(image, 0.0, 255.0), mask
 
 
-def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dict, split: str):
+def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dict, split: str, is_minority=False):
     image = _decode_pixels(pixels, int(cfg["data"]["image_size"]), int(cfg["data"]["channels"]))
     mask = None
     resize_method = str(cfg["model"].get("mgr_mask_resize_method", "area"))
@@ -554,9 +571,9 @@ def _parse_example(pixels, label, sample_id, mask_path, mask_tensor, *, cfg: Dic
             float(cfg["model"].get("mask_floor", 0.05)),
             cfg["data"].get("mask_region_permutation"),
         )
-    image, mask = _augment_pair(image, mask, sample_id, cfg["augmentation"], split)
+    image, mask = _augment_pair(image, mask, sample_id, cfg["augmentation"], split, is_minority=is_minority)
     image = _normalize_image(image, int(cfg["data"]["channels"]))
-    if split == "train":
+    if split == "train" and not bool(is_minority):
         image = _random_erasing(image, cfg["augmentation"])
     features = {"image": image}
     if mask is not None:
@@ -620,6 +637,84 @@ def _make_class_balanced_tensor_dataset(
         seed=int(cfg["seed"]["random_seed"]),
     ).take(len(labels_arr))
 
+_OVERSAMPLE_STATS: Optional[Dict[str, Any]] = None
+
+
+def get_oversample_stats() -> Optional[Dict[str, Any]]:
+    global _OVERSAMPLE_STATS
+    return _OVERSAMPLE_STATS
+
+
+def _make_minority_oversampled_dataset(
+    tensors: Dict[str, tf.Tensor],
+    records: SplitRecords,
+    cfg: Dict,
+    split: str,
+) -> tf.data.Dataset:
+    global _OVERSAMPLE_STATS
+    num_classes = int(cfg["data"].get("num_classes", len(EMOTION_NAMES)))
+    labels_arr = np.asarray(records.labels, dtype=np.int64)
+    counts = np.bincount(labels_arr, minlength=num_classes)[:num_classes]
+    target_minority_count = int(cfg["data"].get("target_minority_count", 1200))
+    seed = int(cfg["seed"].get("random_seed", 42))
+
+    oversampled_counts = np.zeros(num_classes, dtype=np.int64)
+    extra_indices_list = []
+
+    for c in range(num_classes):
+        if counts[c] < target_minority_count:
+            shortfall = target_minority_count - counts[c]
+            oversampled_counts[c] = shortfall
+            c_indices = np.flatnonzero(labels_arr == c)
+            if len(c_indices) > 0 and shortfall > 0:
+                rng = np.random.default_rng(seed + c * 37)
+                chosen = rng.choice(c_indices, size=shortfall, replace=True)
+                extra_indices_list.append(chosen)
+
+    effective_counts = counts + oversampled_counts
+    total_effective = int(effective_counts.sum())
+    distribution = (effective_counts / total_effective).round(4).tolist()
+
+    _OVERSAMPLE_STATS = {
+        "original_class_counts": counts.tolist(),
+        "effective_class_counts": effective_counts.tolist(),
+        "oversampled_counts": oversampled_counts.tolist(),
+        "effective_class_distribution": distribution,
+        "total_samples": total_effective,
+    }
+
+    print(
+        f"[INFO] Class-Aware Minority Oversampling enabled for {split}:\n"
+        f"  Original counts:    {counts.tolist()} (total={len(labels_arr)})\n"
+        f"  Oversampled counts: {oversampled_counts.tolist()} (extra={int(oversampled_counts.sum())})\n"
+        f"  Effective counts:   {effective_counts.tolist()} (total={total_effective})\n"
+        f"  Class distribution: {distribution}",
+        flush=True,
+    )
+
+    if extra_indices_list:
+        all_extra = np.concatenate(extra_indices_list, axis=0)
+        orig_minority_flag = np.array([counts[l] < target_minority_count for l in labels_arr], dtype=bool)
+        extra_minority_flag = np.ones(len(all_extra), dtype=bool)
+        full_is_minority = np.concatenate([orig_minority_flag, extra_minority_flag], axis=0)
+
+        combined_tensors = {}
+        for key, tensor in tensors.items():
+            orig_t = tensor
+            extra_t = tf.gather(tensor, all_extra)
+            combined_tensors[key] = tf.concat([orig_t, extra_t], axis=0)
+        combined_tensors["is_minority_aug"] = tf.convert_to_tensor(full_is_minority, dtype=tf.bool)
+    else:
+        combined_tensors = dict(tensors)
+        combined_tensors["is_minority_aug"] = tf.convert_to_tensor(
+            np.array([counts[l] < target_minority_count for l in labels_arr], dtype=bool), dtype=tf.bool
+        )
+
+    ds = tf.data.Dataset.from_tensor_slices(combined_tensors)
+    shuffle_buffer = int(cfg["data"].get("shuffle_buffer", max(4096, total_effective)))
+    return ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
+
+
 def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool, replicas: int) -> tf.data.Dataset:
     with tf.device("/CPU:0"):
         pixel_tensor = (
@@ -641,6 +736,12 @@ def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool
             tensors["teacher_logits"] = tf.convert_to_tensor(
                 load_teacher_logits(cfg, records, split), dtype=tf.float32)
     sampling_strategy = str(cfg["data"].get("sampling_strategy", "")).lower()
+    is_minority_oversample = training and sampling_strategy in {
+        "minority_oversample",
+        "class_aware_minority_oversample",
+        "v8_minority_oversample",
+        "class_aware_oversample",
+    }
     use_class_balanced = training and sampling_strategy in {
         "class_balanced",
         "class-balanced",
@@ -650,7 +751,9 @@ def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool
         "sqrt",
         "power",
     }
-    if use_class_balanced:
+    if is_minority_oversample:
+        ds = _make_minority_oversampled_dataset(tensors, records, cfg, split)
+    elif use_class_balanced:
         ds = _make_class_balanced_tensor_dataset(tensors, records.labels, cfg, split)
     else:
         ds = _make_tensor_dataset(tensors)
@@ -673,6 +776,7 @@ def make_dataset(records: SplitRecords, cfg: Dict, *, split: str, training: bool
             item["masks"] if "masks" in item else None,
             cfg=cfg,
             split=split,
+            is_minority=item.get("is_minority_aug", False),
         )
         if "teacher_logits" in item:
             features["teacher_logits"] = item["teacher_logits"]
