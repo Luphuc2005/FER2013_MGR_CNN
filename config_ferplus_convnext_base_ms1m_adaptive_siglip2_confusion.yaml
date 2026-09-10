@@ -5,7 +5,7 @@ source:
   note: "FERPlus official 8-class majority protocol with ConvNeXt-Base MS1M, Adaptive Multi-Granularity SigLIP2 Semantic Alignment, and Confusion-Aware Hard Semantic Separation."
 
 runtime:
-  gpu_ids: [0, 1]
+  gpu_ids: [0]
   batch_size_per_gpu: 64
   fallback_batch_size_per_gpu: 64
   require_two_gpus: false
