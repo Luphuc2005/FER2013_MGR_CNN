@@ -1061,14 +1061,23 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             ep = int(self.granularity_gate_epoch.numpy())
         except Exception:
             return 1.0
-        if ep <= 4:
-            return 2.0
-        elif ep <= 10:
-            return 2.0
-        elif ep <= 20:
-            return 1.5
-        else:
-            return 1.0
+        if getattr(self, "granularity_gate_step_schedule", False):
+            if ep <= 10:
+                return 2.0
+            elif ep <= 20:
+                return 1.5
+            else:
+                return float(getattr(self, "granularity_gate_end_temperature", 1.0))
+        u_ep = getattr(self, "granularity_gate_uniform_epochs", 4)
+        t_end = getattr(self, "granularity_gate_transition_end_epoch", 12)
+        t_start = getattr(self, "granularity_gate_start_temperature", 2.0)
+        t_end_val = getattr(self, "granularity_gate_end_temperature", 1.0)
+        if ep <= u_ep:
+            return float(t_start)
+        if ep >= t_end:
+            return float(t_end_val)
+        beta = float(ep - u_ep) / float(max(t_end - u_ep, 1))
+        return float(t_start + beta * (t_end_val - t_start))
 
     def _granularity_gate_weights(self, pooled: tf.Tensor, training=False) -> tf.Tensor:
         """Return five prototype weights while preserving V5 when scheduling is off."""
@@ -1139,7 +1148,7 @@ class ConvNeXtBaseFaceFERBaseline(tf.keras.Model):
             lambda: tf.cond(
                 epoch < transition_end_epoch,
                 _transition,
-                lambda: _adaptive(tf.constant(1.0, tf.float32)),
+                lambda: _adaptive(tf.constant(self.granularity_gate_end_temperature, tf.float32)),
             ),
         )
 

@@ -20,7 +20,7 @@ runtime:
   prefetch_buffer: 2
   distributed_eval: false
   eval_tta_hflip: true
-  train_val_tta_hflip: true
+  train_val_tta_hflip: false
 
 tta:
   enabled: true
@@ -47,7 +47,7 @@ data:
 
 augmentation:
   horizontal_flip: true
-  rotation_degrees: 15.0
+  rotation_degrees: 10.0
   brightness_delta: 0.15
   contrast_lower: 0.85
   contrast_upper: 1.15
@@ -67,7 +67,7 @@ model:
   convnext_base_require_pretrained: true
   checkpoint_path: null
   checkpoint_strict: false
-  drop_path_rate: 0.25
+  drop_path_rate: 0.30
   layer_scale_init_value: 0.000001
   embed_dim: 512
   num_regions: 6
@@ -94,9 +94,9 @@ model:
   granularity_gate_schedule:
     enabled: true
     uniform_epochs: 4
-    transition_end_epoch: 12
+    transition_end_epoch: 15
     start_temperature: 2.5
-    end_temperature: 1.0
+    end_temperature: 1.6
 
   use_semantic_branch: true
   use_clip_semantic: true
@@ -171,7 +171,7 @@ training:
   sam_adaptive: false
   lr: 0.00028
   finetune_lr: 0.00028
-  visual_extractor_lr: 0.000008
+  visual_extractor_lr: 0.000005
   weight_decay: 0.05
   scheduler: "cosine"
   grad_clip_norm: 1.0
@@ -183,7 +183,13 @@ training:
   periodic_checkpoint_interval: 10
   progress_interval: 100
   lambda_sem_schedule:
-    enabled: false
+    enabled: true
+    start_epoch: 12
+    end_epoch: 28
+    start_value: 0.08
+    end_value: 0.01
+    before_value: 0.08
+    after_value: 0.01
 
 paths:
   output_dir: "outputs/papers/rafdb_v9_rdrop_sota_93"

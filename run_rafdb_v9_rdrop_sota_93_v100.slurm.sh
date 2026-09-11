@@ -36,7 +36,7 @@ nvidia-smi
 echo "Config=$CONFIG Output=$OUTPUT_DIR Job=${SLURM_JOB_ID:-standalone}"
 echo 'V9 + R-Drop SOTA 93%: Direct 1024-dim Fusion + Adaptive Semantic Gate + R-Drop (lambda=0.5)'
 echo 'Natural split (11,043 train / 1,228 val); SAM (rho=0.02) + AdamW; backbone unfreezes at epoch 5.'
-echo 'Selection via val_accuracy (HFlip50 TTA). Target single-model test accuracy >= 93%.'
+echo 'Selection via val_accuracy (No-TTA). Target single-model test accuracy >= 93%.'
 
 "$FER_PY" -u scripts/smoketest_rafdb_pipeline.py "$CONFIG"
 if [[ "${SMOKE_ONLY:-0}" == "1" ]]; then
