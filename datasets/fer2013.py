@@ -699,6 +699,7 @@ def _make_minority_oversampled_dataset(
     labels_arr = np.asarray(records.labels, dtype=np.int64)
     counts = np.bincount(labels_arr, minlength=num_classes)[:num_classes]
     target_minority_count = int(cfg["data"].get("target_minority_count", 650))
+    target_counts_map = cfg["data"].get("target_minority_counts", None)
     minority_classes = cfg["data"].get("minority_classes", None)
     if minority_classes is not None:
         minority_classes = set(int(c) for c in minority_classes)
@@ -710,8 +711,14 @@ def _make_minority_oversampled_dataset(
     for c in range(num_classes):
         if minority_classes is not None and c not in minority_classes:
             continue
-        if counts[c] < target_minority_count:
-            shortfall = target_minority_count - counts[c]
+        target_c = target_minority_count
+        if target_counts_map is not None:
+            if c in target_counts_map:
+                target_c = int(target_counts_map[c])
+            elif str(c) in target_counts_map:
+                target_c = int(target_counts_map[str(c)])
+        if counts[c] < target_c:
+            shortfall = target_c - counts[c]
             oversampled_counts[c] = shortfall
             c_indices = np.flatnonzero(labels_arr == c)
             if len(c_indices) > 0 and shortfall > 0:
