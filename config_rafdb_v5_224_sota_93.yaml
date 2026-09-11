@@ -5,11 +5,11 @@ source:
   note: "RAF-DB V5 224x224 SOTA 93%: Native 224x224 Resolution + Stage 3 Dynamic Part Attention + Stage 4 Adaptive Semantic Logit Fusion Gate alpha(x) <= 0.10 + Anti-Collapse Gate Floor (T_end=1.6) + Late-Stage Semantic Decay (0.08 -> 0.01) + Tamer Backbone LR (5e-6) + DropPath 0.30 + Mild Fear Oversampling (253 -> 500) + SAM (rho=0.02) + No-TTA Validation + Validation-Tuned TTA Sweep."
 
 runtime:
-  gpu_ids: [0]
-  batch_size_per_gpu: 8
-  fallback_batch_size_per_gpu: 4
-  require_two_gpus: false
-  min_gpus: 1
+  gpu_ids: [0, 1]
+  batch_size_per_gpu: 12
+  fallback_batch_size_per_gpu: 6
+  require_two_gpus: true
+  min_gpus: 2
   memory_growth: true
   use_mixed_precision: true
   intra_op_threads: 16
@@ -180,9 +180,9 @@ training:
   base_optimizer: "adamw"
   sam_rho: 0.02
   sam_adaptive: false
-  lr: 0.00020
-  finetune_lr: 0.00020
-  visual_extractor_lr: 0.000004
+  lr: 0.00030
+  finetune_lr: 0.00030
+  visual_extractor_lr: 0.000005
   weight_decay: 0.05
   scheduler: "cosine"
   grad_clip_norm: 1.0

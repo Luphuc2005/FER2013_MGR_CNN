@@ -3,9 +3,9 @@
 #SBATCH --partition=gpu-queue
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
-#SBATCH --gres=gpu:v100:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --gres=gpu:v100:2
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=96G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/RAFDB_V5_224_%j.out
 #SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/RAFDB_V5_224_%j.err
 set -euo pipefail
