@@ -21,7 +21,7 @@ import tensorflow as tf
 
 from config import load_config
 from datasets.fer2013 import build_datasets, collect_split_records
-from train import build_model, compute_loss, evaluate_dataset
+from train import build_model, compute_loss, configure_tensorflow_runtime, evaluate_dataset
 from utils.semantic_schedule import resolve_lambda_sem
 
 def main():
@@ -34,6 +34,7 @@ def main():
     print("=" * 60)
     
     cfg = load_config(config_file)
+    configure_tensorflow_runtime(cfg)
     data_dir = Path(cfg["data"]["data_path"])
     print(f"[1/5] Checking RAF-DB dataset directory: {data_dir}")
     if not data_dir.exists():
