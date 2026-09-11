@@ -21,12 +21,16 @@ class LegacyAdamW(AdamW):
     pass
 
 
+class SGD(Adam):
+    pass
+
+
 def factory(native=True, experimental=False):
     # Compile the actual function from train.py without importing its TF models.
     tree = ast.parse((ROOT / "train.py").read_text(encoding="utf-8"))
     function = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                     and n.name == "build_optimizer")
-    optimizers = SimpleNamespace(Adam=Adam)
+    optimizers = SimpleNamespace(Adam=Adam, SGD=SGD)
     if native:
         optimizers.AdamW = AdamW
     if experimental:
@@ -48,6 +52,13 @@ class OptimizerTest(unittest.TestCase):
         self.assertNotIn("weight_decay", optimizer.kwargs)
         self.assertEqual(optimizer.kwargs["learning_rate"], .0003)
 
+    def test_actual_sgd_dispatch(self):
+        optimizer = factory()({"training": {"base_optimizer": "sgd", "weight_decay": 0.0001, "sgd_momentum": 0.9, "sgd_nesterov": True}}, .01)
+        self.assertIs(type(optimizer), SGD)
+        self.assertEqual(optimizer.kwargs["learning_rate"], .01)
+        self.assertEqual(optimizer.kwargs["momentum"], 0.9)
+        self.assertTrue(optimizer.kwargs["nesterov"])
+
     def test_adamw_paths_and_lr(self):
         for native, experimental, cls in ((True, False, AdamW),
                                           (False, True, AdamW), (False, False, LegacyAdamW)):
@@ -58,7 +69,7 @@ class OptimizerTest(unittest.TestCase):
             self.assertEqual(optimizer.kwargs["learning_rate"], .00001)
 
     def test_invalid_settings_rejected(self):
-        for training in ({"base_optimizer": "sgd"}, {"weight_decay": -1},
+        for training in ({"base_optimizer": "rmsprop"}, {"weight_decay": -1},
                          {"weight_decay": float("nan")}, {"weight_decay": float("inf")},
                          {"base_optimizer": "adam", "weight_decay": .05}):
             with self.subTest(training=training), self.assertRaises(ValueError):

@@ -197,6 +197,35 @@ def build_optimizer(cfg: Dict, learning_rate: float):
             optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate, jit_compile=False)
         except (TypeError, ValueError):
             optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    elif name == "sgd":
+        momentum = float(cfg["training"].get("sgd_momentum", 0.9))
+        nesterov = bool(cfg["training"].get("sgd_nesterov", True))
+        try:
+            if weight_decay > 0:
+                optimizer = tf.keras.optimizers.SGD(
+                    learning_rate=learning_rate, momentum=momentum, nesterov=nesterov,
+                    weight_decay=weight_decay, jit_compile=False
+                )
+            else:
+                optimizer = tf.keras.optimizers.SGD(
+                    learning_rate=learning_rate, momentum=momentum, nesterov=nesterov,
+                    jit_compile=False
+                )
+        except (TypeError, ValueError):
+            try:
+                if weight_decay > 0:
+                    optimizer = tf.keras.optimizers.SGD(
+                        learning_rate=learning_rate, momentum=momentum, nesterov=nesterov,
+                        weight_decay=weight_decay
+                    )
+                else:
+                    optimizer = tf.keras.optimizers.SGD(
+                        learning_rate=learning_rate, momentum=momentum, nesterov=nesterov
+                    )
+            except (TypeError, ValueError):
+                optimizer = tf.keras.optimizers.SGD(
+                    learning_rate=learning_rate, momentum=momentum, nesterov=nesterov
+                )
     else:
         adamw = getattr(tf.keras.optimizers, "AdamW", None)
         if adamw is None:
