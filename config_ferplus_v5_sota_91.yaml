@@ -1,0 +1,245 @@
+seed:
+  random_seed: 42
+
+source:
+  note: "FERPlus V5 SOTA (Target >= 91.0%): Triple Minority Class-Aware Augmented Oversampling (Contempt 800, Disgust 800, Fear 1000) + Direct 1024-dim ArcFace Feature Head (use_global_regional_fusion=false) + Stage 3 Dynamic Part Attention + Stage 4 Adaptive Semantic Logit Fusion Gate (alpha<=0.20) + Non-Decaying Semantic Supervision (0.10 -> 0.15) + Targeted Hard Pairs for Sad/Neutral (84 errors), Fear/Surprise (36 errors), Contempt/Neutral + R-Drop Consistency Regularization (lambda_rdrop=0.30) + SAM (rho=0.02)."
+
+runtime:
+  gpu_ids: [0]
+  batch_size_per_gpu: 64
+  fallback_batch_size_per_gpu: 64
+  require_two_gpus: false
+  min_gpus: 1
+  allow_cpu_fallback: false
+  memory_growth: true
+  use_mixed_precision: true
+  intra_op_threads: 16
+  inter_op_threads: 4
+  tf_data_num_parallel_calls: 0  # 0 = tf.data.AUTOTUNE for dynamic CPU multi-core scaling
+  tf_data_private_threadpool_size: 16  # Dedicated threadpool matching 16 CPU cores
+  tf_data_deterministic: false
+  prefetch_buffer: 0  # 0 = tf.data.AUTOTUNE for seamless CPU-GPU pipelining
+  distributed_eval: false
+  eval_tta_hflip: true
+  train_val_tta_hflip: false
+
+tta:
+  enabled: true
+  hflip: true
+  original_weight: 0.50
+  flip_weight: 0.50
+
+data:
+  dataset_type: "ferplus_majority8"
+  data_path: "/home/ptbao/projects/FER2013_MGR_CNN/data/ferplus_official"
+  train_csv: "/home/ptbao/projects/FER2013_MGR_CNN/data/ferplus_official/train_majority8.csv"
+  val_csv: "/home/ptbao/projects/FER2013_MGR_CNN/data/ferplus_official/val_majority8.csv"
+  test_csv: "/home/ptbao/projects/FER2013_MGR_CNN/data/ferplus_official/test_majority8.csv"
+  image_root: "/home/ptbao/projects/FER2013_MGR_CNN/data/ferplus_official"
+  mask_dir: null
+  num_classes: 8
+  class_names:
+    - "Angry"
+    - "Disgust"
+    - "Fear"
+    - "Happy"
+    - "Sad"
+    - "Surprise"
+    - "Neutral"
+    - "Contempt"
+  expected_samples:
+    train: 25045
+    val: 3191
+    test: 3137
+  image_size: 112
+  channels: 3
+  normalize: true
+  predecode_pixels: false
+  preload_masks: false
+  allow_missing_masks: true
+  use_clean_filter: false
+  bad_row_indices_path: null
+  mask_ablation: "none"
+  shuffle_buffer: 26873
+  cache: true  # Cache val/test in RAM to eliminate disk I/O on evaluation
+
+  # Triple Minority Class-Aware Augmented Oversampling:
+  # Class 1 (Disgust):  116 -> 800 (+684 augmented samples)
+  # Class 2 (Fear):     536 -> 1000 (+464 augmented samples)
+  # Class 7 (Contempt): 120 -> 800 (+680 augmented samples)
+  # Total effective train size: 25045 + 1828 = 26873
+  sampling_strategy: "class_aware_minority_oversample"
+  minority_classes: [1, 2, 7]
+  target_minority_count: 800
+  target_minority_counts:
+    1: 800
+    2: 1000
+    7: 800
+  minority_aug:
+    flip_prob: 0.50
+    rotation_range: 10.0
+    translation_fraction: 0.04
+    scale_lower: 0.92
+    scale_upper: 1.08
+    brightness_delta: 0.18
+    contrast_lower: 0.85
+    contrast_upper: 1.15
+
+augmentation:
+  horizontal_flip: true
+  rotation_degrees: 15.0
+  brightness_delta: 0.15
+  contrast_lower: 0.85
+  contrast_upper: 1.15
+  gamma_prob: 0.5
+  gamma_min: 0.5
+  gamma_max: 2.0
+  random_erasing_prob: 0.40
+  random_erasing_area_min: 0.02
+  random_erasing_area_max: 0.15
+  random_erasing_value: "random"
+
+model:
+  name: "ferplus_v5_sota_91"
+  arch: "convnext_base_ms1m_arcface"
+  pretrained: true
+  convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
+  convnext_base_require_pretrained: true
+  checkpoint_path: null
+  checkpoint_strict: false
+  drop_path_rate: 0.25
+  layer_scale_init_value: 0.000001
+  embed_dim: 512
+  num_regions: 6
+  num_heads: 4
+
+  # Direct 1024-dim ArcFace Feature Head (Preserves full geometric identity without compression)
+  use_global_regional_fusion: false
+  use_dynamic_part_attention: true
+  dynamic_part_bottleneck: 128
+  use_soft_regional_pooling: false
+  use_multistage_adaptive_fusion: false
+  use_eca: false
+  use_stage3_eca: false
+  use_au_region_routed: true
+
+  # Stage 4 Adaptive Semantic Logit Fusion Gate alpha(x)
+  use_adaptive_fusion_gate: true
+  adaptive_fusion_max_alpha: 0.20
+  semantic_fusion_alpha: 0.0
+  semantic_fusion_training: false
+
+  # Sample-Adaptive Multi-Granularity SigLIP2 Semantics with Gate Temperature Floor
+  use_adaptive_granularity: true
+  granularity_gate_schedule:
+    enabled: true
+    uniform_epochs: 4
+    transition_end_epoch: 15
+    start_temperature: 2.5
+    end_temperature: 1.6
+
+  use_semantic_branch: true
+  use_clip_semantic: true
+  multi_prototype: true
+  ablation: "adaptive_clip_confusion"
+  lambda_local_sem: 0.02
+  lambda_sem: 0.10
+
+  # Targeted Hard Semantic Loss: specifically resolves the 84 Sad->Neutral, 36 Fear<->Surprise, and 7 Contempt->Neutral errors
+  use_hard_semantic_loss: true
+  lambda_hard: 0.12
+  hard_margin: 0.18
+  hard_pairs:
+    0: [4, 1]      # Angry -> Sad, Disgust
+    1: [4, 6, 0]   # Disgust -> Sad, Neutral, Angry
+    2: [5, 4]      # Fear -> Surprise, Sad
+    3: [7, 6]      # Happy -> Contempt, Neutral
+    4: [6, 0, 1]   # Sad -> Neutral, Angry, Disgust (Resolves 84 Sad->Neutral misclassifications)
+    5: [2]         # Surprise -> Fear (Resolves 21 Surprise->Fear misclassifications)
+    6: [4, 7]      # Neutral -> Sad, Contempt (Resolves 31 Neutral->Sad misclassifications)
+    7: [6, 4]      # Contempt -> Neutral, Sad (Resolves 7 Contempt->Neutral misclassifications)
+
+  clip_model_name: "google/siglip2-base-patch16-224"
+  clip_embedding_dim: 768
+  clip_prototypes_path: "pretrained/siglip2_text_prototypes_8emotions_ferplus_multigranularity_multi5.npy"
+  semantic_logit_scale: 20.0
+
+  clip_semantic:
+    enabled: true
+    multi_prototype: true
+    num_prototypes_per_class: 5
+    use_au_region_routed: true
+    clip_model_name: "google/siglip2-base-patch16-224"
+    clip_embedding_dim: 768
+    clip_prototypes_path: "pretrained/siglip2_text_prototypes_8emotions_ferplus_multigranularity_multi5.npy"
+    semantic_logit_scale: 20.0
+    lambda_sem: 0.10
+    lambda_hard: 0.12
+    hard_margin: 0.18
+
+  semantic_projector_dropout: 0.10
+  classifier_dropout1: 0.40
+  classifier_dropout2: 0.0
+  ortho_loss_weight: 0.0
+
+  use_cnn_aux_loss: false
+  use_cnn_aux_logits: false
+  cnn_aux_loss_weight: 0.0
+
+  attention_logit_weight: 1.0
+  cnn_aux_logit_weight: 0.0
+  logit_fusion: "single_head"
+  finetune_logit_fusion: "single_head"
+
+  # Clean unfreeze at Epoch 5
+  freeze_backbone_epochs: 4
+  unfreeze_backbone: true
+  freeze_unfrozen_batchnorm: true
+  progressive_unfreeze:
+    enabled: false
+
+stage_transition:
+  enable_2stage_switching: false
+
+training:
+  # CẢI TIẾN QUYẾT ĐỊNH: R-Drop consistency regularization prevents the 98.12% train overfit observed in Job 6780
+  lambda_rdrop: 0.30
+  epochs: 45
+  patience: 18
+  warmup_epochs: 5
+  loss: "cross_entropy"
+  label_smoothing: 0.10
+  logit_adjustment:
+    enabled: false
+  optimizer: "sam"
+  base_optimizer: "adamw"
+  sam_rho: 0.02
+  sam_adaptive: false
+  lr: 0.00028
+  finetune_lr: 0.00028
+  visual_extractor_lr: 0.000008
+  weight_decay: 0.04
+  scheduler: "cosine"
+  grad_clip_norm: 1.0
+  skip_nonfinite_batches: true
+  monitor: "val_accuracy"
+  save_best_macro_f1: true
+  resume: false
+  best_checkpoint_start_epoch: 1
+  periodic_checkpoint_interval: 10
+  progress_interval: 100
+
+  # NO SEMANTIC DECAY! Keep semantic supervision active and slightly ascending (0.10 -> 0.15) like V5 Champion
+  lambda_sem_schedule:
+    enabled: true
+    start_epoch: 5
+    end_epoch: 12
+    start_value: 0.10
+    end_value: 0.15
+    before_value: 0.10
+    after_value: 0.15
+
+paths:
+  output_dir: "outputs/papers/ferplus_v5_sota_91"
+  logs_dir: "logs"
+  auto_increment: false
