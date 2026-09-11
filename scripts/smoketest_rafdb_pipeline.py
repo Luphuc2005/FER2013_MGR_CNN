@@ -156,17 +156,19 @@ def main():
             break
         assert batch_feat is not None, "[FAIL] train_ds returned no batches!"
         expected_bs = int(cfg["runtime"]["batch_size_per_gpu"])
+        expected_img_size = int(cfg["data"].get("image_size", 112))
         batch_images = batch_feat["image"]
         print(f"[3/5] Batch Parsing Verification:")
-        print(f"      - Batch image shape: {batch_images.shape} (Expected: [{expected_bs}, 112, 112, 3])")
+        print(f"      - Batch image shape: {batch_images.shape} (Expected: [{expected_bs}, {expected_img_size}, {expected_img_size}, 3])")
         print(f"      - Batch label shape: {batch_labels.shape} (Expected: [{expected_bs}])")
         print(f"      - Batch label values: {batch_labels.numpy()[:8]}")
-        assert batch_images.shape == (expected_bs, 112, 112, 3), f"Invalid batch image shape {batch_images.shape}"
+        assert batch_images.shape == (expected_bs, expected_img_size, expected_img_size, 3), f"Invalid batch image shape {batch_images.shape}"
         assert batch_labels.shape == (expected_bs,), f"Invalid batch label shape {batch_labels.shape}"
     else:
         print("[2/5] Skipping live RAF-DB CSV reading (Directory not found on local machine, will run on server).")
         expected_bs = int(cfg["runtime"]["batch_size_per_gpu"])
-        batch_images = tf.random.normal([expected_bs, 112, 112, 3])
+        expected_img_size = int(cfg["data"].get("image_size", 112))
+        batch_images = tf.random.normal([expected_bs, expected_img_size, expected_img_size, 3])
         batch_labels = tf.random.uniform([expected_bs], minval=0, maxval=7, dtype=tf.int32)
         batch_feat = {"image": batch_images}
         
