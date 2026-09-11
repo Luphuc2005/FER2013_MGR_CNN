@@ -1363,8 +1363,19 @@ def main() -> int:
             max_to_keep=5,
         )
         if (args.resume or cfg["training"].get("resume", True)) and last_manager.latest_checkpoint:
-            checkpoint.restore(last_manager.latest_checkpoint).expect_partial()
-            print(f"Resumed from {last_manager.latest_checkpoint}")
+            try:
+                checkpoint.restore(last_manager.latest_checkpoint).expect_partial()
+                print(f"Resumed from {last_manager.latest_checkpoint}")
+            except Exception as e:
+                print(f"[WARN] Full checkpoint restore with optimizer failed: {e}")
+                print("[INFO] Fallback: Restoring model weights, epoch, and metric without optimizer states (switching optimizers)...", flush=True)
+                model_only_checkpoint = tf.train.Checkpoint(
+                    epoch=ckpt_epoch,
+                    best_metric=ckpt_best_metric,
+                    model=model,
+                )
+                model_only_checkpoint.restore(last_manager.latest_checkpoint).expect_partial()
+                print(f"Resumed model weights and epoch from {last_manager.latest_checkpoint} (optimizer initialized fresh for new configuration)")
 
     first_outputs = model(first_inputs, training=False)
     first_loss, _ = supervised_mgr_loss(
