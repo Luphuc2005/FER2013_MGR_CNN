@@ -33,14 +33,18 @@ def extract_dataset_logits(model, dataset):
             inputs, labels = batch, batch["label"]
 
         outputs_orig = model(inputs, training=False)
-        logits_orig = outputs_orig["logits"].numpy()
+        logits_orig = outputs_orig["logits"].numpy().astype(np.float32)
 
-        flipped_inputs = dict(inputs)
-        flipped_inputs["image"] = tf.image.flip_left_right(inputs["image"])
-        if "mask" in inputs:
-            flipped_inputs["mask"] = tf.image.flip_left_right(inputs["mask"])
+        if isinstance(inputs, dict):
+            flipped_inputs = dict(inputs)
+            flipped_inputs["image"] = tf.image.flip_left_right(inputs["image"])
+            if "mask" in inputs and inputs["mask"] is not None:
+                flipped_inputs["mask"] = tf.image.flip_left_right(inputs["mask"])
+        else:
+            flipped_inputs = tf.image.flip_left_right(inputs)
+
         outputs_flip = model(flipped_inputs, training=False)
-        logits_flip = outputs_flip["logits"].numpy()
+        logits_flip = outputs_flip["logits"].numpy().astype(np.float32)
 
         all_logits_orig.append(logits_orig)
         all_logits_flip.append(logits_flip)
@@ -128,18 +132,33 @@ def main() -> int:
             checkpoint_path = p
         else:
             checkpoint_root = Path(cfg["paths"]["output_dir"]) / "checkpoints"
-            # Try to get latest modified checkpoint in checkpoints/best/ first
             best_dir = checkpoint_root / "best"
-            best_ckpts = sorted(best_dir.glob("ckpt-*.index"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if best_ckpts:
-                checkpoint_path = str(best_ckpts[0])[:-6]
-            else:
-                max_to_keep_acc = int(cfg["training"].get("max_to_keep_acc", 5))
-                max_to_keep_loss = int(cfg["training"].get("max_to_keep_loss", 5))
-                best_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "best"), max_to_keep=max_to_keep_acc)
-                best_loss_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "best_loss"), max_to_keep=max_to_keep_loss)
-                last_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "last"), max_to_keep=1)
-                checkpoint_path = best_manager.latest_checkpoint or best_loss_manager.latest_checkpoint or last_manager.latest_checkpoint
+            rankings_file = best_dir / "top_k_rankings.json"
+            checkpoint_path = None
+            if rankings_file.exists():
+                try:
+                    with rankings_file.open("r", encoding="utf-8") as rf:
+                        data = json.load(rf)
+                    entries = data.get("entries", [])
+                    if entries:
+                        ckpt_name = entries[0]["checkpoint"]
+                        candidate = str(best_dir / ckpt_name)
+                        if Path(candidate + ".index").exists():
+                            checkpoint_path = candidate
+                            print(f"[INFO] Using Rank 1 checkpoint from top_k_rankings.json: {checkpoint_path} (metric={entries[0].get('metric')})")
+                except Exception as e:
+                    print(f"[WARN] Failed to parse top_k_rankings.json: {e}")
+            if not checkpoint_path:
+                best_ckpts = sorted(best_dir.glob("ckpt-*.index"), key=lambda p: p.stat().st_mtime, reverse=True)
+                if best_ckpts:
+                    checkpoint_path = str(best_ckpts[0])[:-6]
+                else:
+                    max_to_keep_acc = int(cfg["training"].get("max_to_keep_acc", 5))
+                    max_to_keep_loss = int(cfg["training"].get("max_to_keep_loss", 5))
+                    best_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "best"), max_to_keep=max_to_keep_acc)
+                    best_loss_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "best_loss"), max_to_keep=max_to_keep_loss)
+                    last_manager = tf.train.CheckpointManager(checkpoint, directory=str(checkpoint_root / "last"), max_to_keep=1)
+                    checkpoint_path = best_manager.latest_checkpoint or best_loss_manager.latest_checkpoint or last_manager.latest_checkpoint
         if not checkpoint_path:
             raise FileNotFoundError(f"No checkpoint found in {cfg['paths']['output_dir']}")
         status = checkpoint.restore(checkpoint_path).expect_partial()

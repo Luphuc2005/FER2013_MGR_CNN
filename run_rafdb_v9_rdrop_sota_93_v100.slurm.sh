@@ -53,3 +53,9 @@ fi
 "$FER_PY" -u train.py --config "$CONFIG" --no-auto-increment
 echo "V9_RDROP_TRAIN_COMPLETE: $OUTPUT_DIR"
 echo 'Primary report: test_metrics_tta_hflip.json. Secondary: test_metrics_no_tta.json.'
+
+echo "======================================================================"
+echo "Step: Running Validation-Tuned TTA Weight Sweep (Val -> Test)..."
+echo "======================================================================"
+"$FER_PY" -u sweep_tta_weights.py --config "$CONFIG" --step 0.05
+echo "SWEEP_TTA_COMPLETE: Results saved to $OUTPUT_DIR/tta_sweep_results.json"
