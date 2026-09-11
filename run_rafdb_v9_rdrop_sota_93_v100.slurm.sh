@@ -59,3 +59,25 @@ echo "Step: Running Validation-Tuned TTA Weight Sweep (Val -> Test)..."
 echo "======================================================================"
 "$FER_PY" -u sweep_tta_weights.py --config "$CONFIG" --step 0.05
 echo "SWEEP_TTA_COMPLETE: Results saved to $OUTPUT_DIR/tta_sweep_results.json"
+
+echo ""
+echo "======================================================================"
+echo "                     FINAL ALL-IN-ONE SUMMARY                         "
+echo "======================================================================"
+"$FER_PY" -c '
+import json, sys
+from pathlib import Path
+out_dir = Path("'"$OUTPUT_DIR"'")
+sweep_file = out_dir / "tta_sweep_results.json"
+if sweep_file.exists():
+    with sweep_file.open("r", encoding="utf-8") as f:
+        d = json.load(f)
+    print(f"  Validation Optimal w_orig: {d[\"val_optimal\"][\"w_orig\"]:.2f} (w_flip: {d[\"val_optimal\"][\"w_flip\"]:.2f})")
+    print(f"  Validation Peak Accuracy:  {d[\"val_optimal\"][\"accuracy\"]*100:.2f}%")
+    print(f"  Test Accuracy (No-TTA):    {d[\"test_no_tta\"][\"accuracy\"]*100:.2f}%")
+    print(f"  Test Accuracy (Val-Tuned): {d[\"test_val_tuned\"][\"accuracy\"]*100:.2f}%")
+    print(f"  Test Macro F1:             {d[\"test_val_tuned\"][\"macro_f1\"]:.4f}")
+    print(f"  TTA Improvement Gain:      {d[\"test_tta_gain_pct\"]:+.2f}%")
+' || true
+echo "======================================================================"
+echo "ALL STEPS COMPLETED SUCCESSFULLY: $OUTPUT_DIR"
