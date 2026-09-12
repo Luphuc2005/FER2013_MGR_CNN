@@ -20,7 +20,7 @@ runtime:
   prefetch_buffer: 4
   distributed_eval: false
   eval_tta_hflip: true
-  train_val_tta_hflip: true
+  train_val_tta_hflip: false
 
 tta:
   enabled: true
