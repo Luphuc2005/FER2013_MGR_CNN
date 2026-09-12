@@ -12,10 +12,10 @@ runtime:
   min_gpus: 1
   memory_growth: true
   use_mixed_precision: true
-  intra_op_threads: 32
+  intra_op_threads: 16
   inter_op_threads: 4
-  tf_data_num_parallel_calls: 16
-  tf_data_private_threadpool_size: 16
+  tf_data_num_parallel_calls: 8
+  tf_data_private_threadpool_size: 8
   tf_data_deterministic: false
   prefetch_buffer: 4
   distributed_eval: false
