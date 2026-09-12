@@ -1447,11 +1447,12 @@ def main() -> int:
         or bool(cfg["training"].get("save_best_macro_f1", False))
     )
     if _create_macro_mgr:
+        max_to_keep_macro = int(cfg["training"].get("max_to_keep_macro", 5))
         macro_manager = RankedCheckpointManager(
             checkpoint=checkpoint, directory=checkpoint_root / "best_macro_f1",
-            max_to_keep=1, metric_name="val_macro_f1", mode="max", history_csv=csv_path,
+            max_to_keep=max_to_keep_macro, metric_name="val_macro_f1", mode="max", history_csv=csv_path,
         )
-        print("[CHECKPOINT] Best Macro-F1 checkpoint manager enabled", flush=True)
+        print(f"[CHECKPOINT] Best Macro-F1 checkpoint manager enabled (max_to_keep={max_to_keep_macro})", flush=True)
     progress_interval = int(cfg["training"].get("progress_interval", 0) or 0)
     periodic_interval = int(cfg["training"].get("periodic_checkpoint_interval", 10) or 0)
     eval_strategy = strategy if bool(cfg["runtime"].get("distributed_eval", False)) else None
@@ -1739,8 +1740,6 @@ def main() -> int:
                         epoch=epoch + 1, metric=float(val_metrics["macro_f1"]),
                         metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
                     )
-                    if macro_decision["saved"]:
-                        print(f"[BEST_MACRO_F1] Saved ckpt-{epoch+1}: val_macro_f1={val_metrics['macro_f1']:.8f}", flush=True)
                 acc_decision = best_manager.consider(
                     epoch=epoch + 1,
                     metric=val_acc_val,
@@ -1751,10 +1750,13 @@ def main() -> int:
                     metric=val_loss_val,
                     metrics={"val_accuracy": val_acc_val, "val_loss": val_loss_val},
                 )
-                for label, metric_value, decision in (
+                decision_candidates = [
                     ("TOP5_ACC", val_acc_val, acc_decision),
                     ("TOP5_LOSS", val_loss_val, loss_decision),
-                ):
+                ]
+                if macro_manager is not None:
+                    decision_candidates.append(("TOP5_MACRO_F1", float(val_metrics["macro_f1"]), macro_decision))
+                for label, metric_value, decision in decision_candidates:
                     if decision["saved"]:
                         removed = decision.get("removed")
                         removed_text = (

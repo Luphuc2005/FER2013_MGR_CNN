@@ -1,8 +1,8 @@
 seed:
-  random_seed: 42
+  random_seed: 123
 
 source:
-  note: "ConvNeXt-Base MS1M with Adaptive Multi-Granularity SigLIP2 Semantic Alignment + Confusion-Aware Hard Semantic Separation."
+  note: "ConvNeXt-Base MS1M with Adaptive Multi-Granularity SigLIP2 Semantic Alignment + Confusion-Aware Hard Semantic Separation (Seed 123, 1-GPU BS16, Full TTA, Top-5 Ensemble)."
 
 runtime:
   gpu_ids: [0]
@@ -59,7 +59,7 @@ augmentation:
   random_erasing_value: "random"
 
 model:
-  name: "convnext_base_ms1m_adaptive_siglip2_confusion"
+  name: "convnext_base_ms1m_adaptive_siglip2_confusion_seed123"
   arch: "convnext_base_ms1m_arcface"
   pretrained: true
   convnext_base_pretrained_path: "pretrained/convnext_base_ms1m_arcface.pth"
@@ -154,5 +154,5 @@ training:
   progress_interval: 100
 
 paths:
-  output_dir: "outputs/papers/siglip2-confusion"
+  output_dir: "outputs/papers/siglip2-confusion-seed123"
   logs_dir: "logs"
