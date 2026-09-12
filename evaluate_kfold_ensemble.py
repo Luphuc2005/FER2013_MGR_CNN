@@ -179,17 +179,15 @@ def main():
         ckpt_prefix = find_best_checkpoint(fold_out)
 
         # Build model and restore
-        model, _ = build_model(cfg)
-        _ = model(tf.zeros((1, 112, 112, 3)), training=False)
+        model = build_model(cfg)
+        _ = model({"image": tf.zeros((1, cfg["data"]["image_size"], cfg["data"]["image_size"], cfg["data"]["channels"]), tf.float32)}, training=False)
 
         checkpoint = tf.train.Checkpoint(model=model)
         checkpoint.restore(ckpt_prefix).expect_partial()
         print(f"  [LOADED] Restored model weights from: {ckpt_prefix}")
 
         # Build datasets
-        datasets = build_datasets(cfg, replicas=1)
-        val_ds = datasets["val"]
-        test_ds = datasets["test"]
+        _, val_ds, test_ds = build_datasets(cfg, replicas=1)
 
         # 1. Validation inference (for OOF)
         print(f"  [INFERENCE] Evaluating Validation Set (Fold {fold})...")
