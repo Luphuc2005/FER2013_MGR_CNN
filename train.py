@@ -1262,6 +1262,23 @@ def main() -> int:
         (run_dir / "effective_config.json").write_text(
             json.dumps(cfg, indent=2), encoding="utf-8"
         )
+    if cfg["training"].get("logit_adjustment", {}).get("enabled", False):
+        from utils.logit_adjustment import configure_training_logit_adjustment
+        data_path = Path(cfg["data"]["data_path"])
+        train_csv = data_path / "train.csv"
+        if train_csv.exists():
+            import pandas as pd
+            df_train = pd.read_csv(train_csv)
+            train_labels = df_train["label"].values.astype(np.int64)
+        else:
+            train_labels = np.array([lbl.numpy() for _, lbl in train_ds.unbatch()], dtype=np.int64)
+        configure_training_logit_adjustment(cfg, train_labels)
+        (run_dir / "logit_adjustment_report.json").write_text(
+            json.dumps(cfg["training"]["resolved_logit_adjustment_report"], indent=2), encoding="utf-8"
+        )
+        (run_dir / "effective_config.json").write_text(
+            json.dumps(cfg, indent=2), encoding="utf-8"
+        )
 
     with strategy.scope():
         model = build_model(cfg)

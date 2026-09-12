@@ -79,4 +79,9 @@ def training_ce_kwargs(cfg):
         from utils.logit_adjustment import logit_adjustment_kwargs
         kwargs.update(logit_adjustment_kwargs(cfg))
 
+    nf_settings = cfg.get("training", {}).get("noise_filtering", {})
+    if nf_settings.get("enabled", False):
+        kwargs["noise_threshold"] = float(nf_settings.get("threshold", 0.15))
+        kwargs["noise_weight"] = float(nf_settings.get("weight", 0.20))
+
     return kwargs
