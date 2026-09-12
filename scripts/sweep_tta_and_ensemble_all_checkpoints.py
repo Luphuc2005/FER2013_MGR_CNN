@@ -52,6 +52,12 @@ def parse_args():
         help="Directory containing checkpoints (default: output_dir/checkpoints/best)",
     )
     parser.add_argument(
+        "--include-best-loss",
+        action="store_true",
+        default=True,
+        help="Also include checkpoints from checkpoints/best_loss (lowest val_loss) in evaluation and ensemble (default: True)",
+    )
+    parser.add_argument(
         "--step",
         type=float,
         default=0.05,
@@ -151,30 +157,54 @@ def main():
     cfg = load_config(args.config)
     output_dir = Path(cfg["paths"]["output_dir"])
 
-    ckpt_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else output_dir / "checkpoints" / "best"
-    if not ckpt_dir.exists():
-        raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
+    collected_ckpts: List[Tuple[Path, str]] = []
+    seen_prefixes = set()
 
-    # Discover checkpoints
-    index_files = sorted(ckpt_dir.glob("ckpt-*.index"), key=_extract_epoch_num)
-    if not index_files:
-        # Fallback to periodic or last
-        index_files = sorted((output_dir / "checkpoints" / "last").glob("ckpt-*.index"), key=_extract_epoch_num)
+    # 1. Primary directory (defaults to best/)
+    primary_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else output_dir / "checkpoints" / "best"
+    if primary_dir.exists():
+        for idx in sorted(primary_dir.glob("ckpt-*.index"), key=_extract_epoch_num):
+            prefix = Path(str(idx)[:-6])
+            if prefix.name not in seen_prefixes:
+                seen_prefixes.add(prefix.name)
+                collected_ckpts.append((prefix, "best (Highest Val Acc)"))
 
-    if not index_files:
-        raise FileNotFoundError(f"No ckpt-*.index files found in {ckpt_dir}")
+    # 2. Also include best_loss (lowest val_loss) if requested and exists
+    if args.include_best_loss and args.checkpoint_dir is None:
+        best_loss_dir = output_dir / "checkpoints" / "best_loss"
+        if best_loss_dir.exists():
+            for idx in sorted(best_loss_dir.glob("ckpt-*.index"), key=_extract_epoch_num):
+                prefix = Path(str(idx)[:-6])
+                if prefix.name not in seen_prefixes:
+                    seen_prefixes.add(prefix.name)
+                    collected_ckpts.append((prefix, "best_loss (Lowest Val Loss)"))
+                else:
+                    # Update label if in both
+                    for idx_c, (p, label) in enumerate(collected_ckpts):
+                        if p.name == prefix.name:
+                            collected_ckpts[idx_c] = (p, "best & best_loss (Highest Acc + Lowest Loss)")
 
-    ckpt_prefixes = [Path(str(p)[:-6]) for p in index_files]
-    num_ckpts = len(ckpt_prefixes)
+    # Fallback to last/ if nothing found
+    if not collected_ckpts:
+        last_dir = output_dir / "checkpoints" / "last"
+        if last_dir.exists():
+            for idx in sorted(last_dir.glob("ckpt-*.index"), key=_extract_epoch_num):
+                prefix = Path(str(idx)[:-6])
+                collected_ckpts.append((prefix, "last checkpoint"))
+
+    if not collected_ckpts:
+        raise FileNotFoundError(f"No ckpt-*.index files found in {output_dir / 'checkpoints'}")
+
+    num_ckpts = len(collected_ckpts)
 
     print("=" * 75)
     print(" VALIDATION-TUNED TTA SWEEP & CHECKPOINT ENSEMBLE")
     print("=" * 75)
     print(f" Config         : {args.config}")
-    print(f" Checkpoint Dir : {ckpt_dir}")
+    print(f" Output Dir     : {output_dir}")
     print(f" Total Models   : {num_ckpts} checkpoint(s)")
-    for i, c in enumerate(ckpt_prefixes, 1):
-        print(f"   [{i}/{num_ckpts}] {c.name}")
+    for i, (c, source) in enumerate(collected_ckpts, 1):
+        print(f"   [{i}/{num_ckpts}] {c.name:<10} (Source: {source})")
     print("=" * 75)
 
     configure_tensorflow_runtime(cfg)
@@ -195,10 +225,10 @@ def main():
     test_logits_list = []
     y_test_true = None
 
-    for i, ckpt_prefix in enumerate(ckpt_prefixes, 1):
+    for i, (ckpt_prefix, source) in enumerate(collected_ckpts, 1):
         ckpt_name = ckpt_prefix.name
         print(f"\n---------------------------------------------------------------------------")
-        print(f" [{i}/{num_ckpts}] PROCESSING CHECKPOINT: {ckpt_name}")
+        print(f" [{i}/{num_ckpts}] PROCESSING CHECKPOINT: {ckpt_name} [{source}]")
         print(f"---------------------------------------------------------------------------")
         ckpt_loader.restore(str(ckpt_prefix)).expect_partial()
 
@@ -243,6 +273,7 @@ def main():
 
         checkpoint_eval_results.append({
             "checkpoint": ckpt_name,
+            "source": source,
             "val_accuracy": val_best["accuracy"],
             "val_optimal_w_orig": opt_w_orig,
             "val_optimal_w_flip": opt_w_flip,
@@ -278,12 +309,12 @@ def main():
     logit_ens_macro_f1 = float(f1_score(y_test_true, logit_ens_preds, average="macro"))
 
     # Summary Table
-    print(f"\n {'Checkpoint':<14} | {'Val Acc (TTA)':<14} | {'w_orig/flip':<12} | {'Test (No-TTA)':<14} | {'Test (TTA)':<12}")
-    print("-" * 75)
+    print(f"\n {'Checkpoint':<10} | {'Source / Metric':<30} | {'Val Acc':<9} | {'w_orig/flip':<11} | {'Test (No-TTA)':<13} | {'Test (TTA)':<11}")
+    print("-" * 95)
     for r in checkpoint_eval_results:
         w_str = f"{r['val_optimal_w_orig']:.2f}/{r['val_optimal_w_flip']:.2f}"
-        print(f" {r['checkpoint']:<14} | {r['val_accuracy']*100:<13.2f}% | {w_str:<12} | {r['test_no_tta_accuracy']*100:<13.2f}% | {r['test_val_tuned_accuracy']*100:<11.2f}%")
-    print("=" * 75)
+        print(f" {r['checkpoint']:<10} | {r['source']:<30} | {r['val_accuracy']*100:<8.2f}% | {w_str:<11} | {r['test_no_tta_accuracy']*100:<12.2f}% | {r['test_val_tuned_accuracy']*100:<10.2f}%")
+    print("=" * 95)
 
     print(f"\n===========================================================================")
     print(f" ★ FINAL ENSEMBLE RESULTS ON TEST SET (3,068 samples):")

@@ -19,8 +19,8 @@ FER_PY="$ROOT/fer2013_env/bin/python"
 CONFIG="$ROOT/config_rafdb_v1_clean_evolution.yaml"
 OUTPUT_DIR="$ROOT/outputs/papers/rafdb_v1_clean_evolution"
 
-# Checkpoint dir to evaluate (defaults to best/)
-CHECKPOINT_DIR="${1:-$OUTPUT_DIR/checkpoints/best}"
+# Checkpoint dir to evaluate (defaults to sweeping both best/ and best_loss/)
+CHECKPOINT_DIR="${1:-}"
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
@@ -33,7 +33,7 @@ export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVI
 echo "=========================================================================="
 echo " VALIDATION-TUNED TTA SWEEP & MULTI-CHECKPOINT ENSEMBLE (RAF-DB V1)"
 echo " Config         : $CONFIG"
-echo " Checkpoint Dir : $CHECKPOINT_DIR"
+echo " Checkpoint Dir : ${CHECKPOINT_DIR:-'Auto: best/ (Val Acc) + best_loss/ (Val Loss)'}"
 echo " Job ID         : ${SLURM_JOB_ID:-standalone}"
 echo " Start Time     : $(date)"
 echo "=========================================================================="
@@ -41,11 +41,21 @@ echo "==========================================================================
 nvidia-smi
 
 # Run validation-tuned TTA sweep on every checkpoint + compute Test ensemble
-"$FER_PY" -u scripts/sweep_tta_and_ensemble_all_checkpoints.py \
-    --config "$CONFIG" \
-    --checkpoint-dir "$CHECKPOINT_DIR" \
-    --step 0.05 \
-    --output "$OUTPUT_DIR/val_tuned_tta_ensemble_report.json"
+if [ -n "$CHECKPOINT_DIR" ]; then
+    echo ">>> Evaluating custom checkpoint directory: $CHECKPOINT_DIR"
+    "$FER_PY" -u scripts/sweep_tta_and_ensemble_all_checkpoints.py \
+        --config "$CONFIG" \
+        --checkpoint-dir "$CHECKPOINT_DIR" \
+        --step 0.05 \
+        --output "$OUTPUT_DIR/val_tuned_tta_ensemble_report.json"
+else
+    echo ">>> Evaluating ALL checkpoints in best/ (Acc) AND best_loss/ (Loss)..."
+    "$FER_PY" -u scripts/sweep_tta_and_ensemble_all_checkpoints.py \
+        --config "$CONFIG" \
+        --include-best-loss \
+        --step 0.05 \
+        --output "$OUTPUT_DIR/val_tuned_tta_ensemble_report.json"
+fi
 
 echo ""
 echo "=========================================================================="
