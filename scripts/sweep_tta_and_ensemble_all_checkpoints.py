@@ -87,6 +87,18 @@ def parse_args():
         help="Number of random Dirichlet weight combinations to evaluate (default: 50000)",
     )
     parser.add_argument(
+        "--exp-dir",
+        type=str,
+        default=None,
+        help="Path to experiment directory containing checkpoints/ (overrides output_dir in config)",
+    )
+    parser.add_argument(
+        "--save-individual",
+        action="store_true",
+        default=True,
+        help="Save separate JSON evaluation files for each individual checkpoint (default: True)",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=None,
@@ -382,7 +394,7 @@ def run_massive_combinatorial_sweep(
 def main():
     args = parse_args()
     cfg = load_config(args.config)
-    output_dir = Path(cfg["paths"]["output_dir"])
+    output_dir = Path(args.exp_dir) if args.exp_dir else Path(cfg["paths"]["output_dir"])
 
     collected_ckpts: List[Tuple[Path, str]] = []
     seen_prefixes = set()
@@ -424,11 +436,13 @@ def main():
                         if p.name == prefix.name:
                             collected_ckpts[idx_c] = (p, f"{label} + best_macro_f1")
 
-    # 4. Include periodic/ if requested
-    if args.include_periodic and args.checkpoint_dir is None:
+    # 4. Include periodic/ if requested or if fewer than 15 unique checkpoints found
+    if (args.include_periodic or len(collected_ckpts) < 15) and args.checkpoint_dir is None:
         periodic_dir = output_dir / "checkpoints" / "periodic"
         if periodic_dir.exists():
             for idx in sorted(periodic_dir.glob("ckpt-*.index"), key=_extract_epoch_num):
+                if len(collected_ckpts) >= 15 and not args.include_periodic:
+                    break
                 prefix = Path(str(idx)[:-6])
                 if prefix.name not in seen_prefixes:
                     seen_prefixes.add(prefix.name)
@@ -566,6 +580,15 @@ def main():
             f"{w_str:<9} | {r['test_no_tta_accuracy']*100:<11.2f}% | {r['test_val_tuned_accuracy']*100:<9.2f}% | {r['test_val_tuned_macro_f1']:<8.4f}"
         )
     print("=" * 125)
+
+    if getattr(args, "save_individual", True):
+        indiv_dir = output_dir / "eval_individual_ckpts"
+        indiv_dir.mkdir(parents=True, exist_ok=True)
+        for r in checkpoint_eval_results:
+            ckpt_out_file = indiv_dir / f"eval_{r['checkpoint']}.json"
+            with open(ckpt_out_file, "w", encoding="utf-8") as f:
+                json.dump(r, f, indent=2)
+        print(f"\n[INFO] Saved {len(checkpoint_eval_results)} individual checkpoint reports to: {indiv_dir}")
 
     # 1. Standard Full-Model Average Ensemble
     avg_val_probs = np.mean(val_probs_list, axis=0)
