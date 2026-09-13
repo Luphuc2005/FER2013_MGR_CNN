@@ -44,9 +44,27 @@ data:
   shuffle_buffer: 28709
   cache: false
 
+# augmentation:
+#   horizontal_flip: true
+#   rotation_degrees: 15.0
+#   brightness_delta: 0.15
+#   contrast_lower: 0.85
+#   contrast_upper: 1.15
+#   gamma_prob: 0.5
+#   gamma_min: 0.5
+#   gamma_max: 2.0
+#   random_erasing_prob: 0.40
+#   random_erasing_area_min: 0.02
+#   random_erasing_area_max: 0.15
+#   random_erasing_value: "random"
+
 augmentation:
   horizontal_flip: true
   rotation_degrees: 15.0
+  translation_height: 0.08
+  translation_width: 0.08
+  zoom_min: 0.92
+  zoom_max: 1.08
   brightness_delta: 0.15
   contrast_lower: 0.85
   contrast_upper: 1.15
@@ -106,7 +124,7 @@ model:
 
   checkpoint_path: null
   checkpoint_strict: false
-  classifier_dropout1: 0.35
+  classifier_dropout1: 0.4
   classifier_dropout2: 0.0
   ortho_loss_weight: 0.0
 

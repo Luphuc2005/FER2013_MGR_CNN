@@ -769,6 +769,8 @@ def make_step_function(
     skip_nonfinite = bool(loss_cfg.get("skip_nonfinite_batches", True))
     grad_clip_norm = float(loss_cfg.get("grad_clip_norm", 0.0)) if loss_cfg.get("grad_clip_norm") else None
     loss_scale_tensor = tf.constant(float(loss_scale), dtype=tf.float32)
+    mixup_alpha = float(loss_cfg.get("mixup_alpha", 0.0))
+    use_mixup = mixup_alpha > 0.0
     backbone_vars, head_vars = split_variables(model)
     all_vars = head_vars + backbone_vars
 
@@ -837,13 +839,27 @@ def make_step_function(
             optimizer_backbone.apply_gradients(backbone_grads)
 
     def _step_impl(features, labels, trainable_vars):
+        if use_mixup:
+            from losses.mixup import mixup_batch
+            mixed_image, mixed_labels = mixup_batch(
+                features["image"],
+                labels,
+                num_classes=int(cfg["data"]["num_classes"]),
+                alpha=mixup_alpha,
+            )
+            step_features = dict(features, image=mixed_image)
+            step_loss_kwargs = dict(ce_kwargs, mixed_labels=mixed_labels)
+        else:
+            step_features = features
+            step_loss_kwargs = ce_kwargs
+
         with tf.GradientTape() as tape:
             outputs, raw_loss, parts = forward_training_loss(
-                model, features, labels,
+                model, step_features, labels,
                 lambda_rdrop=lambda_rdrop,
                 lambda_vlm_kd=lambda_vlm_kd, kd_temperature=kd_temperature,
                 lambda_sem_runtime=lambda_sem_runtime,
-                **ce_kwargs,
+                **step_loss_kwargs,
                 num_classes=cfg["data"]["num_classes"],
                 label_smoothing=label_smoothing,
                 ortho_weight=ortho_weight,
@@ -882,11 +898,11 @@ def make_step_function(
 
         with tf.GradientTape() as tape2:
             _, raw_loss_2, _ = forward_training_loss(
-                model, features, labels,
+                model, step_features, labels,
                 lambda_rdrop=lambda_rdrop,
                 lambda_vlm_kd=lambda_vlm_kd, kd_temperature=kd_temperature,
                 lambda_sem_runtime=lambda_sem_runtime,
-                **ce_kwargs,
+                **step_loss_kwargs,
                 num_classes=cfg["data"]["num_classes"],
                 label_smoothing=label_smoothing,
                 ortho_weight=ortho_weight,
@@ -1393,8 +1409,9 @@ def main() -> int:
     backbone_vars, head_vars = split_variables(model)
     if backbone_vars:
         print(f"Backbone trainable vars: {len(backbone_vars)}")
-    print(f"Head trainable vars: {len(head_vars)}")
     print(f"[CONFIG] label_smoothing={float(cfg['training'].get('label_smoothing', 0.0))}", flush=True)
+    if float(cfg["training"].get("mixup_alpha", 0.0)) > 0.0:
+        print(f"[CONFIG] mixup_alpha={float(cfg['training'].get('mixup_alpha', 0.0))}", flush=True)
 
     loss_scale = 1.0 / float(max(int(strategy.num_replicas_in_sync), 1))
     print(f"[INFO] Distributed gradient loss scale: {loss_scale:.6f}")

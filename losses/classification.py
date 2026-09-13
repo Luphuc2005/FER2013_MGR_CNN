@@ -54,13 +54,19 @@ def supervised_mgr_loss(
     logit_adj_offsets: Optional[tf.Tensor] = None,
     ortho_weight: float = 0.003,
     cnn_aux_weight: float = 0.4,
+    mixed_labels: Optional[tf.Tensor] = None,
 ) -> Tuple[tf.Tensor, Dict[str, tf.Tensor]]:
     logits = tf.cast(outputs["logits"], tf.float32)
     if logit_adj_offsets is not None:
         train_logits = logits + tf.cast(logit_adj_offsets, tf.float32)
     else:
         train_logits = logits
-    if label_smoothing > 0.0:
+    if mixed_labels is not None:
+        targets = tf.cast(mixed_labels, tf.float32)
+        if label_smoothing > 0.0:
+            targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
+        ce = tf.keras.losses.categorical_crossentropy(targets, train_logits, from_logits=True)
+    elif label_smoothing > 0.0:
         targets = tf.one_hot(labels, depth=num_classes, dtype=tf.float32)
         targets = targets * (1.0 - label_smoothing) + label_smoothing / float(num_classes)
         ce = tf.keras.losses.categorical_crossentropy(targets, train_logits, from_logits=True)

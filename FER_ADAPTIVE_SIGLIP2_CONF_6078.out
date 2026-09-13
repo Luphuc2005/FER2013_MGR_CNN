@@ -1,0 +1,1647 @@
+============================================================
+ FER2013 ConvNeXt-Base MS1M Adaptive Multi-Granularity SigLIP 2
+ + Confusion-Aware Hard Semantic Separation
+============================================================
+Job ID: 6078
+Node: gpunode1.gitc.hpc
+CUDA_VISIBLE_DEVICES=0
+Start: Thu Sep  3 12:50:10 AM +07 2026
+ROOT=/home/ptbao/projects/FER2013_MGR_CNN
+FER_PY=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/bin/python
+CONFIG=/home/ptbao/projects/FER2013_MGR_CNN/config_convnext_base_ms1m_adaptive_siglip2_confusion.yaml
+Output: outputs/papers/siglip2-confusion
+============================================================
+Thu Sep  3 00:50:10 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.142                Driver Version: 580.142        CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  Tesla V100-SXM2-32GB           On  |   00000000:3A:00.0 Off |                    0 |
+| N/A   30C    P0             41W /  300W |       0MiB /  32768MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+[INFO] XLA auto-JIT disabled (jit_compile=False; TF_XLA_FLAGS disables XLA devices)
+[INFO] Mixed precision enabled (mixed_float16) for accelerated GPU training
+[INFO] Configured 1 GPU device(s): ['/physical_device:GPU:0']
+TensorFlow 2.10.1
+Replicas in sync: 1
+[CLIP/SigLIP] Model: google/siglip2-base-patch16-224
+[CLIP/SigLIP] Text encoder loaded successfully
+[CLIP/SigLIP] Prototype source: REAL_CLIP/SIGLIP
+[CLIP/SigLIP] Prompt SHA256 Hash: 331157f6480823d5... (count: 105)
+[CLIP/SigLIP] Synthetic fallback: DISABLED
+[CLIP/SigLIP] Prototype shape: (7, 5, 768)
+[CLIP/SigLIP] L2 norm check: PASSED (loaded from verified cache: pretrained/siglip2_text_prototypes_7emotions_multigranularity_multi5.npy)
+[ConvNeXtBaseFace] Shape trace:
+[ConvNeXtBaseFace]   input: (1, 112, 112, 3)
+[ConvNeXtBaseFace]   stem: (1, 56, 56, 128)
+[ConvNeXtBaseFace]   stage1: (1, 56, 56, 128)
+[ConvNeXtBaseFace]   stage2: (1, 28, 28, 256)
+[ConvNeXtBaseFace]   stage3: (1, 14, 14, 512)
+[ConvNeXtBaseFace]   stage4 (before ECA): (1, 7, 7, 1024)
+[ConvNeXtBaseFace]   visual_projector: (1, 768)
+[ConvNeXtBaseFace]   text_prototypes (frozen): (7, 5, 768)
+[ConvNeXtBaseFace]   semantic_logits: (1, 7)
+[ConvNeXtBaseFace]   gap: (1, 1024)
+[ConvNeXtBaseFace]   dropout: (1, 1024)
+[ConvNeXtBaseFace]   logits: (1, 7)
+MULTI_PROTOTYPE_CLIP_ENABLED
+Text prototypes shape: (7, 5, 768)
+Visual embedding shape: (1, 768)
+Raw semantic similarity: (1, 7, 5)
+Aggregated semantic logits: (1, 7)
+Aggregation: logsumexp
+Prototype temperature: 0.1
+Semantic logit scale: 20.0
+lambda_sem: 0.1
+[ConvNeXtBaseFace]   Total trainable params: 92,168,332
+[ConvNeXtBaseFace] Loading PyTorch pretrained checkpoint: /home/ptbao/projects/FER2013_MGR_CNN/pretrained/convnext_base_ms1m_arcface.pth
+[ConvNeXtBaseFace] Attempting shape-based fallback matching for 8 unmatched targets...
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.norm.gamma -> stages.2.downsample.0.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.norm.beta -> stages.2.downsample.0.bias
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.conv.kernel -> stages.2.downsample.1.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.conv.bias -> stages.2.downsample.1.bias
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.norm.gamma -> stages.3.downsample.0.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.norm.beta -> stages.3.downsample.0.bias
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.conv.kernel -> stages.3.downsample.1.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.conv.bias -> stages.3.downsample.1.bias
+[ConvNeXtBaseFace] PyTorch -> TensorFlow weight loading complete:
+[ConvNeXtBaseFace]   matched target tensors: 340/340
+[ConvNeXtBaseFace]   unmatched target tensors: 0
+[ConvNeXtBaseFace]   unused checkpoint tensors: 9
+[ConvNeXtBaseFace]   allowed unused face-head tensors: 9
+[ConvNeXtBaseFace]   unexpected unused checkpoint tensors: 0
+[ConvNeXtBaseFace]   first allowed unused face-head keys:
+[ConvNeXtBaseFace]     output_layer.0.bias
+[ConvNeXtBaseFace]     output_layer.0.weight
+[ConvNeXtBaseFace]     output_layer.3.bias
+[ConvNeXtBaseFace]     output_layer.3.weight
+[ConvNeXtBaseFace]     output_layer.4.bias
+[ConvNeXtBaseFace]     output_layer.4.num_batches_tracked
+[ConvNeXtBaseFace]     output_layer.4.running_mean
+[ConvNeXtBaseFace]     output_layer.4.running_var
+[ConvNeXtBaseFace]     output_layer.4.weight
+[ConvNeXtBaseFace] PRETRAINED_LOAD_OK path=/home/ptbao/projects/FER2013_MGR_CNN/pretrained/convnext_base_ms1m_arcface.pth matched=340/340
+Model params: total=92,168,332, trainable=92,168,332
+Smoke logits shape: (16, 7)
+Backbone trainable vars: 340
+Head trainable vars: 30
+[INFO] Distributed gradient loss scale: 1.000000
+Epoch 1/60 step 100/1794 total_loss=2.8403 ce_loss=2.6432 sem_loss=1.8963 hard_loss=0.1499 fer_acc=0.1638 sem_acc=0.2294 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 200/1794 total_loss=2.5915 ce_loss=2.4001 sem_loss=1.8408 hard_loss=0.1479 fer_acc=0.1650 sem_acc=0.2387 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 300/1794 total_loss=2.0086 ce_loss=1.8365 sem_loss=1.6462 hard_loss=0.1486 fer_acc=0.1644 sem_acc=0.2467 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 400/1794 total_loss=2.2281 ce_loss=2.0520 sem_loss=1.6883 hard_loss=0.1456 fer_acc=0.1700 sem_acc=0.2533 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 500/1794 total_loss=2.2259 ce_loss=2.0471 sem_loss=1.7118 hard_loss=0.1518 fer_acc=0.1726 sem_acc=0.2549 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 600/1794 total_loss=2.2193 ce_loss=2.0298 sem_loss=1.8221 hard_loss=0.1453 fer_acc=0.1777 sem_acc=0.2615 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 700/1794 total_loss=2.2672 ce_loss=2.0918 sem_loss=1.6828 hard_loss=0.1427 fer_acc=0.1788 sem_acc=0.2677 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 800/1794 total_loss=1.9945 ce_loss=1.8335 sem_loss=1.5384 hard_loss=0.1432 fer_acc=0.1824 sem_acc=0.2718 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 900/1794 total_loss=1.9286 ce_loss=1.7578 sem_loss=1.6376 hard_loss=0.1405 fer_acc=0.1840 sem_acc=0.2742 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 1000/1794 total_loss=1.8530 ce_loss=1.6924 sem_loss=1.5380 hard_loss=0.1359 fer_acc=0.1872 sem_acc=0.2795 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 1100/1794 total_loss=2.1179 ce_loss=1.9403 sem_loss=1.7057 hard_loss=0.1400 fer_acc=0.1901 sem_acc=0.2855 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 1200/1794 total_loss=2.2124 ce_loss=2.0159 sem_loss=1.8897 hard_loss=0.1520 fer_acc=0.1931 sem_acc=0.2914 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 1300/1794 total_loss=2.0875 ce_loss=1.8993 sem_loss=1.8069 hard_loss=0.1491 fer_acc=0.1961 sem_acc=0.2951 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 1400/1794 total_loss=2.2328 ce_loss=2.0382 sem_loss=1.8729 hard_loss=0.1450 fer_acc=0.1987 sem_acc=0.3004 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 1500/1794 total_loss=2.0551 ce_loss=1.8870 sem_loss=1.6152 hard_loss=0.1313 fer_acc=0.2015 sem_acc=0.3035 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 1600/1794 total_loss=1.9532 ce_loss=1.7749 sem_loss=1.7110 hard_loss=0.1455 fer_acc=0.2052 sem_acc=0.3088 lr_head=0.000061 lr_backbone=0.000000
+Epoch 1/60 step 1700/1794 total_loss=1.9790 ce_loss=1.8180 sem_loss=1.5359 hard_loss=0.1485 fer_acc=0.2084 sem_acc=0.3135 lr_head=0.000061 lr_backbone=0.000000
+[INFO] Epoch 1: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 28.23% | Macro F1: 0.1691 | Weighted F1: 0.2247
+[INFO] Epoch 1: validation finished
+[INFO] Save best at ep 1, val_loss: 1.9743, val_accuracy: 0.2823, monitor: val_accuracy
+[INFO] Save best_loss at ep 1, val_loss: 1.9743, val_accuracy: 0.2823
+[INFO] Epoch 1: saving last checkpoint
+Epoch 1/60 [3m 44s] loss=2.1976 sem_loss=1.7529 hard_loss=0.1445 acc=0.2109 val_loss=1.9743 val_acc=0.2823 val_macro_f1=0.1691 gw_means=[0.265,0.073,0.037,0.209,0.416] ent=1.108 throughput=163.6 samples/s lr_head=0.000061 lr_backbone=0.000000 patience=0/15 val_accuracy=0.2823
+Epoch 2/60 step 100/1794 total_loss=2.1040 ce_loss=1.9210 sem_loss=1.7587 hard_loss=0.1415 fer_acc=0.2500 sem_acc=0.3812 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 200/1794 total_loss=1.8837 ce_loss=1.7318 sem_loss=1.4549 hard_loss=0.1280 fer_acc=0.2559 sem_acc=0.4009 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 300/1794 total_loss=1.9942 ce_loss=1.8206 sem_loss=1.6578 hard_loss=0.1576 fer_acc=0.2583 sem_acc=0.4033 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 400/1794 total_loss=1.8722 ce_loss=1.7162 sem_loss=1.4843 hard_loss=0.1513 fer_acc=0.2628 sem_acc=0.4041 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 500/1794 total_loss=1.8964 ce_loss=1.7294 sem_loss=1.6029 hard_loss=0.1344 fer_acc=0.2655 sem_acc=0.4036 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 600/1794 total_loss=2.0033 ce_loss=1.8305 sem_loss=1.6666 hard_loss=0.1235 fer_acc=0.2733 sem_acc=0.4098 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 700/1794 total_loss=2.0069 ce_loss=1.8345 sem_loss=1.6604 hard_loss=0.1283 fer_acc=0.2762 sem_acc=0.4112 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 800/1794 total_loss=1.9146 ce_loss=1.7544 sem_loss=1.5316 hard_loss=0.1420 fer_acc=0.2779 sem_acc=0.4144 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 900/1794 total_loss=1.8787 ce_loss=1.7255 sem_loss=1.4599 hard_loss=0.1438 fer_acc=0.2823 sem_acc=0.4171 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 1000/1794 total_loss=2.0512 ce_loss=1.8551 sem_loss=1.8866 hard_loss=0.1492 fer_acc=0.2869 sem_acc=0.4198 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 1100/1794 total_loss=1.8920 ce_loss=1.7421 sem_loss=1.4417 hard_loss=0.1135 fer_acc=0.2886 sem_acc=0.4236 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 1200/1794 total_loss=1.7572 ce_loss=1.6188 sem_loss=1.3188 hard_loss=0.1296 fer_acc=0.2914 sem_acc=0.4249 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 1300/1794 total_loss=1.8770 ce_loss=1.7138 sem_loss=1.5627 hard_loss=0.1393 fer_acc=0.2940 sem_acc=0.4265 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 1400/1794 total_loss=1.7550 ce_loss=1.5720 sem_loss=1.7557 hard_loss=0.1482 fer_acc=0.2967 sem_acc=0.4284 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 1500/1794 total_loss=1.5976 ce_loss=1.4545 sem_loss=1.3655 hard_loss=0.1316 fer_acc=0.2988 sem_acc=0.4289 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 1600/1794 total_loss=1.9444 ce_loss=1.7769 sem_loss=1.6027 hard_loss=0.1455 fer_acc=0.3015 sem_acc=0.4296 lr_head=0.000121 lr_backbone=0.000000
+Epoch 2/60 step 1700/1794 total_loss=1.7605 ce_loss=1.6258 sem_loss=1.2891 hard_loss=0.1157 fer_acc=0.3024 sem_acc=0.4294 lr_head=0.000121 lr_backbone=0.000000
+[INFO] Epoch 2: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 36.70% | Macro F1: 0.2650 | Weighted F1: 0.3275
+[INFO] Epoch 2: validation finished
+[INFO] Save best at ep 2, val_loss: 1.8519, val_accuracy: 0.3670, monitor: val_accuracy
+[INFO] Save best_loss at ep 2, val_loss: 1.8519, val_accuracy: 0.3670
+[INFO] Epoch 2: saving last checkpoint
+Epoch 2/60 [3m 09s] loss=1.9462 sem_loss=1.5693 hard_loss=0.1356 acc=0.3050 val_loss=1.8519 val_acc=0.3670 val_macro_f1=0.2650 gw_means=[0.200,0.068,0.006,0.160,0.566] ent=0.908 throughput=180.0 samples/s lr_head=0.000121 lr_backbone=0.000000 patience=0/15 val_accuracy=0.3670
+Epoch 3/60 step 100/1794 total_loss=1.8172 ce_loss=1.6668 sem_loss=1.4373 hard_loss=0.1330 fer_acc=0.3250 sem_acc=0.4437 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 200/1794 total_loss=1.6630 ce_loss=1.5345 sem_loss=1.2246 hard_loss=0.1215 fer_acc=0.3359 sem_acc=0.4509 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 300/1794 total_loss=2.0049 ce_loss=1.8310 sem_loss=1.6690 hard_loss=0.1413 fer_acc=0.3406 sem_acc=0.4531 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 400/1794 total_loss=1.8716 ce_loss=1.7047 sem_loss=1.6029 hard_loss=0.1309 fer_acc=0.3456 sem_acc=0.4517 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 500/1794 total_loss=1.7214 ce_loss=1.5793 sem_loss=1.3532 hard_loss=0.1352 fer_acc=0.3508 sem_acc=0.4554 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 600/1794 total_loss=1.6432 ce_loss=1.5123 sem_loss=1.2489 hard_loss=0.1203 fer_acc=0.3559 sem_acc=0.4574 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 700/1794 total_loss=2.0110 ce_loss=1.8202 sem_loss=1.8402 hard_loss=0.1350 fer_acc=0.3579 sem_acc=0.4581 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 800/1794 total_loss=1.7681 ce_loss=1.6129 sem_loss=1.4875 hard_loss=0.1295 fer_acc=0.3604 sem_acc=0.4599 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 900/1794 total_loss=1.8636 ce_loss=1.7076 sem_loss=1.4971 hard_loss=0.1254 fer_acc=0.3617 sem_acc=0.4634 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 1000/1794 total_loss=1.6204 ce_loss=1.4811 sem_loss=1.3370 hard_loss=0.1116 fer_acc=0.3621 sem_acc=0.4624 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 1100/1794 total_loss=1.6662 ce_loss=1.5125 sem_loss=1.4742 hard_loss=0.1252 fer_acc=0.3640 sem_acc=0.4631 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 1200/1794 total_loss=1.7612 ce_loss=1.6111 sem_loss=1.4353 hard_loss=0.1301 fer_acc=0.3632 sem_acc=0.4628 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 1300/1794 total_loss=1.7917 ce_loss=1.6357 sem_loss=1.4964 hard_loss=0.1271 fer_acc=0.3646 sem_acc=0.4632 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 1400/1794 total_loss=2.1786 ce_loss=1.9980 sem_loss=1.7346 hard_loss=0.1440 fer_acc=0.3650 sem_acc=0.4641 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 1500/1794 total_loss=1.7750 ce_loss=1.6135 sem_loss=1.5473 hard_loss=0.1347 fer_acc=0.3658 sem_acc=0.4645 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 1600/1794 total_loss=1.6625 ce_loss=1.5355 sem_loss=1.2072 hard_loss=0.1261 fer_acc=0.3668 sem_acc=0.4638 lr_head=0.000180 lr_backbone=0.000000
+Epoch 3/60 step 1700/1794 total_loss=1.9012 ce_loss=1.7530 sem_loss=1.4148 hard_loss=0.1338 fer_acc=0.3666 sem_acc=0.4640 lr_head=0.000180 lr_backbone=0.000000
+[INFO] Epoch 3: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 41.66% | Macro F1: 0.3209 | Weighted F1: 0.3876
+[INFO] Epoch 3: validation finished
+[INFO] Save best at ep 3, val_loss: 1.7729, val_accuracy: 0.4166, monitor: val_accuracy
+[INFO] Save best_loss at ep 3, val_loss: 1.7729, val_accuracy: 0.4166
+[INFO] Epoch 3: saving last checkpoint
+Epoch 3/60 [3m 08s] loss=1.8518 sem_loss=1.5048 hard_loss=0.1306 acc=0.3672 val_loss=1.7729 val_acc=0.4166 val_macro_f1=0.3209 gw_means=[0.241,0.053,0.006,0.128,0.572] ent=0.896 throughput=179.1 samples/s lr_head=0.000180 lr_backbone=0.000000 patience=0/15 val_accuracy=0.4166
+Epoch 4/60 step 100/1794 total_loss=1.9467 ce_loss=1.7655 sem_loss=1.7409 hard_loss=0.1432 fer_acc=0.4031 sem_acc=0.4875 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 200/1794 total_loss=1.8981 ce_loss=1.7292 sem_loss=1.6132 hard_loss=0.1497 fer_acc=0.3975 sem_acc=0.4781 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 300/1794 total_loss=1.7560 ce_loss=1.6241 sem_loss=1.2613 hard_loss=0.1150 fer_acc=0.4065 sem_acc=0.4815 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 400/1794 total_loss=1.6912 ce_loss=1.5409 sem_loss=1.4427 hard_loss=0.1205 fer_acc=0.4034 sem_acc=0.4794 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 500/1794 total_loss=1.6863 ce_loss=1.5315 sem_loss=1.4655 hard_loss=0.1658 fer_acc=0.4019 sem_acc=0.4798 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 600/1794 total_loss=1.6481 ce_loss=1.5042 sem_loss=1.3790 hard_loss=0.1203 fer_acc=0.4019 sem_acc=0.4765 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 700/1794 total_loss=1.8257 ce_loss=1.6834 sem_loss=1.3620 hard_loss=0.1236 fer_acc=0.4030 sem_acc=0.4760 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 800/1794 total_loss=1.7900 ce_loss=1.6291 sem_loss=1.5432 hard_loss=0.1329 fer_acc=0.4016 sem_acc=0.4752 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 900/1794 total_loss=1.5055 ce_loss=1.3862 sem_loss=1.1426 hard_loss=0.1004 fer_acc=0.4017 sem_acc=0.4760 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 1000/1794 total_loss=1.5163 ce_loss=1.3830 sem_loss=1.2701 hard_loss=0.1258 fer_acc=0.4003 sem_acc=0.4753 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 1100/1794 total_loss=1.7151 ce_loss=1.5817 sem_loss=1.2662 hard_loss=0.1352 fer_acc=0.4010 sem_acc=0.4759 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 1200/1794 total_loss=1.9225 ce_loss=1.7403 sem_loss=1.7511 hard_loss=0.1415 fer_acc=0.4014 sem_acc=0.4761 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 1300/1794 total_loss=1.8590 ce_loss=1.6995 sem_loss=1.5372 hard_loss=0.1143 fer_acc=0.4003 sem_acc=0.4756 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 1400/1794 total_loss=1.5161 ce_loss=1.4001 sem_loss=1.0986 hard_loss=0.1247 fer_acc=0.4013 sem_acc=0.4767 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 1500/1794 total_loss=1.7927 ce_loss=1.6382 sem_loss=1.4789 hard_loss=0.1317 fer_acc=0.4000 sem_acc=0.4766 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 1600/1794 total_loss=1.6489 ce_loss=1.5053 sem_loss=1.3768 hard_loss=0.1171 fer_acc=0.4013 sem_acc=0.4775 lr_head=0.000240 lr_backbone=0.000000
+Epoch 4/60 step 1700/1794 total_loss=2.1251 ce_loss=1.9422 sem_loss=1.7560 hard_loss=0.1442 fer_acc=0.4008 sem_acc=0.4754 lr_head=0.000240 lr_backbone=0.000000
+[INFO] Epoch 4: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 44.86% | Macro F1: 0.3441 | Weighted F1: 0.4158
+[INFO] Epoch 4: validation finished
+[INFO] Save best at ep 4, val_loss: 1.7252, val_accuracy: 0.4486, monitor: val_accuracy
+[INFO] Save best_loss at ep 4, val_loss: 1.7252, val_accuracy: 0.4486
+[INFO] Epoch 4: saving last checkpoint
+Epoch 4/60 [3m 11s] loss=1.7988 sem_loss=1.4799 hard_loss=0.1283 acc=0.4017 val_loss=1.7252 val_acc=0.4486 val_macro_f1=0.3441 gw_means=[0.260,0.052,0.010,0.119,0.559] ent=0.926 throughput=177.8 samples/s lr_head=0.000240 lr_backbone=0.000000 patience=0/15 val_accuracy=0.4486
+[INFO] Unfreezing backbone at epoch 5; resetting early-stopping patience counter
+Epoch 5/60 step 100/1794 total_loss=1.3911 ce_loss=1.2598 sem_loss=1.2551 hard_loss=0.1143 fer_acc=0.4419 sem_acc=0.5150 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 200/1794 total_loss=1.7078 ce_loss=1.5439 sem_loss=1.5754 hard_loss=0.1269 fer_acc=0.4678 sem_acc=0.5247 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 300/1794 total_loss=1.5628 ce_loss=1.4144 sem_loss=1.4069 hard_loss=0.1528 fer_acc=0.4777 sem_acc=0.5319 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 400/1794 total_loss=1.3140 ce_loss=1.1954 sem_loss=1.1359 hard_loss=0.1016 fer_acc=0.4948 sem_acc=0.5413 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 500/1794 total_loss=1.6012 ce_loss=1.4499 sem_loss=1.4500 hard_loss=0.1259 fer_acc=0.5052 sem_acc=0.5461 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 600/1794 total_loss=1.4347 ce_loss=1.2977 sem_loss=1.3167 hard_loss=0.1081 fer_acc=0.5159 sem_acc=0.5539 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 700/1794 total_loss=1.4243 ce_loss=1.2894 sem_loss=1.2856 hard_loss=0.1261 fer_acc=0.5250 sem_acc=0.5607 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 800/1794 total_loss=1.2957 ce_loss=1.1655 sem_loss=1.2444 hard_loss=0.1150 fer_acc=0.5299 sem_acc=0.5632 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 900/1794 total_loss=1.3140 ce_loss=1.1928 sem_loss=1.1544 hard_loss=0.1159 fer_acc=0.5330 sem_acc=0.5651 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 1000/1794 total_loss=1.6266 ce_loss=1.4819 sem_loss=1.3814 hard_loss=0.1305 fer_acc=0.5390 sem_acc=0.5691 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 1100/1794 total_loss=1.4174 ce_loss=1.2912 sem_loss=1.2001 hard_loss=0.1245 fer_acc=0.5437 sem_acc=0.5718 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 1200/1794 total_loss=1.0571 ce_loss=0.9583 sem_loss=0.9320 hard_loss=0.1124 fer_acc=0.5479 sem_acc=0.5750 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 1300/1794 total_loss=1.7452 ce_loss=1.5774 sem_loss=1.6154 hard_loss=0.1248 fer_acc=0.5535 sem_acc=0.5778 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 1400/1794 total_loss=1.3813 ce_loss=1.2556 sem_loss=1.2051 hard_loss=0.1046 fer_acc=0.5577 sem_acc=0.5812 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 1500/1794 total_loss=1.2247 ce_loss=1.1100 sem_loss=1.1000 hard_loss=0.0949 fer_acc=0.5629 sem_acc=0.5847 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 1600/1794 total_loss=1.4251 ce_loss=1.2844 sem_loss=1.3572 hard_loss=0.1011 fer_acc=0.5663 sem_acc=0.5870 lr_head=0.000061 lr_backbone=0.000007
+Epoch 5/60 step 1700/1794 total_loss=1.2452 ce_loss=1.1270 sem_loss=1.1198 hard_loss=0.1246 fer_acc=0.5707 sem_acc=0.5897 lr_head=0.000061 lr_backbone=0.000007
+[INFO] Epoch 5: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 63.03% | Macro F1: 0.5448 | Weighted F1: 0.6193
+[INFO] Epoch 5: validation finished
+[INFO] Save best at ep 5, val_loss: 1.3183, val_accuracy: 0.6303, monitor: val_accuracy
+[INFO] Save best_loss at ep 5, val_loss: 1.3183, val_accuracy: 0.6303
+[INFO] Epoch 5: saving last checkpoint
+Epoch 5/60 [10m 27s] loss=1.4605 sem_loss=1.2741 hard_loss=0.1199 acc=0.5725 val_loss=1.3183 val_acc=0.6303 val_macro_f1=0.5448 gw_means=[0.312,0.086,0.083,0.171,0.348] ent=1.216 throughput=48.7 samples/s lr_head=0.000061 lr_backbone=0.000007 patience=0/15 val_accuracy=0.6303
+Epoch 6/60 step 100/1794 total_loss=1.3655 ce_loss=1.2336 sem_loss=1.2562 hard_loss=0.1263 fer_acc=0.6756 sem_acc=0.6775 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 200/1794 total_loss=1.2109 ce_loss=1.1028 sem_loss=1.0252 hard_loss=0.1117 fer_acc=0.6538 sem_acc=0.6562 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 300/1794 total_loss=1.1282 ce_loss=1.0273 sem_loss=0.9685 hard_loss=0.0798 fer_acc=0.6521 sem_acc=0.6550 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 400/1794 total_loss=1.0572 ce_loss=0.9551 sem_loss=0.9711 hard_loss=0.1000 fer_acc=0.6494 sem_acc=0.6533 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 500/1794 total_loss=1.3764 ce_loss=1.2397 sem_loss=1.3154 hard_loss=0.1017 fer_acc=0.6500 sem_acc=0.6550 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 600/1794 total_loss=1.2978 ce_loss=1.1825 sem_loss=1.0979 hard_loss=0.1098 fer_acc=0.6504 sem_acc=0.6547 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 700/1794 total_loss=1.5858 ce_loss=1.4422 sem_loss=1.3786 hard_loss=0.1135 fer_acc=0.6516 sem_acc=0.6554 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 800/1794 total_loss=1.1072 ce_loss=0.9942 sem_loss=1.0708 hard_loss=0.1191 fer_acc=0.6512 sem_acc=0.6561 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 900/1794 total_loss=1.3296 ce_loss=1.1996 sem_loss=1.2406 hard_loss=0.1177 fer_acc=0.6520 sem_acc=0.6551 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 1000/1794 total_loss=1.1197 ce_loss=1.0190 sem_loss=0.9570 hard_loss=0.0999 fer_acc=0.6516 sem_acc=0.6553 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 1100/1794 total_loss=1.0823 ce_loss=0.9837 sem_loss=0.9405 hard_loss=0.0914 fer_acc=0.6526 sem_acc=0.6570 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 1200/1794 total_loss=1.1537 ce_loss=1.0436 sem_loss=1.0468 hard_loss=0.1085 fer_acc=0.6523 sem_acc=0.6559 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 1300/1794 total_loss=1.0620 ce_loss=0.9559 sem_loss=1.0176 hard_loss=0.0864 fer_acc=0.6525 sem_acc=0.6560 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 1400/1794 total_loss=1.4175 ce_loss=1.2756 sem_loss=1.3636 hard_loss=0.1114 fer_acc=0.6549 sem_acc=0.6579 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 1500/1794 total_loss=1.2779 ce_loss=1.1596 sem_loss=1.1360 hard_loss=0.0929 fer_acc=0.6554 sem_acc=0.6583 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 1600/1794 total_loss=0.9672 ce_loss=0.8799 sem_loss=0.8370 hard_loss=0.0721 fer_acc=0.6570 sem_acc=0.6595 lr_head=0.000121 lr_backbone=0.000013
+Epoch 6/60 step 1700/1794 total_loss=1.4734 ce_loss=1.3304 sem_loss=1.3703 hard_loss=0.1194 fer_acc=0.6562 sem_acc=0.6589 lr_head=0.000121 lr_backbone=0.000013
+[INFO] Epoch 6: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 67.51% | Macro F1: 0.6257 | Weighted F1: 0.6709
+[INFO] Epoch 6: validation finished
+[INFO] Save best at ep 6, val_loss: 1.2303, val_accuracy: 0.6751, monitor: val_accuracy
+[INFO] Save best_loss at ep 6, val_loss: 1.2303, val_accuracy: 0.6751
+[INFO] Epoch 6: saving last checkpoint
+Epoch 6/60 [9m 39s] loss=1.2776 sem_loss=1.1421 hard_loss=0.1046 acc=0.6570 val_loss=1.2303 val_acc=0.6751 val_macro_f1=0.6257 gw_means=[0.316,0.072,0.089,0.143,0.380] ent=1.155 throughput=52.1 samples/s lr_head=0.000121 lr_backbone=0.000013 patience=0/15 val_accuracy=0.6751
+Epoch 7/60 step 100/1794 total_loss=1.2319 ce_loss=1.1145 sem_loss=1.1246 hard_loss=0.0984 fer_acc=0.7163 sem_acc=0.6956 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 200/1794 total_loss=1.3075 ce_loss=1.1942 sem_loss=1.0791 hard_loss=0.1072 fer_acc=0.6928 sem_acc=0.6837 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 300/1794 total_loss=1.2782 ce_loss=1.1521 sem_loss=1.2142 hard_loss=0.0930 fer_acc=0.7015 sem_acc=0.6969 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 400/1794 total_loss=1.3145 ce_loss=1.1964 sem_loss=1.1388 hard_loss=0.0841 fer_acc=0.7023 sem_acc=0.6959 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 500/1794 total_loss=1.1357 ce_loss=1.0325 sem_loss=0.9814 hard_loss=0.1005 fer_acc=0.7020 sem_acc=0.6975 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 600/1794 total_loss=1.4220 ce_loss=1.2823 sem_loss=1.3392 hard_loss=0.1153 fer_acc=0.7047 sem_acc=0.7026 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 700/1794 total_loss=1.2519 ce_loss=1.1299 sem_loss=1.1642 hard_loss=0.1117 fer_acc=0.7029 sem_acc=0.6987 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 800/1794 total_loss=1.1216 ce_loss=1.0170 sem_loss=0.9914 hard_loss=0.1090 fer_acc=0.7038 sem_acc=0.6990 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 900/1794 total_loss=1.2402 ce_loss=1.1162 sem_loss=1.1899 hard_loss=0.1007 fer_acc=0.7039 sem_acc=0.6992 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 1000/1794 total_loss=1.0116 ce_loss=0.9125 sem_loss=0.9573 hard_loss=0.0671 fer_acc=0.7051 sem_acc=0.7015 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 1100/1794 total_loss=1.0532 ce_loss=0.9614 sem_loss=0.8821 hard_loss=0.0715 fer_acc=0.7059 sem_acc=0.7022 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 1200/1794 total_loss=0.9743 ce_loss=0.8884 sem_loss=0.8254 hard_loss=0.0670 fer_acc=0.7056 sem_acc=0.7017 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 1300/1794 total_loss=1.1905 ce_loss=1.0734 sem_loss=1.1247 hard_loss=0.0927 fer_acc=0.7062 sem_acc=0.7016 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 1400/1794 total_loss=1.0192 ce_loss=0.9266 sem_loss=0.8843 hard_loss=0.0841 fer_acc=0.7074 sem_acc=0.7025 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 1500/1794 total_loss=1.5482 ce_loss=1.4024 sem_loss=1.4200 hard_loss=0.0757 fer_acc=0.7066 sem_acc=0.7030 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 1600/1794 total_loss=1.3714 ce_loss=1.2402 sem_loss=1.2648 hard_loss=0.0949 fer_acc=0.7063 sem_acc=0.7019 lr_head=0.000180 lr_backbone=0.000018
+Epoch 7/60 step 1700/1794 total_loss=1.3417 ce_loss=1.2168 sem_loss=1.2045 hard_loss=0.0880 fer_acc=0.7069 sem_acc=0.7028 lr_head=0.000180 lr_backbone=0.000018
+[INFO] Epoch 7: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 68.40% | Macro F1: 0.6322 | Weighted F1: 0.6699
+[INFO] Epoch 7: validation finished
+[INFO] Save best at ep 7, val_loss: 1.2282, val_accuracy: 0.6840, monitor: val_accuracy
+[INFO] Save best_loss at ep 7, val_loss: 1.2282, val_accuracy: 0.6840
+[INFO] Epoch 7: saving last checkpoint
+Epoch 7/60 [9m 41s] loss=1.1770 sem_loss=1.0621 hard_loss=0.0924 acc=0.7069 val_loss=1.2282 val_acc=0.6840 val_macro_f1=0.6322 gw_means=[0.317,0.059,0.085,0.110,0.429] ent=1.082 throughput=52.0 samples/s lr_head=0.000180 lr_backbone=0.000018 patience=0/15 val_accuracy=0.6840
+Epoch 8/60 step 100/1794 total_loss=0.9744 ce_loss=0.8808 sem_loss=0.8949 hard_loss=0.0822 fer_acc=0.7519 sem_acc=0.7400 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 200/1794 total_loss=1.1036 ce_loss=0.9937 sem_loss=1.0580 hard_loss=0.0817 fer_acc=0.7469 sem_acc=0.7397 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 300/1794 total_loss=1.1065 ce_loss=1.0049 sem_loss=0.9836 hard_loss=0.0640 fer_acc=0.7490 sem_acc=0.7396 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 400/1794 total_loss=1.0406 ce_loss=0.9429 sem_loss=0.9375 hard_loss=0.0774 fer_acc=0.7498 sem_acc=0.7420 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 500/1794 total_loss=1.1047 ce_loss=0.9977 sem_loss=1.0210 hard_loss=0.0967 fer_acc=0.7449 sem_acc=0.7374 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 600/1794 total_loss=1.3543 ce_loss=1.2369 sem_loss=1.1295 hard_loss=0.0892 fer_acc=0.7443 sem_acc=0.7379 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 700/1794 total_loss=1.0953 ce_loss=0.9852 sem_loss=1.0606 hard_loss=0.0805 fer_acc=0.7425 sem_acc=0.7371 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 800/1794 total_loss=1.6136 ce_loss=1.4524 sem_loss=1.5550 hard_loss=0.1151 fer_acc=0.7435 sem_acc=0.7369 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 900/1794 total_loss=0.8175 ce_loss=0.7443 sem_loss=0.7096 hard_loss=0.0449 fer_acc=0.7426 sem_acc=0.7355 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 1000/1794 total_loss=0.8322 ce_loss=0.7580 sem_loss=0.6981 hard_loss=0.0868 fer_acc=0.7452 sem_acc=0.7376 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 1100/1794 total_loss=0.9916 ce_loss=0.8955 sem_loss=0.9190 hard_loss=0.0852 fer_acc=0.7454 sem_acc=0.7381 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 1200/1794 total_loss=1.1731 ce_loss=1.0593 sem_loss=1.0891 hard_loss=0.0980 fer_acc=0.7446 sem_acc=0.7385 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 1300/1794 total_loss=1.1153 ce_loss=1.0190 sem_loss=0.9350 hard_loss=0.0555 fer_acc=0.7444 sem_acc=0.7383 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 1400/1794 total_loss=1.0704 ce_loss=0.9721 sem_loss=0.9527 hard_loss=0.0598 fer_acc=0.7447 sem_acc=0.7380 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 1500/1794 total_loss=1.0259 ce_loss=0.9268 sem_loss=0.9636 hard_loss=0.0550 fer_acc=0.7459 sem_acc=0.7392 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 1600/1794 total_loss=0.8055 ce_loss=0.7339 sem_loss=0.6891 hard_loss=0.0554 fer_acc=0.7458 sem_acc=0.7394 lr_head=0.000240 lr_backbone=0.000024
+Epoch 8/60 step 1700/1794 total_loss=1.2182 ce_loss=1.1076 sem_loss=1.0510 hard_loss=0.1107 fer_acc=0.7450 sem_acc=0.7388 lr_head=0.000240 lr_backbone=0.000024
+[INFO] Epoch 8: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 71.27% | Macro F1: 0.6865 | Weighted F1: 0.7117
+[INFO] Epoch 8: validation finished
+[INFO] Save best at ep 8, val_loss: 1.1709, val_accuracy: 0.7127, monitor: val_accuracy
+[INFO] Save best_loss at ep 8, val_loss: 1.1709, val_accuracy: 0.7127
+[INFO] Epoch 8: saving last checkpoint
+Epoch 8/60 [9m 42s] loss=1.0951 sem_loss=0.9892 hard_loss=0.0832 acc=0.7442 val_loss=1.1709 val_acc=0.7127 val_macro_f1=0.6865 gw_means=[0.300,0.055,0.084,0.078,0.483] ent=0.998 throughput=52.0 samples/s lr_head=0.000240 lr_backbone=0.000024 patience=0/15 val_accuracy=0.7127
+Epoch 9/60 step 100/1794 total_loss=1.0463 ce_loss=0.9471 sem_loss=0.9605 hard_loss=0.0627 fer_acc=0.7919 sem_acc=0.7775 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 200/1794 total_loss=0.9767 ce_loss=0.8867 sem_loss=0.8755 hard_loss=0.0501 fer_acc=0.7909 sem_acc=0.7809 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 300/1794 total_loss=1.4105 ce_loss=1.2714 sem_loss=1.3674 hard_loss=0.0465 fer_acc=0.7846 sem_acc=0.7758 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 400/1794 total_loss=1.0623 ce_loss=0.9641 sem_loss=0.9550 hard_loss=0.0548 fer_acc=0.7861 sem_acc=0.7750 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 500/1794 total_loss=0.8308 ce_loss=0.7654 sem_loss=0.6354 hard_loss=0.0365 fer_acc=0.7875 sem_acc=0.7765 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 600/1794 total_loss=0.7206 ce_loss=0.6513 sem_loss=0.6691 hard_loss=0.0488 fer_acc=0.7864 sem_acc=0.7747 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 700/1794 total_loss=1.0755 ce_loss=0.9757 sem_loss=0.9564 hard_loss=0.0841 fer_acc=0.7846 sem_acc=0.7741 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 800/1794 total_loss=0.9883 ce_loss=0.8876 sem_loss=0.9670 hard_loss=0.0802 fer_acc=0.7824 sem_acc=0.7737 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 900/1794 total_loss=0.8708 ce_loss=0.7899 sem_loss=0.7606 hard_loss=0.0961 fer_acc=0.7816 sem_acc=0.7735 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 1000/1794 total_loss=0.9473 ce_loss=0.8581 sem_loss=0.8645 hard_loss=0.0560 fer_acc=0.7814 sem_acc=0.7738 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 1100/1794 total_loss=1.2621 ce_loss=1.1345 sem_loss=1.2364 hard_loss=0.0793 fer_acc=0.7813 sem_acc=0.7736 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 1200/1794 total_loss=1.0792 ce_loss=0.9754 sem_loss=0.9928 hard_loss=0.0905 fer_acc=0.7832 sem_acc=0.7760 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 1300/1794 total_loss=1.3345 ce_loss=1.2048 sem_loss=1.2496 hard_loss=0.0960 fer_acc=0.7831 sem_acc=0.7757 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 1400/1794 total_loss=1.3383 ce_loss=1.2076 sem_loss=1.2547 hard_loss=0.1039 fer_acc=0.7843 sem_acc=0.7774 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 1500/1794 total_loss=1.0136 ce_loss=0.9155 sem_loss=0.9546 hard_loss=0.0527 fer_acc=0.7838 sem_acc=0.7774 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 1600/1794 total_loss=0.9068 ce_loss=0.8158 sem_loss=0.8767 hard_loss=0.0660 fer_acc=0.7847 sem_acc=0.7778 lr_head=0.000300 lr_backbone=0.000030
+Epoch 9/60 step 1700/1794 total_loss=1.1402 ce_loss=1.0280 sem_loss=1.0781 hard_loss=0.0859 fer_acc=0.7851 sem_acc=0.7776 lr_head=0.000300 lr_backbone=0.000030
+[INFO] Epoch 9: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 71.22% | Macro F1: 0.6873 | Weighted F1: 0.7120
+[INFO] Epoch 9: validation finished
+[INFO] Save best_loss at ep 9, val_loss: 1.1547, val_accuracy: 0.7122
+[INFO] Epoch 9: saving last checkpoint
+Epoch 9/60 [9m 35s] loss=1.0169 sem_loss=0.9125 hard_loss=0.0721 acc=0.7835 val_loss=1.1547 val_acc=0.7122 val_macro_f1=0.6873 gw_means=[0.308,0.050,0.068,0.063,0.510] ent=0.933 throughput=52.0 samples/s lr_head=0.000300 lr_backbone=0.000030 patience=1/15 val_accuracy=0.7122
+Epoch 10/60 step 100/1794 total_loss=1.0205 ce_loss=0.9227 sem_loss=0.9530 hard_loss=0.0499 fer_acc=0.8381 sem_acc=0.8300 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 200/1794 total_loss=1.0790 ce_loss=0.9831 sem_loss=0.9367 hard_loss=0.0447 fer_acc=0.8409 sem_acc=0.8303 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 300/1794 total_loss=0.8412 ce_loss=0.7679 sem_loss=0.7148 hard_loss=0.0375 fer_acc=0.8392 sem_acc=0.8317 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 400/1794 total_loss=1.0215 ce_loss=0.9224 sem_loss=0.9569 hard_loss=0.0686 fer_acc=0.8428 sem_acc=0.8347 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 500/1794 total_loss=0.6992 ce_loss=0.6360 sem_loss=0.6154 hard_loss=0.0329 fer_acc=0.8406 sem_acc=0.8323 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 600/1794 total_loss=0.8198 ce_loss=0.7428 sem_loss=0.7382 hard_loss=0.0642 fer_acc=0.8396 sem_acc=0.8350 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 700/1794 total_loss=0.9652 ce_loss=0.8706 sem_loss=0.8985 hard_loss=0.0945 fer_acc=0.8391 sem_acc=0.8356 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 800/1794 total_loss=0.8833 ce_loss=0.8041 sem_loss=0.7731 hard_loss=0.0375 fer_acc=0.8402 sem_acc=0.8359 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 900/1794 total_loss=1.4039 ce_loss=1.2675 sem_loss=1.3152 hard_loss=0.0963 fer_acc=0.8394 sem_acc=0.8368 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 1000/1794 total_loss=1.1409 ce_loss=1.0407 sem_loss=0.9607 hard_loss=0.0823 fer_acc=0.8395 sem_acc=0.8373 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 1100/1794 total_loss=0.9881 ce_loss=0.8922 sem_loss=0.9253 hard_loss=0.0666 fer_acc=0.8384 sem_acc=0.8368 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 1200/1794 total_loss=0.9999 ce_loss=0.9107 sem_loss=0.8569 hard_loss=0.0706 fer_acc=0.8387 sem_acc=0.8380 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 1300/1794 total_loss=0.9998 ce_loss=0.9143 sem_loss=0.8297 hard_loss=0.0507 fer_acc=0.8386 sem_acc=0.8382 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 1400/1794 total_loss=0.9134 ce_loss=0.8321 sem_loss=0.7827 hard_loss=0.0612 fer_acc=0.8384 sem_acc=0.8379 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 1500/1794 total_loss=0.9059 ce_loss=0.8159 sem_loss=0.8574 hard_loss=0.0845 fer_acc=0.8369 sem_acc=0.8373 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 1600/1794 total_loss=0.8691 ce_loss=0.7971 sem_loss=0.6931 hard_loss=0.0553 fer_acc=0.8366 sem_acc=0.8370 lr_head=0.000300 lr_backbone=0.000030
+Epoch 10/60 step 1700/1794 total_loss=0.9059 ce_loss=0.8204 sem_loss=0.8333 hard_loss=0.0437 fer_acc=0.8356 sem_acc=0.8354 lr_head=0.000300 lr_backbone=0.000030
+[INFO] Epoch 10: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 72.95% | Macro F1: 0.7088 | Weighted F1: 0.7264
+[INFO] Epoch 10: validation finished
+[INFO] Save best at ep 10, val_loss: 1.1584, val_accuracy: 0.7295, monitor: val_accuracy
+[INFO] Epoch 10: saving last checkpoint
+[INFO] Epoch 10: saving periodic checkpoint
+Epoch 10/60 [9m 39s] loss=0.9086 sem_loss=0.8009 hard_loss=0.0554 acc=0.8359 val_loss=1.1584 val_acc=0.7295 val_macro_f1=0.7088 gw_means=[0.321,0.049,0.058,0.050,0.523] ent=0.878 throughput=52.0 samples/s lr_head=0.000300 lr_backbone=0.000030 patience=0/15 val_accuracy=0.7295
+Epoch 11/60 step 100/1794 total_loss=0.7710 ce_loss=0.7029 sem_loss=0.6624 hard_loss=0.0367 fer_acc=0.8875 sem_acc=0.8869 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 200/1794 total_loss=0.7586 ce_loss=0.6943 sem_loss=0.6230 hard_loss=0.0402 fer_acc=0.8872 sem_acc=0.8853 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 300/1794 total_loss=0.6495 ce_loss=0.5940 sem_loss=0.5394 hard_loss=0.0325 fer_acc=0.8892 sem_acc=0.8883 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 400/1794 total_loss=0.8851 ce_loss=0.8083 sem_loss=0.7518 hard_loss=0.0337 fer_acc=0.8881 sem_acc=0.8892 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 500/1794 total_loss=0.7589 ce_loss=0.6900 sem_loss=0.6651 hard_loss=0.0460 fer_acc=0.8868 sem_acc=0.8872 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 600/1794 total_loss=0.8050 ce_loss=0.7239 sem_loss=0.7825 hard_loss=0.0577 fer_acc=0.8858 sem_acc=0.8857 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 700/1794 total_loss=1.0075 ce_loss=0.9214 sem_loss=0.8329 hard_loss=0.0553 fer_acc=0.8861 sem_acc=0.8858 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 800/1794 total_loss=1.1241 ce_loss=1.0191 sem_loss=1.0219 hard_loss=0.0561 fer_acc=0.8862 sem_acc=0.8850 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 900/1794 total_loss=0.6356 ce_loss=0.5791 sem_loss=0.5511 hard_loss=0.0280 fer_acc=0.8853 sem_acc=0.8849 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 1000/1794 total_loss=1.0699 ce_loss=0.9767 sem_loss=0.8981 hard_loss=0.0668 fer_acc=0.8848 sem_acc=0.8847 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 1100/1794 total_loss=0.6718 ce_loss=0.6166 sem_loss=0.5420 hard_loss=0.0189 fer_acc=0.8852 sem_acc=0.8848 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 1200/1794 total_loss=0.8925 ce_loss=0.8129 sem_loss=0.7810 hard_loss=0.0298 fer_acc=0.8851 sem_acc=0.8844 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 1300/1794 total_loss=0.7248 ce_loss=0.6613 sem_loss=0.6169 hard_loss=0.0358 fer_acc=0.8838 sem_acc=0.8825 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 1400/1794 total_loss=0.9511 ce_loss=0.8723 sem_loss=0.7648 hard_loss=0.0481 fer_acc=0.8828 sem_acc=0.8800 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 1500/1794 total_loss=0.8753 ce_loss=0.7926 sem_loss=0.7951 hard_loss=0.0654 fer_acc=0.8821 sem_acc=0.8783 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 1600/1794 total_loss=0.9897 ce_loss=0.9000 sem_loss=0.8764 hard_loss=0.0409 fer_acc=0.8825 sem_acc=0.8755 lr_head=0.000300 lr_backbone=0.000030
+Epoch 11/60 step 1700/1794 total_loss=0.7502 ce_loss=0.6776 sem_loss=0.7042 hard_loss=0.0427 fer_acc=0.8831 sem_acc=0.8734 lr_head=0.000300 lr_backbone=0.000030
+[INFO] Epoch 11: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 72.95% | Macro F1: 0.7154 | Weighted F1: 0.7272
+[INFO] Epoch 11: validation finished
+[INFO] Epoch 11: saving last checkpoint
+Epoch 11/60 [9m 31s] loss=0.8189 sem_loss=0.7235 hard_loss=0.0412 acc=0.8822 val_loss=1.1688 val_acc=0.7295 val_macro_f1=0.7154 gw_means=[0.330,0.054,0.058,0.043,0.516] ent=0.844 throughput=52.1 samples/s lr_head=0.000300 lr_backbone=0.000030 patience=1/15 val_accuracy=0.7295
+Epoch 12/60 step 100/1794 total_loss=0.6594 ce_loss=0.5859 sem_loss=0.7256 hard_loss=0.0174 fer_acc=0.9225 sem_acc=0.8219 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 200/1794 total_loss=0.8593 ce_loss=0.7770 sem_loss=0.8070 hard_loss=0.0320 fer_acc=0.9209 sem_acc=0.8316 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 300/1794 total_loss=0.6798 ce_loss=0.6206 sem_loss=0.5780 hard_loss=0.0288 fer_acc=0.9163 sem_acc=0.8223 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 400/1794 total_loss=0.5909 ce_loss=0.4979 sem_loss=0.9288 hard_loss=0.0011 fer_acc=0.9181 sem_acc=0.8152 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 500/1794 total_loss=0.7559 ce_loss=0.6642 sem_loss=0.9088 hard_loss=0.0161 fer_acc=0.9179 sem_acc=0.8019 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 600/1794 total_loss=0.7035 ce_loss=0.6006 sem_loss=1.0239 hard_loss=0.0102 fer_acc=0.9177 sem_acc=0.7924 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 700/1794 total_loss=0.7503 ce_loss=0.6574 sem_loss=0.9144 hard_loss=0.0286 fer_acc=0.9185 sem_acc=0.7856 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 800/1794 total_loss=0.7630 ce_loss=0.6807 sem_loss=0.8090 hard_loss=0.0269 fer_acc=0.9200 sem_acc=0.7855 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 900/1794 total_loss=0.7855 ce_loss=0.6770 sem_loss=1.0703 hard_loss=0.0293 fer_acc=0.9183 sem_acc=0.7808 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 1000/1794 total_loss=1.1152 ce_loss=1.0049 sem_loss=1.0922 hard_loss=0.0215 fer_acc=0.9184 sem_acc=0.7754 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 1100/1794 total_loss=0.7854 ce_loss=0.6685 sem_loss=1.1522 hard_loss=0.0332 fer_acc=0.9172 sem_acc=0.7699 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 1200/1794 total_loss=1.1571 ce_loss=1.0293 sem_loss=1.2485 hard_loss=0.0597 fer_acc=0.9173 sem_acc=0.7652 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 1300/1794 total_loss=0.7709 ce_loss=0.6965 sem_loss=0.7322 hard_loss=0.0217 fer_acc=0.9175 sem_acc=0.7639 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 1400/1794 total_loss=0.7116 ce_loss=0.6223 sem_loss=0.8745 hard_loss=0.0367 fer_acc=0.9175 sem_acc=0.7625 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 1500/1794 total_loss=0.6560 ce_loss=0.5789 sem_loss=0.7641 hard_loss=0.0131 fer_acc=0.9173 sem_acc=0.7589 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 1600/1794 total_loss=0.8184 ce_loss=0.7309 sem_loss=0.8620 hard_loss=0.0273 fer_acc=0.9169 sem_acc=0.7563 lr_head=0.000299 lr_backbone=0.000030
+Epoch 12/60 step 1700/1794 total_loss=0.6528 ce_loss=0.5542 sem_loss=0.9819 hard_loss=0.0087 fer_acc=0.9166 sem_acc=0.7533 lr_head=0.000299 lr_backbone=0.000030
+[INFO] Epoch 12: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 72.56% | Macro F1: 0.7059 | Weighted F1: 0.7234
+[INFO] Epoch 12: validation finished
+[INFO] Epoch 12: saving last checkpoint
+Epoch 12/60 [9m 31s] loss=0.7693 sem_loss=0.8843 hard_loss=0.0287 acc=0.9164 val_loss=1.2113 val_acc=0.7256 val_macro_f1=0.7059 gw_means=[0.344,0.058,0.047,0.035,0.515] ent=0.768 throughput=52.0 samples/s lr_head=0.000299 lr_backbone=0.000030 patience=2/15 val_accuracy=0.7256
+Epoch 13/60 step 100/1794 total_loss=0.8654 ce_loss=0.7639 sem_loss=0.9982 hard_loss=0.0332 fer_acc=0.9394 sem_acc=0.7406 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 200/1794 total_loss=0.6217 ce_loss=0.5363 sem_loss=0.8499 hard_loss=0.0076 fer_acc=0.9413 sem_acc=0.7400 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 300/1794 total_loss=0.9924 ce_loss=0.8887 sem_loss=1.0176 hard_loss=0.0377 fer_acc=0.9423 sem_acc=0.7294 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 400/1794 total_loss=0.6594 ce_loss=0.5721 sem_loss=0.8664 hard_loss=0.0133 fer_acc=0.9413 sem_acc=0.7272 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 500/1794 total_loss=1.0364 ce_loss=0.8913 sem_loss=1.4377 hard_loss=0.0267 fer_acc=0.9411 sem_acc=0.7266 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 600/1794 total_loss=0.6594 ce_loss=0.5884 sem_loss=0.7037 hard_loss=0.0143 fer_acc=0.9404 sem_acc=0.7279 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 700/1794 total_loss=0.7818 ce_loss=0.6608 sem_loss=1.1900 hard_loss=0.0399 fer_acc=0.9413 sem_acc=0.7254 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 800/1794 total_loss=0.6458 ce_loss=0.5720 sem_loss=0.7281 hard_loss=0.0194 fer_acc=0.9407 sem_acc=0.7330 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 900/1794 total_loss=0.8463 ce_loss=0.7785 sem_loss=0.6662 hard_loss=0.0249 fer_acc=0.9408 sem_acc=0.7402 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 1000/1794 total_loss=0.7114 ce_loss=0.6426 sem_loss=0.6784 hard_loss=0.0188 fer_acc=0.9399 sem_acc=0.7444 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 1100/1794 total_loss=0.6214 ce_loss=0.5594 sem_loss=0.6073 hard_loss=0.0244 fer_acc=0.9392 sem_acc=0.7509 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 1200/1794 total_loss=0.6181 ce_loss=0.5666 sem_loss=0.5134 hard_loss=0.0035 fer_acc=0.9389 sem_acc=0.7654 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 1300/1794 total_loss=0.6907 ce_loss=0.6350 sem_loss=0.5499 hard_loss=0.0145 fer_acc=0.9388 sem_acc=0.7787 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 1400/1794 total_loss=0.7816 ce_loss=0.7025 sem_loss=0.7596 hard_loss=0.0619 fer_acc=0.9373 sem_acc=0.7891 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 1500/1794 total_loss=0.7764 ce_loss=0.7039 sem_loss=0.7204 hard_loss=0.0099 fer_acc=0.9363 sem_acc=0.7980 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 1600/1794 total_loss=0.6141 ce_loss=0.5628 sem_loss=0.5044 hard_loss=0.0167 fer_acc=0.9362 sem_acc=0.8065 lr_head=0.000298 lr_backbone=0.000030
+Epoch 13/60 step 1700/1794 total_loss=0.7657 ce_loss=0.6964 sem_loss=0.6855 hard_loss=0.0149 fer_acc=0.9356 sem_acc=0.8135 lr_head=0.000298 lr_backbone=0.000030
+[INFO] Epoch 13: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.14% | Macro F1: 0.7224 | Weighted F1: 0.7293
+[INFO] Epoch 13: validation finished
+[INFO] Save best at ep 13, val_loss: 1.1827, val_accuracy: 0.7314, monitor: val_accuracy
+[INFO] Epoch 13: saving last checkpoint
+Epoch 13/60 [9m 35s] loss=0.7178 sem_loss=0.7767 hard_loss=0.0219 acc=0.9352 val_loss=1.1827 val_acc=0.7314 val_macro_f1=0.7224 gw_means=[0.310,0.065,0.136,0.029,0.460] ent=0.693 throughput=52.1 samples/s lr_head=0.000298 lr_backbone=0.000030 patience=0/15 val_accuracy=0.7314
+Epoch 14/60 step 100/1794 total_loss=0.9215 ce_loss=0.8278 sem_loss=0.9148 hard_loss=0.0439 fer_acc=0.9550 sem_acc=0.8769 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 200/1794 total_loss=0.8270 ce_loss=0.7572 sem_loss=0.6805 hard_loss=0.0354 fer_acc=0.9503 sem_acc=0.8900 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 300/1794 total_loss=0.6653 ce_loss=0.6100 sem_loss=0.5456 hard_loss=0.0143 fer_acc=0.9529 sem_acc=0.9094 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 400/1794 total_loss=0.5875 ce_loss=0.5348 sem_loss=0.5216 hard_loss=0.0103 fer_acc=0.9550 sem_acc=0.9236 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 500/1794 total_loss=0.5970 ce_loss=0.5464 sem_loss=0.5001 hard_loss=0.0114 fer_acc=0.9525 sem_acc=0.9276 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 600/1794 total_loss=0.7974 ce_loss=0.7306 sem_loss=0.6455 hard_loss=0.0434 fer_acc=0.9509 sem_acc=0.9311 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 700/1794 total_loss=0.8337 ce_loss=0.7525 sem_loss=0.7925 hard_loss=0.0406 fer_acc=0.9516 sem_acc=0.9354 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 800/1794 total_loss=0.7817 ce_loss=0.7146 sem_loss=0.6547 hard_loss=0.0340 fer_acc=0.9509 sem_acc=0.9370 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 900/1794 total_loss=0.5978 ce_loss=0.5485 sem_loss=0.4899 hard_loss=0.0070 fer_acc=0.9517 sem_acc=0.9392 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 1000/1794 total_loss=0.8188 ce_loss=0.7359 sem_loss=0.7981 hard_loss=0.0617 fer_acc=0.9508 sem_acc=0.9397 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 1100/1794 total_loss=0.5832 ce_loss=0.5271 sem_loss=0.5563 hard_loss=0.0104 fer_acc=0.9502 sem_acc=0.9410 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 1200/1794 total_loss=0.6727 ce_loss=0.6180 sem_loss=0.5370 hard_loss=0.0189 fer_acc=0.9498 sem_acc=0.9411 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 1300/1794 total_loss=0.8277 ce_loss=0.7524 sem_loss=0.7312 hard_loss=0.0434 fer_acc=0.9492 sem_acc=0.9414 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 1400/1794 total_loss=0.6273 ce_loss=0.5703 sem_loss=0.5660 hard_loss=0.0099 fer_acc=0.9494 sem_acc=0.9423 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 1500/1794 total_loss=0.7309 ce_loss=0.6722 sem_loss=0.5840 hard_loss=0.0061 fer_acc=0.9485 sem_acc=0.9417 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 1600/1794 total_loss=0.9761 ce_loss=0.8814 sem_loss=0.9257 hard_loss=0.0427 fer_acc=0.9485 sem_acc=0.9420 lr_head=0.000296 lr_backbone=0.000030
+Epoch 14/60 step 1700/1794 total_loss=0.5995 ce_loss=0.5463 sem_loss=0.5273 hard_loss=0.0099 fer_acc=0.9488 sem_acc=0.9425 lr_head=0.000296 lr_backbone=0.000030
+[INFO] Epoch 14: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 72.75% | Macro F1: 0.7138 | Weighted F1: 0.7258
+[INFO] Epoch 14: validation finished
+[INFO] Epoch 14: saving last checkpoint
+Epoch 14/60 [9m 31s] loss=0.6702 sem_loss=0.5827 hard_loss=0.0167 acc=0.9485 val_loss=1.1799 val_acc=0.7275 val_macro_f1=0.7138 gw_means=[0.327,0.065,0.149,0.023,0.437] ent=0.681 throughput=52.1 samples/s lr_head=0.000296 lr_backbone=0.000030 patience=1/15 val_accuracy=0.7275
+Epoch 15/60 step 100/1794 total_loss=0.6948 ce_loss=0.6357 sem_loss=0.5856 hard_loss=0.0090 fer_acc=0.9613 sem_acc=0.9650 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 200/1794 total_loss=0.6536 ce_loss=0.6027 sem_loss=0.5044 hard_loss=0.0092 fer_acc=0.9647 sem_acc=0.9681 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 300/1794 total_loss=0.6849 ce_loss=0.6213 sem_loss=0.6225 hard_loss=0.0276 fer_acc=0.9633 sem_acc=0.9675 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 400/1794 total_loss=0.6105 ce_loss=0.5583 sem_loss=0.5151 hard_loss=0.0135 fer_acc=0.9622 sem_acc=0.9658 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 500/1794 total_loss=0.5473 ce_loss=0.5013 sem_loss=0.4595 hard_loss=0.0010 fer_acc=0.9614 sem_acc=0.9655 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 600/1794 total_loss=0.8402 ce_loss=0.7634 sem_loss=0.7605 hard_loss=0.0148 fer_acc=0.9621 sem_acc=0.9655 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 700/1794 total_loss=0.6873 ce_loss=0.6270 sem_loss=0.5954 hard_loss=0.0147 fer_acc=0.9621 sem_acc=0.9657 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 800/1794 total_loss=0.6966 ce_loss=0.6365 sem_loss=0.5894 hard_loss=0.0245 fer_acc=0.9617 sem_acc=0.9652 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 900/1794 total_loss=0.6905 ce_loss=0.6289 sem_loss=0.6054 hard_loss=0.0203 fer_acc=0.9599 sem_acc=0.9630 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 1000/1794 total_loss=0.5765 ce_loss=0.5278 sem_loss=0.4795 hard_loss=0.0146 fer_acc=0.9596 sem_acc=0.9624 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 1100/1794 total_loss=0.5270 ce_loss=0.4819 sem_loss=0.4508 hard_loss=0.0000 fer_acc=0.9586 sem_acc=0.9606 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 1200/1794 total_loss=0.6410 ce_loss=0.5812 sem_loss=0.5845 hard_loss=0.0257 fer_acc=0.9584 sem_acc=0.9589 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 1300/1794 total_loss=0.5937 ce_loss=0.5180 sem_loss=0.7380 hard_loss=0.0380 fer_acc=0.9586 sem_acc=0.9561 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 1400/1794 total_loss=0.7314 ce_loss=0.6606 sem_loss=0.6877 hard_loss=0.0403 fer_acc=0.9586 sem_acc=0.9525 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 1500/1794 total_loss=0.6798 ce_loss=0.6073 sem_loss=0.7035 hard_loss=0.0424 fer_acc=0.9579 sem_acc=0.9460 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 1600/1794 total_loss=0.8579 ce_loss=0.7580 sem_loss=0.9671 hard_loss=0.0632 fer_acc=0.9582 sem_acc=0.9374 lr_head=0.000294 lr_backbone=0.000029
+Epoch 15/60 step 1700/1794 total_loss=0.6144 ce_loss=0.5460 sem_loss=0.6561 hard_loss=0.0561 fer_acc=0.9576 sem_acc=0.9261 lr_head=0.000294 lr_backbone=0.000029
+[INFO] Epoch 15: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 72.69% | Macro F1: 0.7161 | Weighted F1: 0.7257
+[INFO] Epoch 15: validation finished
+[INFO] Epoch 15: saving last checkpoint
+Epoch 15/60 [9m 36s] loss=0.6540 sem_loss=0.6202 hard_loss=0.0258 acc=0.9574 val_loss=1.2408 val_acc=0.7269 val_macro_f1=0.7161 gw_means=[0.333,0.089,0.159,0.021,0.398] ent=0.612 throughput=52.1 samples/s lr_head=0.000294 lr_backbone=0.000029 patience=2/15 val_accuracy=0.7269
+Epoch 16/60 step 100/1794 total_loss=0.7660 ce_loss=0.6421 sem_loss=1.1947 hard_loss=0.0898 fer_acc=0.9613 sem_acc=0.6262 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 200/1794 total_loss=0.6698 ce_loss=0.5677 sem_loss=0.9680 hard_loss=0.1055 fer_acc=0.9669 sem_acc=0.6003 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 300/1794 total_loss=0.8915 ce_loss=0.7664 sem_loss=1.1948 hard_loss=0.1130 fer_acc=0.9667 sem_acc=0.6069 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 400/1794 total_loss=0.5763 ce_loss=0.4990 sem_loss=0.7487 hard_loss=0.0481 fer_acc=0.9647 sem_acc=0.6095 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 500/1794 total_loss=0.6263 ce_loss=0.5000 sem_loss=1.2185 hard_loss=0.0897 fer_acc=0.9629 sem_acc=0.5976 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 600/1794 total_loss=0.8049 ce_loss=0.6756 sem_loss=1.2504 hard_loss=0.0844 fer_acc=0.9627 sem_acc=0.5845 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 700/1794 total_loss=0.7533 ce_loss=0.6045 sem_loss=1.4157 hard_loss=0.1434 fer_acc=0.9626 sem_acc=0.5716 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 800/1794 total_loss=0.6255 ce_loss=0.4993 sem_loss=1.2208 hard_loss=0.0824 fer_acc=0.9620 sem_acc=0.5624 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 900/1794 total_loss=0.6754 ce_loss=0.5608 sem_loss=1.0850 hard_loss=0.1230 fer_acc=0.9629 sem_acc=0.5553 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 1000/1794 total_loss=0.6499 ce_loss=0.5309 sem_loss=1.1475 hard_loss=0.0848 fer_acc=0.9636 sem_acc=0.5467 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 1100/1794 total_loss=0.6387 ce_loss=0.5145 sem_loss=1.1980 hard_loss=0.0887 fer_acc=0.9634 sem_acc=0.5373 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 1200/1794 total_loss=0.6610 ce_loss=0.5324 sem_loss=1.2305 hard_loss=0.1115 fer_acc=0.9628 sem_acc=0.5336 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 1300/1794 total_loss=0.6781 ce_loss=0.5242 sem_loss=1.4714 hard_loss=0.1350 fer_acc=0.9629 sem_acc=0.5304 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 1400/1794 total_loss=0.6354 ce_loss=0.5205 sem_loss=1.1047 hard_loss=0.0904 fer_acc=0.9629 sem_acc=0.5314 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 1500/1794 total_loss=0.8255 ce_loss=0.6835 sem_loss=1.3583 hard_loss=0.1236 fer_acc=0.9631 sem_acc=0.5282 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 1600/1794 total_loss=0.7165 ce_loss=0.5754 sem_loss=1.3550 hard_loss=0.1123 fer_acc=0.9628 sem_acc=0.5218 lr_head=0.000291 lr_backbone=0.000029
+Epoch 16/60 step 1700/1794 total_loss=0.7545 ce_loss=0.5891 sem_loss=1.5903 hard_loss=0.1268 fer_acc=0.9627 sem_acc=0.5106 lr_head=0.000291 lr_backbone=0.000029
+[INFO] Epoch 16: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.11% | Macro F1: 0.7201 | Weighted F1: 0.7293
+[INFO] Epoch 16: validation finished
+[INFO] Epoch 16: saving last checkpoint
+Epoch 16/60 [9m 31s] loss=0.7043 sem_loss=1.2311 hard_loss=0.1040 acc=0.9625 val_loss=1.2639 val_acc=0.7311 val_macro_f1=0.7201 gw_means=[0.350,0.137,0.148,0.015,0.349] ent=0.573 throughput=52.1 samples/s lr_head=0.000291 lr_backbone=0.000029 patience=3/15 val_accuracy=0.7311
+Epoch 17/60 step 100/1794 total_loss=0.6523 ce_loss=0.5101 sem_loss=1.3768 hard_loss=0.0903 fer_acc=0.9712 sem_acc=0.2537 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 200/1794 total_loss=0.8246 ce_loss=0.6651 sem_loss=1.5471 hard_loss=0.0953 fer_acc=0.9738 sem_acc=0.2484 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 300/1794 total_loss=0.6934 ce_loss=0.5173 sem_loss=1.6948 hard_loss=0.1316 fer_acc=0.9723 sem_acc=0.2504 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 400/1794 total_loss=0.7134 ce_loss=0.5507 sem_loss=1.5545 hard_loss=0.1441 fer_acc=0.9716 sem_acc=0.2533 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 500/1794 total_loss=0.8189 ce_loss=0.6549 sem_loss=1.5927 hard_loss=0.0941 fer_acc=0.9700 sem_acc=0.2566 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 600/1794 total_loss=0.8329 ce_loss=0.6760 sem_loss=1.5247 hard_loss=0.0870 fer_acc=0.9698 sem_acc=0.2639 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 700/1794 total_loss=0.6455 ce_loss=0.5301 sem_loss=1.1261 hard_loss=0.0569 fer_acc=0.9690 sem_acc=0.2688 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 800/1794 total_loss=0.6701 ce_loss=0.5170 sem_loss=1.4880 hard_loss=0.0858 fer_acc=0.9697 sem_acc=0.2740 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 900/1794 total_loss=0.7092 ce_loss=0.5513 sem_loss=1.5284 hard_loss=0.1001 fer_acc=0.9699 sem_acc=0.2810 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 1000/1794 total_loss=0.7271 ce_loss=0.5697 sem_loss=1.5285 hard_loss=0.0908 fer_acc=0.9692 sem_acc=0.2882 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 1100/1794 total_loss=0.7052 ce_loss=0.5497 sem_loss=1.5082 hard_loss=0.0932 fer_acc=0.9689 sem_acc=0.2902 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 1200/1794 total_loss=0.7828 ce_loss=0.6044 sem_loss=1.7293 hard_loss=0.1091 fer_acc=0.9681 sem_acc=0.2939 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 1300/1794 total_loss=0.6555 ce_loss=0.4927 sem_loss=1.5767 hard_loss=0.1013 fer_acc=0.9683 sem_acc=0.2972 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 1400/1794 total_loss=0.6482 ce_loss=0.4851 sem_loss=1.5886 hard_loss=0.0845 fer_acc=0.9685 sem_acc=0.2999 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 1500/1794 total_loss=0.7129 ce_loss=0.5525 sem_loss=1.5615 hard_loss=0.0852 fer_acc=0.9682 sem_acc=0.3037 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 1600/1794 total_loss=0.8665 ce_loss=0.7202 sem_loss=1.4118 hard_loss=0.1034 fer_acc=0.9681 sem_acc=0.3063 lr_head=0.000288 lr_backbone=0.000029
+Epoch 17/60 step 1700/1794 total_loss=0.7306 ce_loss=0.5873 sem_loss=1.3949 hard_loss=0.0748 fer_acc=0.9677 sem_acc=0.3082 lr_head=0.000288 lr_backbone=0.000029
+[INFO] Epoch 17: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 72.72% | Macro F1: 0.7134 | Weighted F1: 0.7244
+[INFO] Epoch 17: validation finished
+[INFO] Epoch 17: saving last checkpoint
+Epoch 17/60 [9m 31s] loss=0.7205 sem_loss=1.5215 hard_loss=0.0957 acc=0.9674 val_loss=1.2388 val_acc=0.7272 val_macro_f1=0.7134 gw_means=[0.330,0.261,0.096,0.016,0.296] ent=0.625 throughput=52.1 samples/s lr_head=0.000288 lr_backbone=0.000029 patience=4/15 val_accuracy=0.7272
+Epoch 18/60 step 100/1794 total_loss=0.7035 ce_loss=0.5404 sem_loss=1.5821 hard_loss=0.0976 fer_acc=0.9800 sem_acc=0.3350 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 200/1794 total_loss=0.7138 ce_loss=0.5434 sem_loss=1.6450 hard_loss=0.1175 fer_acc=0.9816 sem_acc=0.3453 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 300/1794 total_loss=0.6676 ce_loss=0.5127 sem_loss=1.4925 hard_loss=0.1140 fer_acc=0.9802 sem_acc=0.3412 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 400/1794 total_loss=0.7591 ce_loss=0.6035 sem_loss=1.5103 hard_loss=0.0922 fer_acc=0.9806 sem_acc=0.3447 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 500/1794 total_loss=0.6570 ce_loss=0.5028 sem_loss=1.5080 hard_loss=0.0675 fer_acc=0.9794 sem_acc=0.3424 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 600/1794 total_loss=0.6450 ce_loss=0.4890 sem_loss=1.5203 hard_loss=0.0801 fer_acc=0.9784 sem_acc=0.3393 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 700/1794 total_loss=0.6347 ce_loss=0.4781 sem_loss=1.5247 hard_loss=0.0821 fer_acc=0.9779 sem_acc=0.3412 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 800/1794 total_loss=1.0813 ce_loss=0.9324 sem_loss=1.4512 hard_loss=0.0759 fer_acc=0.9776 sem_acc=0.3416 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 900/1794 total_loss=0.6088 ce_loss=0.4750 sem_loss=1.3050 hard_loss=0.0652 fer_acc=0.9777 sem_acc=0.3417 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 1000/1794 total_loss=0.6989 ce_loss=0.5430 sem_loss=1.4919 hard_loss=0.1356 fer_acc=0.9762 sem_acc=0.3412 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 1100/1794 total_loss=0.6706 ce_loss=0.5008 sem_loss=1.6498 hard_loss=0.0971 fer_acc=0.9751 sem_acc=0.3410 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 1200/1794 total_loss=0.6823 ce_loss=0.5019 sem_loss=1.7448 hard_loss=0.1183 fer_acc=0.9745 sem_acc=0.3421 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 1300/1794 total_loss=0.6555 ce_loss=0.5075 sem_loss=1.4451 hard_loss=0.0685 fer_acc=0.9740 sem_acc=0.3424 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 1400/1794 total_loss=0.7563 ce_loss=0.5831 sem_loss=1.6757 hard_loss=0.1126 fer_acc=0.9736 sem_acc=0.3433 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 1500/1794 total_loss=0.7858 ce_loss=0.6207 sem_loss=1.6087 hard_loss=0.0851 fer_acc=0.9737 sem_acc=0.3428 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 1600/1794 total_loss=0.6999 ce_loss=0.5369 sem_loss=1.5989 hard_loss=0.0626 fer_acc=0.9735 sem_acc=0.3426 lr_head=0.000284 lr_backbone=0.000028
+Epoch 18/60 step 1700/1794 total_loss=0.7588 ce_loss=0.5905 sem_loss=1.6234 hard_loss=0.1196 fer_acc=0.9733 sem_acc=0.3430 lr_head=0.000284 lr_backbone=0.000028
+[INFO] Epoch 18: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.17% | Macro F1: 0.7246 | Weighted F1: 0.7318
+[INFO] Epoch 18: validation finished
+[INFO] Save best at ep 18, val_loss: 1.2364, val_accuracy: 0.7317, monitor: val_accuracy
+[INFO] Epoch 18: saving last checkpoint
+Epoch 18/60 [9m 48s] loss=0.7022 sem_loss=1.4727 hard_loss=0.0835 acc=0.9728 val_loss=1.2364 val_acc=0.7317 val_macro_f1=0.7246 gw_means=[0.266,0.314,0.132,0.016,0.273] ent=0.571 throughput=52.1 samples/s lr_head=0.000284 lr_backbone=0.000028 patience=0/15 val_accuracy=0.7317
+Epoch 19/60 step 100/1794 total_loss=0.8128 ce_loss=0.6392 sem_loss=1.6740 hard_loss=0.1236 fer_acc=0.9794 sem_acc=0.3438 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 200/1794 total_loss=0.6671 ce_loss=0.4843 sem_loss=1.7675 hard_loss=0.1207 fer_acc=0.9794 sem_acc=0.3481 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 300/1794 total_loss=0.6607 ce_loss=0.5017 sem_loss=1.5412 hard_loss=0.0990 fer_acc=0.9790 sem_acc=0.3504 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 400/1794 total_loss=0.6400 ce_loss=0.4800 sem_loss=1.5515 hard_loss=0.0968 fer_acc=0.9798 sem_acc=0.3556 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 500/1794 total_loss=0.6689 ce_loss=0.5535 sem_loss=1.1278 hard_loss=0.0530 fer_acc=0.9804 sem_acc=0.3590 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 600/1794 total_loss=0.6205 ce_loss=0.5094 sem_loss=1.0889 hard_loss=0.0436 fer_acc=0.9798 sem_acc=0.3695 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 700/1794 total_loss=0.6141 ce_loss=0.4818 sem_loss=1.2773 hard_loss=0.0914 fer_acc=0.9785 sem_acc=0.3920 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 800/1794 total_loss=0.7165 ce_loss=0.5516 sem_loss=1.5825 hard_loss=0.1349 fer_acc=0.9784 sem_acc=0.4134 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 900/1794 total_loss=0.6062 ce_loss=0.5024 sem_loss=1.0122 hard_loss=0.0524 fer_acc=0.9774 sem_acc=0.4313 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 1000/1794 total_loss=0.6482 ce_loss=0.5700 sem_loss=0.7459 hard_loss=0.0724 fer_acc=0.9771 sem_acc=0.4471 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 1100/1794 total_loss=0.6948 ce_loss=0.5811 sem_loss=1.0936 hard_loss=0.0867 fer_acc=0.9764 sem_acc=0.4599 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 1200/1794 total_loss=0.6239 ce_loss=0.5141 sem_loss=1.0660 hard_loss=0.0646 fer_acc=0.9762 sem_acc=0.4716 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 1300/1794 total_loss=0.6328 ce_loss=0.5013 sem_loss=1.2643 hard_loss=0.1021 fer_acc=0.9761 sem_acc=0.4823 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 1400/1794 total_loss=0.6722 ce_loss=0.5386 sem_loss=1.2906 hard_loss=0.0898 fer_acc=0.9760 sem_acc=0.4926 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 1500/1794 total_loss=0.6741 ce_loss=0.5608 sem_loss=1.0960 hard_loss=0.0740 fer_acc=0.9753 sem_acc=0.4995 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 1600/1794 total_loss=0.7672 ce_loss=0.6559 sem_loss=1.0889 hard_loss=0.0477 fer_acc=0.9752 sem_acc=0.5044 lr_head=0.000280 lr_backbone=0.000028
+Epoch 19/60 step 1700/1794 total_loss=0.6136 ce_loss=0.5151 sem_loss=0.9558 hard_loss=0.0586 fer_acc=0.9753 sem_acc=0.5076 lr_head=0.000280 lr_backbone=0.000028
+[INFO] Epoch 19: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 72.69% | Macro F1: 0.7157 | Weighted F1: 0.7270
+[INFO] Epoch 19: validation finished
+[INFO] Epoch 19: saving last checkpoint
+Epoch 19/60 [9m 30s] loss=0.6698 sem_loss=1.2263 hard_loss=0.0815 acc=0.9752 val_loss=1.2283 val_acc=0.7269 val_macro_f1=0.7157 gw_means=[0.202,0.315,0.220,0.021,0.241] ent=0.488 throughput=52.1 samples/s lr_head=0.000280 lr_backbone=0.000028 patience=1/15 val_accuracy=0.7269
+Epoch 20/60 step 100/1794 total_loss=0.7366 ce_loss=0.6147 sem_loss=1.1960 hard_loss=0.0470 fer_acc=0.9806 sem_acc=0.4500 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 200/1794 total_loss=0.6022 ce_loss=0.4873 sem_loss=1.1268 hard_loss=0.0440 fer_acc=0.9788 sem_acc=0.4547 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 300/1794 total_loss=0.6423 ce_loss=0.5187 sem_loss=1.2084 hard_loss=0.0553 fer_acc=0.9777 sem_acc=0.4517 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 400/1794 total_loss=0.6294 ce_loss=0.5037 sem_loss=1.2110 hard_loss=0.0924 fer_acc=0.9797 sem_acc=0.4520 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 500/1794 total_loss=0.7540 ce_loss=0.5951 sem_loss=1.5544 hard_loss=0.0678 fer_acc=0.9789 sem_acc=0.4505 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 600/1794 total_loss=0.6306 ce_loss=0.4895 sem_loss=1.3884 hard_loss=0.0440 fer_acc=0.9791 sem_acc=0.4527 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 700/1794 total_loss=0.6275 ce_loss=0.4936 sem_loss=1.3005 hard_loss=0.0787 fer_acc=0.9788 sem_acc=0.4487 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 800/1794 total_loss=0.6654 ce_loss=0.5512 sem_loss=1.1234 hard_loss=0.0369 fer_acc=0.9791 sem_acc=0.4454 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 900/1794 total_loss=0.6693 ce_loss=0.5000 sem_loss=1.6253 hard_loss=0.1343 fer_acc=0.9797 sem_acc=0.4398 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 1000/1794 total_loss=0.6082 ce_loss=0.4890 sem_loss=1.1552 hard_loss=0.0728 fer_acc=0.9798 sem_acc=0.4344 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 1100/1794 total_loss=0.6740 ce_loss=0.5172 sem_loss=1.5020 hard_loss=0.1326 fer_acc=0.9798 sem_acc=0.4320 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 1200/1794 total_loss=0.6379 ce_loss=0.4829 sem_loss=1.4982 hard_loss=0.1036 fer_acc=0.9798 sem_acc=0.4289 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 1300/1794 total_loss=0.6281 ce_loss=0.5027 sem_loss=1.2252 hard_loss=0.0579 fer_acc=0.9798 sem_acc=0.4258 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 1400/1794 total_loss=0.6942 ce_loss=0.5718 sem_loss=1.1948 hard_loss=0.0589 fer_acc=0.9799 sem_acc=0.4223 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 1500/1794 total_loss=0.7794 ce_loss=0.6130 sem_loss=1.6014 hard_loss=0.1255 fer_acc=0.9797 sem_acc=0.4193 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 1600/1794 total_loss=0.6638 ce_loss=0.4868 sem_loss=1.7232 hard_loss=0.0943 fer_acc=0.9792 sem_acc=0.4161 lr_head=0.000275 lr_backbone=0.000028
+Epoch 20/60 step 1700/1794 total_loss=0.7046 ce_loss=0.5374 sem_loss=1.6295 hard_loss=0.0853 fer_acc=0.9786 sem_acc=0.4120 lr_head=0.000275 lr_backbone=0.000028
+[INFO] Epoch 20: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.08% | Macro F1: 0.7160 | Weighted F1: 0.7275
+[INFO] Epoch 20: validation finished
+[INFO] Epoch 20: saving last checkpoint
+[INFO] Epoch 20: saving periodic checkpoint
+Epoch 20/60 [9m 35s] loss=0.6776 sem_loss=1.3747 hard_loss=0.0788 acc=0.9784 val_loss=1.2393 val_acc=0.7308 val_macro_f1=0.7160 gw_means=[0.194,0.311,0.231,0.025,0.239] ent=0.484 throughput=52.1 samples/s lr_head=0.000275 lr_backbone=0.000028 patience=2/15 val_accuracy=0.7308
+Epoch 21/60 step 100/1794 total_loss=0.6441 ce_loss=0.4930 sem_loss=1.4653 hard_loss=0.0908 fer_acc=0.9819 sem_acc=0.3787 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 200/1794 total_loss=0.6626 ce_loss=0.5379 sem_loss=1.2161 hard_loss=0.0622 fer_acc=0.9825 sem_acc=0.3775 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 300/1794 total_loss=0.7336 ce_loss=0.5891 sem_loss=1.4232 hard_loss=0.0442 fer_acc=0.9825 sem_acc=0.3748 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 400/1794 total_loss=0.6265 ce_loss=0.4827 sem_loss=1.3965 hard_loss=0.0842 fer_acc=0.9827 sem_acc=0.3745 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 500/1794 total_loss=0.6392 ce_loss=0.5030 sem_loss=1.3303 hard_loss=0.0645 fer_acc=0.9810 sem_acc=0.3711 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 600/1794 total_loss=0.6571 ce_loss=0.4983 sem_loss=1.5485 hard_loss=0.0793 fer_acc=0.9802 sem_acc=0.3717 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 700/1794 total_loss=0.7663 ce_loss=0.6129 sem_loss=1.5024 hard_loss=0.0630 fer_acc=0.9801 sem_acc=0.3734 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 800/1794 total_loss=0.6124 ce_loss=0.4780 sem_loss=1.3141 hard_loss=0.0588 fer_acc=0.9805 sem_acc=0.3732 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 900/1794 total_loss=0.6743 ce_loss=0.5485 sem_loss=1.2347 hard_loss=0.0470 fer_acc=0.9801 sem_acc=0.3733 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 1000/1794 total_loss=0.6306 ce_loss=0.5011 sem_loss=1.2763 hard_loss=0.0363 fer_acc=0.9801 sem_acc=0.3716 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 1100/1794 total_loss=0.6467 ce_loss=0.4904 sem_loss=1.5223 hard_loss=0.0810 fer_acc=0.9799 sem_acc=0.3710 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 1200/1794 total_loss=0.6534 ce_loss=0.4940 sem_loss=1.5441 hard_loss=0.0986 fer_acc=0.9794 sem_acc=0.3705 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 1300/1794 total_loss=0.7513 ce_loss=0.6086 sem_loss=1.3897 hard_loss=0.0746 fer_acc=0.9788 sem_acc=0.3711 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 1400/1794 total_loss=0.6826 ce_loss=0.4961 sem_loss=1.8076 hard_loss=0.1154 fer_acc=0.9790 sem_acc=0.3713 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 1500/1794 total_loss=0.6503 ce_loss=0.4959 sem_loss=1.4939 hard_loss=0.0988 fer_acc=0.9791 sem_acc=0.3714 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 1600/1794 total_loss=0.6351 ce_loss=0.4873 sem_loss=1.4407 hard_loss=0.0746 fer_acc=0.9789 sem_acc=0.3718 lr_head=0.000270 lr_backbone=0.000027
+Epoch 21/60 step 1700/1794 total_loss=0.6396 ce_loss=0.4766 sem_loss=1.5793 hard_loss=0.1006 fer_acc=0.9789 sem_acc=0.3715 lr_head=0.000270 lr_backbone=0.000027
+[INFO] Epoch 21: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 72.95% | Macro F1: 0.7166 | Weighted F1: 0.7265
+[INFO] Epoch 21: validation finished
+[INFO] Epoch 21: saving last checkpoint
+Epoch 21/60 [9m 31s] loss=0.6764 sem_loss=1.4302 hard_loss=0.0769 acc=0.9788 val_loss=1.2494 val_acc=0.7295 val_macro_f1=0.7166 gw_means=[0.214,0.317,0.177,0.030,0.261] ent=0.532 throughput=52.1 samples/s lr_head=0.000270 lr_backbone=0.000027 patience=3/15 val_accuracy=0.7295
+Epoch 22/60 step 100/1794 total_loss=0.7157 ce_loss=0.6205 sem_loss=0.9350 hard_loss=0.0342 fer_acc=0.9825 sem_acc=0.3806 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 200/1794 total_loss=0.6704 ce_loss=0.5290 sem_loss=1.3714 hard_loss=0.0844 fer_acc=0.9859 sem_acc=0.3800 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 300/1794 total_loss=0.6528 ce_loss=0.4773 sem_loss=1.7005 hard_loss=0.1092 fer_acc=0.9865 sem_acc=0.3767 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 400/1794 total_loss=0.6830 ce_loss=0.5354 sem_loss=1.4427 hard_loss=0.0671 fer_acc=0.9855 sem_acc=0.3761 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 500/1794 total_loss=0.6426 ce_loss=0.4909 sem_loss=1.4834 hard_loss=0.0682 fer_acc=0.9839 sem_acc=0.3782 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 600/1794 total_loss=0.6355 ce_loss=0.4954 sem_loss=1.3636 hard_loss=0.0754 fer_acc=0.9835 sem_acc=0.3812 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 700/1794 total_loss=0.6475 ce_loss=0.4908 sem_loss=1.5273 hard_loss=0.0789 fer_acc=0.9839 sem_acc=0.3792 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 800/1794 total_loss=0.6018 ce_loss=0.4762 sem_loss=1.2287 hard_loss=0.0547 fer_acc=0.9831 sem_acc=0.3791 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 900/1794 total_loss=0.7420 ce_loss=0.6026 sem_loss=1.3566 hard_loss=0.0759 fer_acc=0.9824 sem_acc=0.3794 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 1000/1794 total_loss=0.6411 ce_loss=0.4822 sem_loss=1.5441 hard_loss=0.0894 fer_acc=0.9821 sem_acc=0.3777 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 1100/1794 total_loss=0.5995 ce_loss=0.4657 sem_loss=1.3171 hard_loss=0.0426 fer_acc=0.9820 sem_acc=0.3782 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 1200/1794 total_loss=0.6051 ce_loss=0.4665 sem_loss=1.3684 hard_loss=0.0338 fer_acc=0.9824 sem_acc=0.3768 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 1300/1794 total_loss=0.5935 ce_loss=0.4795 sem_loss=1.1163 hard_loss=0.0471 fer_acc=0.9822 sem_acc=0.3769 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 1400/1794 total_loss=0.7299 ce_loss=0.5746 sem_loss=1.5135 hard_loss=0.0787 fer_acc=0.9822 sem_acc=0.3784 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 1500/1794 total_loss=0.6854 ce_loss=0.5371 sem_loss=1.4522 hard_loss=0.0617 fer_acc=0.9820 sem_acc=0.3782 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 1600/1794 total_loss=0.6261 ce_loss=0.4835 sem_loss=1.3904 hard_loss=0.0715 fer_acc=0.9820 sem_acc=0.3778 lr_head=0.000265 lr_backbone=0.000027
+Epoch 22/60 step 1700/1794 total_loss=0.6442 ce_loss=0.5193 sem_loss=1.2272 hard_loss=0.0433 fer_acc=0.9821 sem_acc=0.3776 lr_head=0.000265 lr_backbone=0.000027
+[INFO] Epoch 22: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.28% | Macro F1: 0.7225 | Weighted F1: 0.7323
+[INFO] Epoch 22: validation finished
+[INFO] Save best at ep 22, val_loss: 1.2336, val_accuracy: 0.7328, monitor: val_accuracy
+[INFO] Epoch 22: saving last checkpoint
+Epoch 22/60 [9m 37s] loss=0.6669 sem_loss=1.4194 hard_loss=0.0744 acc=0.9821 val_loss=1.2336 val_acc=0.7328 val_macro_f1=0.7225 gw_means=[0.226,0.318,0.157,0.035,0.265] ent=0.547 throughput=52.1 samples/s lr_head=0.000265 lr_backbone=0.000027 patience=0/15 val_accuracy=0.7328
+Epoch 23/60 step 100/1794 total_loss=0.6534 ce_loss=0.5146 sem_loss=1.3397 hard_loss=0.0957 fer_acc=0.9875 sem_acc=0.3837 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 200/1794 total_loss=0.8131 ce_loss=0.6494 sem_loss=1.5883 hard_loss=0.0980 fer_acc=0.9859 sem_acc=0.3903 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 300/1794 total_loss=0.6352 ce_loss=0.4957 sem_loss=1.3580 hard_loss=0.0737 fer_acc=0.9844 sem_acc=0.3921 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 400/1794 total_loss=0.6297 ce_loss=0.4928 sem_loss=1.3366 hard_loss=0.0637 fer_acc=0.9855 sem_acc=0.3980 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 500/1794 total_loss=0.6157 ce_loss=0.4774 sem_loss=1.3583 hard_loss=0.0500 fer_acc=0.9842 sem_acc=0.3954 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 600/1794 total_loss=0.6417 ce_loss=0.4870 sem_loss=1.5037 hard_loss=0.0885 fer_acc=0.9843 sem_acc=0.3953 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 700/1794 total_loss=0.6633 ce_loss=0.4869 sem_loss=1.7069 hard_loss=0.1139 fer_acc=0.9845 sem_acc=0.3939 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 800/1794 total_loss=0.6318 ce_loss=0.4600 sem_loss=1.6701 hard_loss=0.0955 fer_acc=0.9840 sem_acc=0.3910 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 900/1794 total_loss=0.6465 ce_loss=0.4821 sem_loss=1.6097 hard_loss=0.0682 fer_acc=0.9833 sem_acc=0.3883 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 1000/1794 total_loss=0.6683 ce_loss=0.4994 sem_loss=1.6370 hard_loss=0.1041 fer_acc=0.9831 sem_acc=0.3862 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 1100/1794 total_loss=0.6180 ce_loss=0.4737 sem_loss=1.4108 hard_loss=0.0646 fer_acc=0.9830 sem_acc=0.3857 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 1200/1794 total_loss=0.6387 ce_loss=0.5092 sem_loss=1.2643 hard_loss=0.0628 fer_acc=0.9832 sem_acc=0.3837 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 1300/1794 total_loss=0.6384 ce_loss=0.4923 sem_loss=1.4235 hard_loss=0.0744 fer_acc=0.9831 sem_acc=0.3845 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 1400/1794 total_loss=0.6198 ce_loss=0.4715 sem_loss=1.4204 hard_loss=0.1252 fer_acc=0.9827 sem_acc=0.3842 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 1500/1794 total_loss=0.6287 ce_loss=0.4831 sem_loss=1.4299 hard_loss=0.0523 fer_acc=0.9827 sem_acc=0.3841 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 1600/1794 total_loss=0.6108 ce_loss=0.4881 sem_loss=1.2070 hard_loss=0.0414 fer_acc=0.9830 sem_acc=0.3845 lr_head=0.000259 lr_backbone=0.000026
+Epoch 23/60 step 1700/1794 total_loss=0.6002 ce_loss=0.4765 sem_loss=1.2169 hard_loss=0.0409 fer_acc=0.9828 sem_acc=0.3843 lr_head=0.000259 lr_backbone=0.000026
+[INFO] Epoch 23: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.56% | Macro F1: 0.7224 | Weighted F1: 0.7336
+[INFO] Epoch 23: validation finished
+[INFO] Save best at ep 23, val_loss: 1.2298, val_accuracy: 0.7356, monitor: val_accuracy
+[INFO] Epoch 23: saving last checkpoint
+Epoch 23/60 [9m 36s] loss=0.6619 sem_loss=1.4121 hard_loss=0.0732 acc=0.9827 val_loss=1.2298 val_acc=0.7356 val_macro_f1=0.7224 gw_means=[0.216,0.323,0.149,0.037,0.276] ent=0.536 throughput=52.1 samples/s lr_head=0.000259 lr_backbone=0.000026 patience=0/15 val_accuracy=0.7356
+Epoch 24/60 step 100/1794 total_loss=0.5833 ce_loss=0.4672 sem_loss=1.1417 hard_loss=0.0387 fer_acc=0.9856 sem_acc=0.4069 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 200/1794 total_loss=0.6462 ce_loss=0.4841 sem_loss=1.5805 hard_loss=0.0813 fer_acc=0.9878 sem_acc=0.3991 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 300/1794 total_loss=0.6412 ce_loss=0.4778 sem_loss=1.5825 hard_loss=0.1027 fer_acc=0.9846 sem_acc=0.3981 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 400/1794 total_loss=0.6306 ce_loss=0.4738 sem_loss=1.5141 hard_loss=0.1084 fer_acc=0.9839 sem_acc=0.3933 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 500/1794 total_loss=0.6427 ce_loss=0.4798 sem_loss=1.5950 hard_loss=0.0680 fer_acc=0.9840 sem_acc=0.3954 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 600/1794 total_loss=0.6546 ce_loss=0.5183 sem_loss=1.3320 hard_loss=0.0639 fer_acc=0.9842 sem_acc=0.3924 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 700/1794 total_loss=0.6698 ce_loss=0.4988 sem_loss=1.6685 hard_loss=0.0832 fer_acc=0.9841 sem_acc=0.3919 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 800/1794 total_loss=0.6581 ce_loss=0.5314 sem_loss=1.2360 hard_loss=0.0609 fer_acc=0.9833 sem_acc=0.3922 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 900/1794 total_loss=0.6414 ce_loss=0.4727 sem_loss=1.6379 hard_loss=0.0992 fer_acc=0.9841 sem_acc=0.3922 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 1000/1794 total_loss=0.6781 ce_loss=0.5430 sem_loss=1.3156 hard_loss=0.0711 fer_acc=0.9839 sem_acc=0.3924 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 1100/1794 total_loss=0.7376 ce_loss=0.6033 sem_loss=1.3076 hard_loss=0.0706 fer_acc=0.9839 sem_acc=0.3920 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 1200/1794 total_loss=0.6016 ce_loss=0.4786 sem_loss=1.2071 hard_loss=0.0448 fer_acc=0.9841 sem_acc=0.3928 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 1300/1794 total_loss=0.6445 ce_loss=0.4879 sem_loss=1.5323 hard_loss=0.0686 fer_acc=0.9839 sem_acc=0.3949 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 1400/1794 total_loss=0.8329 ce_loss=0.6788 sem_loss=1.5075 hard_loss=0.0661 fer_acc=0.9838 sem_acc=0.3952 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 1500/1794 total_loss=0.6219 ce_loss=0.4821 sem_loss=1.3653 hard_loss=0.0643 fer_acc=0.9835 sem_acc=0.3950 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 1600/1794 total_loss=0.6101 ce_loss=0.4667 sem_loss=1.4019 hard_loss=0.0643 fer_acc=0.9836 sem_acc=0.3951 lr_head=0.000253 lr_backbone=0.000025
+Epoch 24/60 step 1700/1794 total_loss=0.7951 ce_loss=0.6411 sem_loss=1.4955 hard_loss=0.0899 fer_acc=0.9839 sem_acc=0.3938 lr_head=0.000253 lr_backbone=0.000025
+[INFO] Epoch 24: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.92% | Macro F1: 0.7243 | Weighted F1: 0.7377
+[INFO] Epoch 24: validation finished
+[INFO] Save best at ep 24, val_loss: 1.2225, val_accuracy: 0.7392, monitor: val_accuracy
+[INFO] Epoch 24: saving last checkpoint
+Epoch 24/60 [9m 35s] loss=0.6546 sem_loss=1.3987 hard_loss=0.0710 acc=0.9839 val_loss=1.2225 val_acc=0.7392 val_macro_f1=0.7243 gw_means=[0.224,0.329,0.144,0.037,0.266] ent=0.523 throughput=52.1 samples/s lr_head=0.000253 lr_backbone=0.000025 patience=0/15 val_accuracy=0.7392
+Epoch 25/60 step 100/1794 total_loss=0.6274 ce_loss=0.4799 sem_loss=1.4358 hard_loss=0.0786 fer_acc=0.9856 sem_acc=0.4206 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 200/1794 total_loss=0.6792 ce_loss=0.5328 sem_loss=1.4101 hard_loss=0.1077 fer_acc=0.9888 sem_acc=0.4131 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 300/1794 total_loss=0.6009 ce_loss=0.4752 sem_loss=1.2247 hard_loss=0.0646 fer_acc=0.9890 sem_acc=0.4062 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 400/1794 total_loss=0.6951 ce_loss=0.5485 sem_loss=1.4358 hard_loss=0.0599 fer_acc=0.9888 sem_acc=0.3991 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 500/1794 total_loss=0.5959 ce_loss=0.4621 sem_loss=1.3037 hard_loss=0.0703 fer_acc=0.9882 sem_acc=0.4031 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 600/1794 total_loss=0.6480 ce_loss=0.5126 sem_loss=1.3215 hard_loss=0.0646 fer_acc=0.9878 sem_acc=0.4002 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 700/1794 total_loss=0.6834 ce_loss=0.5268 sem_loss=1.5253 hard_loss=0.0809 fer_acc=0.9874 sem_acc=0.3989 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 800/1794 total_loss=0.6142 ce_loss=0.4911 sem_loss=1.2106 hard_loss=0.0400 fer_acc=0.9862 sem_acc=0.3945 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 900/1794 total_loss=0.6160 ce_loss=0.4925 sem_loss=1.2083 hard_loss=0.0536 fer_acc=0.9858 sem_acc=0.3953 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 1000/1794 total_loss=0.7221 ce_loss=0.5631 sem_loss=1.5440 hard_loss=0.0907 fer_acc=0.9855 sem_acc=0.3969 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 1100/1794 total_loss=0.6072 ce_loss=0.5011 sem_loss=1.0428 hard_loss=0.0369 fer_acc=0.9857 sem_acc=0.3976 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 1200/1794 total_loss=0.6458 ce_loss=0.4820 sem_loss=1.6031 hard_loss=0.0706 fer_acc=0.9853 sem_acc=0.3974 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 1300/1794 total_loss=0.6165 ce_loss=0.4822 sem_loss=1.3052 hard_loss=0.0755 fer_acc=0.9850 sem_acc=0.3972 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 1400/1794 total_loss=0.6273 ce_loss=0.4902 sem_loss=1.3291 hard_loss=0.0841 fer_acc=0.9852 sem_acc=0.3963 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 1500/1794 total_loss=0.6269 ce_loss=0.5045 sem_loss=1.1988 hard_loss=0.0493 fer_acc=0.9851 sem_acc=0.3972 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 1600/1794 total_loss=0.6210 ce_loss=0.4714 sem_loss=1.4615 hard_loss=0.0677 fer_acc=0.9851 sem_acc=0.3969 lr_head=0.000247 lr_backbone=0.000025
+Epoch 25/60 step 1700/1794 total_loss=0.7568 ce_loss=0.5872 sem_loss=1.6409 hard_loss=0.1112 fer_acc=0.9849 sem_acc=0.3979 lr_head=0.000247 lr_backbone=0.000025
+[INFO] Epoch 25: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.95% | Macro F1: 0.7311 | Weighted F1: 0.7381
+[INFO] Epoch 25: validation finished
+[INFO] Save best at ep 25, val_loss: 1.2229, val_accuracy: 0.7395, monitor: val_accuracy
+[INFO] Epoch 25: saving last checkpoint
+Epoch 25/60 [9m 36s] loss=0.6498 sem_loss=1.3931 hard_loss=0.0698 acc=0.9851 val_loss=1.2229 val_acc=0.7395 val_macro_f1=0.7311 gw_means=[0.256,0.333,0.128,0.038,0.245] ent=0.492 throughput=52.1 samples/s lr_head=0.000247 lr_backbone=0.000025 patience=0/15 val_accuracy=0.7395
+Epoch 26/60 step 100/1794 total_loss=0.6666 ce_loss=0.5206 sem_loss=1.4213 hard_loss=0.0780 fer_acc=0.9869 sem_acc=0.3950 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 200/1794 total_loss=0.6406 ce_loss=0.4788 sem_loss=1.5804 hard_loss=0.0750 fer_acc=0.9906 sem_acc=0.3947 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 300/1794 total_loss=0.6923 ce_loss=0.5371 sem_loss=1.4997 hard_loss=0.1047 fer_acc=0.9888 sem_acc=0.3927 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 400/1794 total_loss=0.6289 ce_loss=0.4898 sem_loss=1.3603 hard_loss=0.0610 fer_acc=0.9883 sem_acc=0.3947 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 500/1794 total_loss=0.6473 ce_loss=0.5092 sem_loss=1.3450 hard_loss=0.0707 fer_acc=0.9879 sem_acc=0.3946 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 600/1794 total_loss=0.6014 ce_loss=0.4772 sem_loss=1.2169 hard_loss=0.0502 fer_acc=0.9876 sem_acc=0.3989 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 700/1794 total_loss=0.6066 ce_loss=0.4892 sem_loss=1.1536 hard_loss=0.0417 fer_acc=0.9873 sem_acc=0.3996 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 800/1794 total_loss=0.6193 ce_loss=0.4766 sem_loss=1.3886 hard_loss=0.0781 fer_acc=0.9877 sem_acc=0.3994 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 900/1794 total_loss=0.6391 ce_loss=0.4828 sem_loss=1.5215 hard_loss=0.0842 fer_acc=0.9878 sem_acc=0.4001 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 1000/1794 total_loss=0.6944 ce_loss=0.5492 sem_loss=1.4199 hard_loss=0.0640 fer_acc=0.9872 sem_acc=0.3982 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 1100/1794 total_loss=0.7284 ce_loss=0.5835 sem_loss=1.4155 hard_loss=0.0665 fer_acc=0.9874 sem_acc=0.3986 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 1200/1794 total_loss=0.6533 ce_loss=0.5315 sem_loss=1.1945 hard_loss=0.0470 fer_acc=0.9870 sem_acc=0.3993 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 1300/1794 total_loss=0.6252 ce_loss=0.4902 sem_loss=1.3247 hard_loss=0.0522 fer_acc=0.9866 sem_acc=0.3983 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 1400/1794 total_loss=0.6515 ce_loss=0.5222 sem_loss=1.2647 hard_loss=0.0573 fer_acc=0.9867 sem_acc=0.3987 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 1500/1794 total_loss=0.6697 ce_loss=0.5336 sem_loss=1.3296 hard_loss=0.0640 fer_acc=0.9866 sem_acc=0.3989 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 1600/1794 total_loss=0.6025 ce_loss=0.4796 sem_loss=1.2116 hard_loss=0.0345 fer_acc=0.9868 sem_acc=0.3977 lr_head=0.000240 lr_backbone=0.000024
+Epoch 26/60 step 1700/1794 total_loss=0.7065 ce_loss=0.5408 sem_loss=1.6196 hard_loss=0.0736 fer_acc=0.9868 sem_acc=0.3975 lr_head=0.000240 lr_backbone=0.000024
+[INFO] Epoch 26: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.31% | Macro F1: 0.7172 | Weighted F1: 0.7328
+[INFO] Epoch 26: validation finished
+[INFO] Epoch 26: saving last checkpoint
+Epoch 26/60 [9m 31s] loss=0.6454 sem_loss=1.3876 hard_loss=0.0683 acc=0.9868 val_loss=1.2280 val_acc=0.7331 val_macro_f1=0.7172 gw_means=[0.207,0.338,0.146,0.037,0.272] ent=0.489 throughput=52.1 samples/s lr_head=0.000240 lr_backbone=0.000024 patience=1/15 val_accuracy=0.7331
+Epoch 27/60 step 100/1794 total_loss=0.6148 ce_loss=0.4764 sem_loss=1.3523 hard_loss=0.0636 fer_acc=0.9906 sem_acc=0.4019 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 200/1794 total_loss=0.5975 ce_loss=0.4648 sem_loss=1.3108 hard_loss=0.0314 fer_acc=0.9912 sem_acc=0.3972 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 300/1794 total_loss=0.6834 ce_loss=0.5341 sem_loss=1.4600 hard_loss=0.0644 fer_acc=0.9908 sem_acc=0.4092 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 400/1794 total_loss=0.6207 ce_loss=0.4784 sem_loss=1.3917 hard_loss=0.0617 fer_acc=0.9905 sem_acc=0.4100 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 500/1794 total_loss=0.5950 ce_loss=0.4721 sem_loss=1.2024 hard_loss=0.0541 fer_acc=0.9894 sem_acc=0.4055 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 600/1794 total_loss=0.6560 ce_loss=0.4928 sem_loss=1.5859 hard_loss=0.0920 fer_acc=0.9881 sem_acc=0.4028 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 700/1794 total_loss=0.6938 ce_loss=0.4956 sem_loss=1.9097 hard_loss=0.1443 fer_acc=0.9877 sem_acc=0.4053 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 800/1794 total_loss=0.6135 ce_loss=0.4805 sem_loss=1.3079 hard_loss=0.0441 fer_acc=0.9873 sem_acc=0.4063 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 900/1794 total_loss=0.6407 ce_loss=0.5171 sem_loss=1.2084 hard_loss=0.0547 fer_acc=0.9876 sem_acc=0.4099 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 1000/1794 total_loss=0.6215 ce_loss=0.4817 sem_loss=1.3715 hard_loss=0.0518 fer_acc=0.9869 sem_acc=0.4112 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 1100/1794 total_loss=0.6328 ce_loss=0.4927 sem_loss=1.3697 hard_loss=0.0625 fer_acc=0.9864 sem_acc=0.4110 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 1200/1794 total_loss=0.6273 ce_loss=0.4628 sem_loss=1.5878 hard_loss=0.1154 fer_acc=0.9866 sem_acc=0.4103 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 1300/1794 total_loss=0.7053 ce_loss=0.5334 sem_loss=1.6662 hard_loss=0.1050 fer_acc=0.9866 sem_acc=0.4114 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 1400/1794 total_loss=0.6291 ce_loss=0.4964 sem_loss=1.2887 hard_loss=0.0760 fer_acc=0.9865 sem_acc=0.4107 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 1500/1794 total_loss=0.6062 ce_loss=0.4743 sem_loss=1.2997 hard_loss=0.0391 fer_acc=0.9868 sem_acc=0.4098 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 1600/1794 total_loss=0.8217 ce_loss=0.6679 sem_loss=1.4930 hard_loss=0.0898 fer_acc=0.9867 sem_acc=0.4088 lr_head=0.000233 lr_backbone=0.000023
+Epoch 27/60 step 1700/1794 total_loss=0.6003 ce_loss=0.4657 sem_loss=1.3298 hard_loss=0.0327 fer_acc=0.9867 sem_acc=0.4085 lr_head=0.000233 lr_backbone=0.000023
+[INFO] Epoch 27: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.75% | Macro F1: 0.7279 | Weighted F1: 0.7350
+[INFO] Epoch 27: validation finished
+[INFO] Epoch 27: saving last checkpoint
+Epoch 27/60 [9m 30s] loss=0.6415 sem_loss=1.3801 hard_loss=0.0675 acc=0.9864 val_loss=1.2329 val_acc=0.7375 val_macro_f1=0.7279 gw_means=[0.170,0.344,0.150,0.031,0.304] ent=0.467 throughput=52.1 samples/s lr_head=0.000233 lr_backbone=0.000023 patience=2/15 val_accuracy=0.7375
+Epoch 28/60 step 100/1794 total_loss=0.6166 ce_loss=0.4761 sem_loss=1.3848 hard_loss=0.0400 fer_acc=0.9881 sem_acc=0.4006 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 200/1794 total_loss=0.6172 ce_loss=0.4646 sem_loss=1.4843 hard_loss=0.0830 fer_acc=0.9875 sem_acc=0.3962 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 300/1794 total_loss=0.6518 ce_loss=0.5004 sem_loss=1.4749 hard_loss=0.0783 fer_acc=0.9867 sem_acc=0.4008 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 400/1794 total_loss=0.6038 ce_loss=0.4779 sem_loss=1.2415 hard_loss=0.0344 fer_acc=0.9869 sem_acc=0.4037 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 500/1794 total_loss=0.6010 ce_loss=0.4677 sem_loss=1.2968 hard_loss=0.0737 fer_acc=0.9874 sem_acc=0.4074 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 600/1794 total_loss=0.6033 ce_loss=0.4584 sem_loss=1.4267 hard_loss=0.0461 fer_acc=0.9877 sem_acc=0.4082 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 700/1794 total_loss=0.6237 ce_loss=0.4714 sem_loss=1.4897 hard_loss=0.0672 fer_acc=0.9877 sem_acc=0.4087 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 800/1794 total_loss=0.5767 ce_loss=0.4646 sem_loss=1.1113 hard_loss=0.0200 fer_acc=0.9879 sem_acc=0.4095 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 900/1794 total_loss=0.6506 ce_loss=0.5266 sem_loss=1.2160 hard_loss=0.0483 fer_acc=0.9877 sem_acc=0.4095 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 1000/1794 total_loss=0.6968 ce_loss=0.5359 sem_loss=1.5764 hard_loss=0.0658 fer_acc=0.9876 sem_acc=0.4122 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 1100/1794 total_loss=0.5911 ce_loss=0.4667 sem_loss=1.2182 hard_loss=0.0514 fer_acc=0.9874 sem_acc=0.4120 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 1200/1794 total_loss=0.5587 ce_loss=0.4620 sem_loss=0.9515 hard_loss=0.0307 fer_acc=0.9876 sem_acc=0.4132 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 1300/1794 total_loss=0.7123 ce_loss=0.5743 sem_loss=1.3309 hard_loss=0.0971 fer_acc=0.9879 sem_acc=0.4141 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 1400/1794 total_loss=0.6104 ce_loss=0.4590 sem_loss=1.4786 hard_loss=0.0714 fer_acc=0.9879 sem_acc=0.4154 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 1500/1794 total_loss=0.8142 ce_loss=0.6625 sem_loss=1.4661 hard_loss=0.1033 fer_acc=0.9876 sem_acc=0.4150 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 1600/1794 total_loss=0.6290 ce_loss=0.4970 sem_loss=1.2986 hard_loss=0.0429 fer_acc=0.9875 sem_acc=0.4137 lr_head=0.000225 lr_backbone=0.000023
+Epoch 28/60 step 1700/1794 total_loss=0.5517 ce_loss=0.4640 sem_loss=0.8559 hard_loss=0.0428 fer_acc=0.9876 sem_acc=0.4140 lr_head=0.000225 lr_backbone=0.000023
+[INFO] Epoch 28: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 74.17% | Macro F1: 0.7304 | Weighted F1: 0.7412
+[INFO] Epoch 28: validation finished
+[INFO] Save best at ep 28, val_loss: 1.2220, val_accuracy: 0.7417, monitor: val_accuracy
+[INFO] Epoch 28: saving last checkpoint
+Epoch 28/60 [9m 36s] loss=0.6366 sem_loss=1.3715 hard_loss=0.0662 acc=0.9874 val_loss=1.2220 val_acc=0.7417 val_macro_f1=0.7304 gw_means=[0.175,0.350,0.142,0.027,0.307] ent=0.450 throughput=52.1 samples/s lr_head=0.000225 lr_backbone=0.000023 patience=0/15 val_accuracy=0.7417
+Epoch 29/60 step 100/1794 total_loss=0.6433 ce_loss=0.4774 sem_loss=1.6112 hard_loss=0.0947 fer_acc=0.9888 sem_acc=0.4156 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 200/1794 total_loss=0.6785 ce_loss=0.5685 sem_loss=1.0901 hard_loss=0.0209 fer_acc=0.9872 sem_acc=0.4141 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 300/1794 total_loss=0.6256 ce_loss=0.4638 sem_loss=1.5744 hard_loss=0.0868 fer_acc=0.9873 sem_acc=0.4115 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 400/1794 total_loss=0.5946 ce_loss=0.4620 sem_loss=1.2948 hard_loss=0.0614 fer_acc=0.9869 sem_acc=0.4130 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 500/1794 total_loss=0.6096 ce_loss=0.4658 sem_loss=1.4099 hard_loss=0.0567 fer_acc=0.9880 sem_acc=0.4159 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 600/1794 total_loss=0.6035 ce_loss=0.4702 sem_loss=1.3058 hard_loss=0.0545 fer_acc=0.9872 sem_acc=0.4156 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 700/1794 total_loss=0.7084 ce_loss=0.5846 sem_loss=1.2104 hard_loss=0.0566 fer_acc=0.9879 sem_acc=0.4150 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 800/1794 total_loss=0.6251 ce_loss=0.4725 sem_loss=1.5064 hard_loss=0.0392 fer_acc=0.9884 sem_acc=0.4126 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 900/1794 total_loss=0.6104 ce_loss=0.4681 sem_loss=1.3905 hard_loss=0.0643 fer_acc=0.9885 sem_acc=0.4103 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 1000/1794 total_loss=0.6058 ce_loss=0.4820 sem_loss=1.2084 hard_loss=0.0589 fer_acc=0.9888 sem_acc=0.4111 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 1100/1794 total_loss=0.7858 ce_loss=0.6086 sem_loss=1.7385 hard_loss=0.0682 fer_acc=0.9886 sem_acc=0.4123 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 1200/1794 total_loss=0.5809 ce_loss=0.4640 sem_loss=1.1378 hard_loss=0.0608 fer_acc=0.9884 sem_acc=0.4128 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 1300/1794 total_loss=0.6253 ce_loss=0.4755 sem_loss=1.4684 hard_loss=0.0577 fer_acc=0.9883 sem_acc=0.4134 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 1400/1794 total_loss=0.5845 ce_loss=0.4868 sem_loss=0.9585 hard_loss=0.0372 fer_acc=0.9887 sem_acc=0.4131 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 1500/1794 total_loss=0.6728 ce_loss=0.5315 sem_loss=1.3851 hard_loss=0.0570 fer_acc=0.9887 sem_acc=0.4132 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 1600/1794 total_loss=0.5961 ce_loss=0.4821 sem_loss=1.1170 hard_loss=0.0446 fer_acc=0.9887 sem_acc=0.4132 lr_head=0.000218 lr_backbone=0.000022
+Epoch 29/60 step 1700/1794 total_loss=0.6025 ce_loss=0.4895 sem_loss=1.1079 hard_loss=0.0424 fer_acc=0.9886 sem_acc=0.4122 lr_head=0.000218 lr_backbone=0.000022
+[INFO] Epoch 29: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 74.42% | Macro F1: 0.7373 | Weighted F1: 0.7432
+[INFO] Epoch 29: validation finished
+[INFO] Save best at ep 29, val_loss: 1.2208, val_accuracy: 0.7442, monitor: val_accuracy
+[INFO] Epoch 29: saving last checkpoint
+Epoch 29/60 [9m 35s] loss=0.6324 sem_loss=1.3671 hard_loss=0.0652 acc=0.9885 val_loss=1.2208 val_acc=0.7442 val_macro_f1=0.7373 gw_means=[0.190,0.356,0.127,0.022,0.304] ent=0.436 throughput=52.1 samples/s lr_head=0.000218 lr_backbone=0.000022 patience=0/15 val_accuracy=0.7442
+Epoch 30/60 step 100/1794 total_loss=0.6222 ce_loss=0.4794 sem_loss=1.3885 hard_loss=0.0800 fer_acc=0.9900 sem_acc=0.4138 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 200/1794 total_loss=0.6630 ce_loss=0.5502 sem_loss=1.1204 hard_loss=0.0157 fer_acc=0.9925 sem_acc=0.4069 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 300/1794 total_loss=0.6000 ce_loss=0.4564 sem_loss=1.3983 hard_loss=0.0744 fer_acc=0.9912 sem_acc=0.4154 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 400/1794 total_loss=0.5981 ce_loss=0.4652 sem_loss=1.2985 hard_loss=0.0619 fer_acc=0.9900 sem_acc=0.4142 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 500/1794 total_loss=0.5805 ce_loss=0.4653 sem_loss=1.1275 hard_loss=0.0489 fer_acc=0.9900 sem_acc=0.4168 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 600/1794 total_loss=0.6310 ce_loss=0.4831 sem_loss=1.4310 hard_loss=0.0961 fer_acc=0.9902 sem_acc=0.4193 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 700/1794 total_loss=0.5831 ce_loss=0.4610 sem_loss=1.2037 hard_loss=0.0348 fer_acc=0.9898 sem_acc=0.4204 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 800/1794 total_loss=0.6457 ce_loss=0.4908 sem_loss=1.5109 hard_loss=0.0767 fer_acc=0.9903 sem_acc=0.4195 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 900/1794 total_loss=0.6157 ce_loss=0.4688 sem_loss=1.4313 hard_loss=0.0752 fer_acc=0.9902 sem_acc=0.4168 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 1000/1794 total_loss=0.6139 ce_loss=0.4793 sem_loss=1.3104 hard_loss=0.0716 fer_acc=0.9901 sem_acc=0.4154 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 1100/1794 total_loss=0.5925 ce_loss=0.4799 sem_loss=1.1072 hard_loss=0.0383 fer_acc=0.9900 sem_acc=0.4158 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 1200/1794 total_loss=0.5806 ce_loss=0.4676 sem_loss=1.1065 hard_loss=0.0466 fer_acc=0.9902 sem_acc=0.4157 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 1300/1794 total_loss=0.6286 ce_loss=0.4862 sem_loss=1.3949 hard_loss=0.0583 fer_acc=0.9900 sem_acc=0.4138 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 1400/1794 total_loss=0.6596 ce_loss=0.5378 sem_loss=1.1930 hard_loss=0.0493 fer_acc=0.9895 sem_acc=0.4146 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 1500/1794 total_loss=0.5973 ce_loss=0.4830 sem_loss=1.1122 hard_loss=0.0603 fer_acc=0.9895 sem_acc=0.4148 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 1600/1794 total_loss=0.6481 ce_loss=0.4771 sem_loss=1.6493 hard_loss=0.1215 fer_acc=0.9894 sem_acc=0.4138 lr_head=0.000210 lr_backbone=0.000021
+Epoch 30/60 step 1700/1794 total_loss=0.5873 ce_loss=0.4586 sem_loss=1.2730 hard_loss=0.0282 fer_acc=0.9894 sem_acc=0.4135 lr_head=0.000210 lr_backbone=0.000021
+[INFO] Epoch 30: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 74.03% | Macro F1: 0.7202 | Weighted F1: 0.7396
+[INFO] Epoch 30: validation finished
+[INFO] Epoch 30: saving last checkpoint
+[INFO] Epoch 30: saving periodic checkpoint
+Epoch 30/60 [9m 35s] loss=0.6299 sem_loss=1.3668 hard_loss=0.0652 acc=0.9894 val_loss=1.2318 val_acc=0.7403 val_macro_f1=0.7202 gw_means=[0.170,0.359,0.136,0.022,0.313] ent=0.409 throughput=52.1 samples/s lr_head=0.000210 lr_backbone=0.000021 patience=1/15 val_accuracy=0.7403
+Epoch 31/60 step 100/1794 total_loss=0.6150 ce_loss=0.4629 sem_loss=1.4826 hard_loss=0.0768 fer_acc=0.9944 sem_acc=0.4131 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 200/1794 total_loss=0.6165 ce_loss=0.4731 sem_loss=1.4036 hard_loss=0.0614 fer_acc=0.9925 sem_acc=0.4000 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 300/1794 total_loss=0.6145 ce_loss=0.4730 sem_loss=1.3857 hard_loss=0.0587 fer_acc=0.9908 sem_acc=0.4031 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 400/1794 total_loss=0.6794 ce_loss=0.5153 sem_loss=1.5784 hard_loss=0.1246 fer_acc=0.9900 sem_acc=0.4048 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 500/1794 total_loss=0.6004 ce_loss=0.4682 sem_loss=1.2961 hard_loss=0.0529 fer_acc=0.9895 sem_acc=0.4040 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 600/1794 total_loss=0.5926 ce_loss=0.4603 sem_loss=1.2980 hard_loss=0.0506 fer_acc=0.9899 sem_acc=0.4045 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 700/1794 total_loss=0.5761 ce_loss=0.4630 sem_loss=1.1088 hard_loss=0.0438 fer_acc=0.9901 sem_acc=0.4089 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 800/1794 total_loss=0.6081 ce_loss=0.4563 sem_loss=1.4623 hard_loss=0.1111 fer_acc=0.9899 sem_acc=0.4101 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 900/1794 total_loss=0.5873 ce_loss=0.4736 sem_loss=1.1225 hard_loss=0.0293 fer_acc=0.9901 sem_acc=0.4123 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 1000/1794 total_loss=0.5866 ce_loss=0.4721 sem_loss=1.1186 hard_loss=0.0534 fer_acc=0.9902 sem_acc=0.4149 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 1100/1794 total_loss=0.6235 ce_loss=0.4816 sem_loss=1.3853 hard_loss=0.0660 fer_acc=0.9901 sem_acc=0.4148 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 1200/1794 total_loss=0.7076 ce_loss=0.5567 sem_loss=1.4694 hard_loss=0.0807 fer_acc=0.9901 sem_acc=0.4138 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 1300/1794 total_loss=0.5843 ce_loss=0.4865 sem_loss=0.9600 hard_loss=0.0374 fer_acc=0.9901 sem_acc=0.4145 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 1400/1794 total_loss=0.5922 ce_loss=0.4603 sem_loss=1.2962 hard_loss=0.0457 fer_acc=0.9899 sem_acc=0.4127 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 1500/1794 total_loss=0.6438 ce_loss=0.4897 sem_loss=1.5040 hard_loss=0.0748 fer_acc=0.9900 sem_acc=0.4113 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 1600/1794 total_loss=0.5958 ce_loss=0.4630 sem_loss=1.3005 hard_loss=0.0545 fer_acc=0.9900 sem_acc=0.4102 lr_head=0.000202 lr_backbone=0.000020
+Epoch 31/60 step 1700/1794 total_loss=0.6093 ce_loss=0.4916 sem_loss=1.1520 hard_loss=0.0505 fer_acc=0.9901 sem_acc=0.4098 lr_head=0.000202 lr_backbone=0.000020
+[INFO] Epoch 31: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 74.28% | Macro F1: 0.7296 | Weighted F1: 0.7409
+[INFO] Epoch 31: validation finished
+[INFO] Epoch 31: saving last checkpoint
+Epoch 31/60 [9m 31s] loss=0.6284 sem_loss=1.3751 hard_loss=0.0672 acc=0.9899 val_loss=1.2349 val_acc=0.7428 val_macro_f1=0.7296 gw_means=[0.159,0.364,0.144,0.020,0.312] ent=0.400 throughput=52.1 samples/s lr_head=0.000202 lr_backbone=0.000020 patience=2/15 val_accuracy=0.7428
+Epoch 32/60 step 100/1794 total_loss=0.5949 ce_loss=0.4905 sem_loss=1.0229 hard_loss=0.0417 fer_acc=0.9925 sem_acc=0.4119 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 200/1794 total_loss=0.6055 ce_loss=0.4643 sem_loss=1.3924 hard_loss=0.0376 fer_acc=0.9922 sem_acc=0.4175 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 300/1794 total_loss=0.6076 ce_loss=0.4636 sem_loss=1.4026 hard_loss=0.0767 fer_acc=0.9912 sem_acc=0.4048 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 400/1794 total_loss=0.6188 ce_loss=0.4675 sem_loss=1.4672 hard_loss=0.0914 fer_acc=0.9905 sem_acc=0.3997 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 500/1794 total_loss=0.6079 ce_loss=0.4724 sem_loss=1.3275 hard_loss=0.0548 fer_acc=0.9901 sem_acc=0.3976 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 600/1794 total_loss=0.6290 ce_loss=0.4676 sem_loss=1.5716 hard_loss=0.0857 fer_acc=0.9901 sem_acc=0.3961 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 700/1794 total_loss=0.6420 ce_loss=0.4728 sem_loss=1.6456 hard_loss=0.0914 fer_acc=0.9896 sem_acc=0.3943 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 800/1794 total_loss=0.7657 ce_loss=0.6238 sem_loss=1.3855 hard_loss=0.0669 fer_acc=0.9894 sem_acc=0.3945 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 900/1794 total_loss=0.6347 ce_loss=0.4740 sem_loss=1.5502 hard_loss=0.1141 fer_acc=0.9899 sem_acc=0.3923 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 1000/1794 total_loss=0.5473 ce_loss=0.4625 sem_loss=0.8352 hard_loss=0.0259 fer_acc=0.9899 sem_acc=0.3919 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 1100/1794 total_loss=0.6140 ce_loss=0.4622 sem_loss=1.4781 hard_loss=0.0789 fer_acc=0.9899 sem_acc=0.3919 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 1200/1794 total_loss=0.6635 ce_loss=0.4800 sem_loss=1.7757 hard_loss=0.1194 fer_acc=0.9897 sem_acc=0.3917 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 1300/1794 total_loss=0.5862 ce_loss=0.4634 sem_loss=1.1998 hard_loss=0.0553 fer_acc=0.9898 sem_acc=0.3913 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 1400/1794 total_loss=0.6340 ce_loss=0.4644 sem_loss=1.6450 hard_loss=0.1006 fer_acc=0.9899 sem_acc=0.3910 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 1500/1794 total_loss=0.7641 ce_loss=0.6413 sem_loss=1.2181 hard_loss=0.0179 fer_acc=0.9899 sem_acc=0.3910 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 1600/1794 total_loss=0.6162 ce_loss=0.4736 sem_loss=1.3921 hard_loss=0.0681 fer_acc=0.9896 sem_acc=0.3904 lr_head=0.000193 lr_backbone=0.000020
+Epoch 32/60 step 1700/1794 total_loss=0.6461 ce_loss=0.4741 sem_loss=1.6683 hard_loss=0.1039 fer_acc=0.9897 sem_acc=0.3892 lr_head=0.000193 lr_backbone=0.000020
+[INFO] Epoch 32: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.81% | Macro F1: 0.7293 | Weighted F1: 0.7384
+[INFO] Epoch 32: validation finished
+[INFO] Epoch 32: saving last checkpoint
+Epoch 32/60 [9m 31s] loss=0.6292 sem_loss=1.3998 hard_loss=0.0739 acc=0.9897 val_loss=1.2347 val_acc=0.7381 val_macro_f1=0.7293 gw_means=[0.201,0.369,0.122,0.018,0.290] ent=0.405 throughput=52.1 samples/s lr_head=0.000193 lr_backbone=0.000020 patience=3/15 val_accuracy=0.7381
+Epoch 33/60 step 100/1794 total_loss=0.6265 ce_loss=0.4652 sem_loss=1.5750 hard_loss=0.0763 fer_acc=0.9919 sem_acc=0.4113 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 200/1794 total_loss=0.6200 ce_loss=0.4593 sem_loss=1.5727 hard_loss=0.0692 fer_acc=0.9938 sem_acc=0.3931 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 300/1794 total_loss=0.6162 ce_loss=0.4643 sem_loss=1.4812 hard_loss=0.0753 fer_acc=0.9931 sem_acc=0.3883 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 400/1794 total_loss=0.5925 ce_loss=0.4610 sem_loss=1.3070 hard_loss=0.0160 fer_acc=0.9922 sem_acc=0.3870 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 500/1794 total_loss=0.5932 ce_loss=0.4610 sem_loss=1.2914 hard_loss=0.0601 fer_acc=0.9921 sem_acc=0.3865 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 600/1794 total_loss=0.6023 ce_loss=0.4691 sem_loss=1.2964 hard_loss=0.0702 fer_acc=0.9922 sem_acc=0.3850 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 700/1794 total_loss=0.6041 ce_loss=0.4717 sem_loss=1.2920 hard_loss=0.0635 fer_acc=0.9920 sem_acc=0.3854 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 800/1794 total_loss=0.5901 ce_loss=0.4575 sem_loss=1.2967 hard_loss=0.0600 fer_acc=0.9923 sem_acc=0.3901 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 900/1794 total_loss=0.5981 ce_loss=0.4558 sem_loss=1.3842 hard_loss=0.0778 fer_acc=0.9926 sem_acc=0.3927 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 1000/1794 total_loss=0.6154 ce_loss=0.4717 sem_loss=1.3898 hard_loss=0.0940 fer_acc=0.9923 sem_acc=0.3949 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 1100/1794 total_loss=0.6634 ce_loss=0.5198 sem_loss=1.3806 hard_loss=0.1111 fer_acc=0.9921 sem_acc=0.3953 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 1200/1794 total_loss=0.6335 ce_loss=0.4600 sem_loss=1.6673 hard_loss=0.1357 fer_acc=0.9922 sem_acc=0.3971 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 1300/1794 total_loss=0.6135 ce_loss=0.4629 sem_loss=1.4789 hard_loss=0.0553 fer_acc=0.9919 sem_acc=0.3990 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 1400/1794 total_loss=0.6017 ce_loss=0.4681 sem_loss=1.2923 hard_loss=0.0865 fer_acc=0.9918 sem_acc=0.3986 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 1500/1794 total_loss=0.6650 ce_loss=0.5117 sem_loss=1.4931 hard_loss=0.0817 fer_acc=0.9917 sem_acc=0.3966 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 1600/1794 total_loss=0.6248 ce_loss=0.4706 sem_loss=1.4781 hard_loss=0.1263 fer_acc=0.9913 sem_acc=0.3959 lr_head=0.000185 lr_backbone=0.000019
+Epoch 33/60 step 1700/1794 total_loss=0.6428 ce_loss=0.4811 sem_loss=1.5745 hard_loss=0.0844 fer_acc=0.9911 sem_acc=0.3946 lr_head=0.000185 lr_backbone=0.000019
+[INFO] Epoch 33: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.86% | Macro F1: 0.7278 | Weighted F1: 0.7371
+[INFO] Epoch 33: validation finished
+[INFO] Epoch 33: saving last checkpoint
+Epoch 33/60 [9m 31s] loss=0.6261 sem_loss=1.3964 hard_loss=0.0784 acc=0.9912 val_loss=1.2314 val_acc=0.7386 val_macro_f1=0.7278 gw_means=[0.201,0.371,0.114,0.016,0.298] ent=0.386 throughput=52.1 samples/s lr_head=0.000185 lr_backbone=0.000019 patience=4/15 val_accuracy=0.7386
+Epoch 34/60 step 100/1794 total_loss=0.6621 ce_loss=0.4895 sem_loss=1.6690 hard_loss=0.1146 fer_acc=0.9931 sem_acc=0.3894 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 200/1794 total_loss=0.6459 ce_loss=0.4882 sem_loss=1.5146 hard_loss=0.1258 fer_acc=0.9941 sem_acc=0.3753 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 300/1794 total_loss=0.6351 ce_loss=0.4754 sem_loss=1.5620 hard_loss=0.0707 fer_acc=0.9938 sem_acc=0.3698 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 400/1794 total_loss=0.5914 ce_loss=0.4570 sem_loss=1.2984 hard_loss=0.0900 fer_acc=0.9928 sem_acc=0.3725 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 500/1794 total_loss=0.6262 ce_loss=0.4614 sem_loss=1.6018 hard_loss=0.0938 fer_acc=0.9924 sem_acc=0.3654 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 600/1794 total_loss=0.6257 ce_loss=0.4731 sem_loss=1.4786 hard_loss=0.0947 fer_acc=0.9924 sem_acc=0.3702 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 700/1794 total_loss=0.6224 ce_loss=0.4884 sem_loss=1.2947 hard_loss=0.0917 fer_acc=0.9924 sem_acc=0.3793 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 800/1794 total_loss=0.6070 ce_loss=0.4648 sem_loss=1.3893 hard_loss=0.0654 fer_acc=0.9920 sem_acc=0.3856 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 900/1794 total_loss=0.5917 ce_loss=0.4663 sem_loss=1.1968 hard_loss=0.1154 fer_acc=0.9924 sem_acc=0.3883 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 1000/1794 total_loss=0.6463 ce_loss=0.4719 sem_loss=1.6683 hard_loss=0.1500 fer_acc=0.9924 sem_acc=0.3902 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 1100/1794 total_loss=0.6178 ce_loss=0.4558 sem_loss=1.5735 hard_loss=0.0929 fer_acc=0.9924 sem_acc=0.3898 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 1200/1794 total_loss=0.6162 ce_loss=0.4710 sem_loss=1.3855 hard_loss=0.1313 fer_acc=0.9920 sem_acc=0.3886 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 1300/1794 total_loss=0.6032 ce_loss=0.4596 sem_loss=1.3909 hard_loss=0.0903 fer_acc=0.9921 sem_acc=0.3840 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 1400/1794 total_loss=0.6116 ce_loss=0.4592 sem_loss=1.4833 hard_loss=0.0822 fer_acc=0.9920 sem_acc=0.3803 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 1500/1794 total_loss=0.6352 ce_loss=0.4642 sem_loss=1.6664 hard_loss=0.0857 fer_acc=0.9919 sem_acc=0.3772 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 1600/1794 total_loss=0.6047 ce_loss=0.4717 sem_loss=1.2926 hard_loss=0.0753 fer_acc=0.9918 sem_acc=0.3735 lr_head=0.000176 lr_backbone=0.000018
+Epoch 34/60 step 1700/1794 total_loss=0.6281 ce_loss=0.4758 sem_loss=1.4741 hard_loss=0.0985 fer_acc=0.9915 sem_acc=0.3715 lr_head=0.000176 lr_backbone=0.000018
+[INFO] Epoch 34: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.86% | Macro F1: 0.7273 | Weighted F1: 0.7377
+[INFO] Epoch 34: validation finished
+[INFO] Epoch 34: saving last checkpoint
+Epoch 34/60 [9m 31s] loss=0.6275 sem_loss=1.4316 hard_loss=0.0886 acc=0.9915 val_loss=1.2411 val_acc=0.7386 val_macro_f1=0.7273 gw_means=[0.210,0.374,0.113,0.013,0.290] ent=0.390 throughput=52.1 samples/s lr_head=0.000176 lr_backbone=0.000018 patience=5/15 val_accuracy=0.7386
+Epoch 35/60 step 100/1794 total_loss=0.6276 ce_loss=0.4645 sem_loss=1.5741 hard_loss=0.1143 fer_acc=0.9919 sem_acc=0.3400 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 200/1794 total_loss=0.5977 ce_loss=0.4592 sem_loss=1.3357 hard_loss=0.0991 fer_acc=0.9916 sem_acc=0.3250 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 300/1794 total_loss=0.6378 ce_loss=0.4556 sem_loss=1.7591 hard_loss=0.1250 fer_acc=0.9927 sem_acc=0.3204 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 400/1794 total_loss=0.6262 ce_loss=0.4553 sem_loss=1.6434 hard_loss=0.1321 fer_acc=0.9909 sem_acc=0.3286 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 500/1794 total_loss=0.6250 ce_loss=0.4534 sem_loss=1.6668 hard_loss=0.0980 fer_acc=0.9918 sem_acc=0.3291 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 600/1794 total_loss=0.6219 ce_loss=0.4709 sem_loss=1.4798 hard_loss=0.0600 fer_acc=0.9925 sem_acc=0.3271 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 700/1794 total_loss=0.6075 ce_loss=0.4538 sem_loss=1.4804 hard_loss=0.1125 fer_acc=0.9922 sem_acc=0.3261 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 800/1794 total_loss=0.6088 ce_loss=0.4566 sem_loss=1.4792 hard_loss=0.0857 fer_acc=0.9921 sem_acc=0.3262 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 900/1794 total_loss=0.6360 ce_loss=0.4816 sem_loss=1.5053 hard_loss=0.0776 fer_acc=0.9919 sem_acc=0.3274 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 1000/1794 total_loss=0.6084 ce_loss=0.4556 sem_loss=1.4795 hard_loss=0.0975 fer_acc=0.9916 sem_acc=0.3278 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 1100/1794 total_loss=0.6544 ce_loss=0.5019 sem_loss=1.4902 hard_loss=0.0694 fer_acc=0.9918 sem_acc=0.3251 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 1200/1794 total_loss=0.6713 ce_loss=0.4995 sem_loss=1.6727 hard_loss=0.0913 fer_acc=0.9917 sem_acc=0.3249 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 1300/1794 total_loss=0.6246 ce_loss=0.4616 sem_loss=1.5807 hard_loss=0.1005 fer_acc=0.9916 sem_acc=0.3240 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 1400/1794 total_loss=0.6709 ce_loss=0.4965 sem_loss=1.6868 hard_loss=0.1143 fer_acc=0.9916 sem_acc=0.3228 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 1500/1794 total_loss=0.5919 ce_loss=0.4596 sem_loss=1.2920 hard_loss=0.0632 fer_acc=0.9913 sem_acc=0.3213 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 1600/1794 total_loss=0.6196 ce_loss=0.4657 sem_loss=1.4777 hard_loss=0.1227 fer_acc=0.9914 sem_acc=0.3195 lr_head=0.000168 lr_backbone=0.000017
+Epoch 35/60 step 1700/1794 total_loss=0.5815 ce_loss=0.4748 sem_loss=1.0384 hard_loss=0.0566 fer_acc=0.9913 sem_acc=0.3181 lr_head=0.000168 lr_backbone=0.000017
+[INFO] Epoch 35: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.61% | Macro F1: 0.7296 | Weighted F1: 0.7363
+[INFO] Epoch 35: validation finished
+[INFO] Epoch 35: saving last checkpoint
+Epoch 35/60 [9m 29s] loss=0.6352 sem_loss=1.5133 hard_loss=0.1021 acc=0.9913 val_loss=1.2396 val_acc=0.7361 val_macro_f1=0.7296 gw_means=[0.194,0.375,0.121,0.014,0.296] ent=0.387 throughput=52.1 samples/s lr_head=0.000168 lr_backbone=0.000017 patience=6/15 val_accuracy=0.7361
+Epoch 36/60 step 100/1794 total_loss=0.6221 ce_loss=0.4681 sem_loss=1.4961 hard_loss=0.0876 fer_acc=0.9950 sem_acc=0.2831 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 200/1794 total_loss=0.5994 ce_loss=0.4565 sem_loss=1.3855 hard_loss=0.0882 fer_acc=0.9947 sem_acc=0.2981 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 300/1794 total_loss=0.6390 ce_loss=0.4570 sem_loss=1.7597 hard_loss=0.1203 fer_acc=0.9946 sem_acc=0.3025 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 400/1794 total_loss=0.6408 ce_loss=0.4684 sem_loss=1.6678 hard_loss=0.1120 fer_acc=0.9939 sem_acc=0.2989 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 500/1794 total_loss=0.7337 ce_loss=0.5700 sem_loss=1.5891 hard_loss=0.0951 fer_acc=0.9941 sem_acc=0.2946 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 600/1794 total_loss=0.6610 ce_loss=0.4969 sem_loss=1.5725 hard_loss=0.1364 fer_acc=0.9940 sem_acc=0.2902 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 700/1794 total_loss=0.6638 ce_loss=0.4896 sem_loss=1.6667 hard_loss=0.1500 fer_acc=0.9934 sem_acc=0.2873 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 800/1794 total_loss=0.5841 ce_loss=0.4544 sem_loss=1.2589 hard_loss=0.0769 fer_acc=0.9926 sem_acc=0.2870 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 900/1794 total_loss=0.8127 ce_loss=0.6236 sem_loss=1.8266 hard_loss=0.1291 fer_acc=0.9923 sem_acc=0.2867 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 1000/1794 total_loss=0.6312 ce_loss=0.4575 sem_loss=1.6712 hard_loss=0.1317 fer_acc=0.9922 sem_acc=0.2868 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 1100/1794 total_loss=0.6129 ce_loss=0.4593 sem_loss=1.4826 hard_loss=0.1063 fer_acc=0.9923 sem_acc=0.2858 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 1200/1794 total_loss=0.7198 ce_loss=0.5271 sem_loss=1.8572 hard_loss=0.1394 fer_acc=0.9925 sem_acc=0.2819 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 1300/1794 total_loss=0.6608 ce_loss=0.4773 sem_loss=1.7597 hard_loss=0.1500 fer_acc=0.9924 sem_acc=0.2780 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 1400/1794 total_loss=0.6541 ce_loss=0.4858 sem_loss=1.6192 hard_loss=0.1283 fer_acc=0.9923 sem_acc=0.2750 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 1500/1794 total_loss=0.6935 ce_loss=0.5330 sem_loss=1.5642 hard_loss=0.0821 fer_acc=0.9920 sem_acc=0.2717 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 1600/1794 total_loss=0.6508 ce_loss=0.4684 sem_loss=1.7560 hard_loss=0.1361 fer_acc=0.9919 sem_acc=0.2689 lr_head=0.000159 lr_backbone=0.000016
+Epoch 36/60 step 1700/1794 total_loss=0.6579 ce_loss=0.4748 sem_loss=1.7639 hard_loss=0.1327 fer_acc=0.9919 sem_acc=0.2654 lr_head=0.000159 lr_backbone=0.000016
+[INFO] Epoch 36: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.47% | Macro F1: 0.7240 | Weighted F1: 0.7330
+[INFO] Epoch 36: validation finished
+[INFO] Epoch 36: saving last checkpoint
+Epoch 36/60 [9m 30s] loss=0.6431 sem_loss=1.6049 hard_loss=0.1170 acc=0.9919 val_loss=1.2632 val_acc=0.7347 val_macro_f1=0.7240 gw_means=[0.155,0.374,0.156,0.013,0.301] ent=0.387 throughput=52.1 samples/s lr_head=0.000159 lr_backbone=0.000016 patience=7/15 val_accuracy=0.7347
+Epoch 37/60 step 100/1794 total_loss=0.6445 ce_loss=0.4518 sem_loss=1.8522 hard_loss=0.1500 fer_acc=0.9938 sem_acc=0.2006 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 200/1794 total_loss=0.6196 ce_loss=0.4553 sem_loss=1.5774 hard_loss=0.1311 fer_acc=0.9941 sem_acc=0.2047 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 300/1794 total_loss=0.6180 ce_loss=0.4535 sem_loss=1.5743 hard_loss=0.1421 fer_acc=0.9931 sem_acc=0.2044 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 400/1794 total_loss=0.6553 ce_loss=0.4532 sem_loss=1.9459 hard_loss=0.1500 fer_acc=0.9930 sem_acc=0.2011 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 500/1794 total_loss=0.6271 ce_loss=0.4549 sem_loss=1.6774 hard_loss=0.0898 fer_acc=0.9922 sem_acc=0.1924 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 600/1794 total_loss=0.6405 ce_loss=0.4576 sem_loss=1.7608 hard_loss=0.1360 fer_acc=0.9927 sem_acc=0.1882 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 700/1794 total_loss=0.6422 ce_loss=0.4596 sem_loss=1.7587 hard_loss=0.1357 fer_acc=0.9926 sem_acc=0.1834 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 800/1794 total_loss=0.6637 ce_loss=0.4787 sem_loss=1.7793 hard_loss=0.1413 fer_acc=0.9926 sem_acc=0.1801 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 900/1794 total_loss=0.6557 ce_loss=0.4630 sem_loss=1.8524 hard_loss=0.1500 fer_acc=0.9926 sem_acc=0.1806 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 1000/1794 total_loss=0.6584 ce_loss=0.4563 sem_loss=1.9460 hard_loss=0.1500 fer_acc=0.9925 sem_acc=0.1803 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 1100/1794 total_loss=0.6436 ce_loss=0.4611 sem_loss=1.7595 hard_loss=0.1313 fer_acc=0.9923 sem_acc=0.1794 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 1200/1794 total_loss=0.6872 ce_loss=0.4942 sem_loss=1.8664 hard_loss=0.1282 fer_acc=0.9924 sem_acc=0.1784 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 1300/1794 total_loss=0.6207 ce_loss=0.4580 sem_loss=1.5768 hard_loss=0.1002 fer_acc=0.9925 sem_acc=0.1789 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 1400/1794 total_loss=0.6485 ce_loss=0.4561 sem_loss=1.8523 hard_loss=0.1435 fer_acc=0.9924 sem_acc=0.1782 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 1500/1794 total_loss=0.6548 ce_loss=0.4714 sem_loss=1.7589 hard_loss=0.1500 fer_acc=0.9922 sem_acc=0.1782 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 1600/1794 total_loss=0.6717 ce_loss=0.4846 sem_loss=1.7957 hard_loss=0.1500 fer_acc=0.9921 sem_acc=0.1766 lr_head=0.000150 lr_backbone=0.000016
+Epoch 37/60 step 1700/1794 total_loss=0.7276 ce_loss=0.5513 sem_loss=1.7007 hard_loss=0.1251 fer_acc=0.9921 sem_acc=0.1767 lr_head=0.000150 lr_backbone=0.000016
+[INFO] Epoch 37: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 74.06% | Macro F1: 0.7306 | Weighted F1: 0.7402
+[INFO] Epoch 37: validation finished
+[INFO] Epoch 37: saving last checkpoint
+Epoch 37/60 [9m 30s] loss=0.6589 sem_loss=1.7707 hard_loss=0.1359 acc=0.9920 val_loss=1.2483 val_acc=0.7406 val_macro_f1=0.7306 gw_means=[0.155,0.354,0.147,0.013,0.331] ent=0.417 throughput=52.1 samples/s lr_head=0.000150 lr_backbone=0.000016 patience=8/15 val_accuracy=0.7406
+Epoch 38/60 step 100/1794 total_loss=0.6498 ce_loss=0.4570 sem_loss=1.8522 hard_loss=0.1500 fer_acc=0.9956 sem_acc=0.1550 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 200/1794 total_loss=0.6610 ce_loss=0.4589 sem_loss=1.9459 hard_loss=0.1500 fer_acc=0.9944 sem_acc=0.1616 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 300/1794 total_loss=0.6512 ce_loss=0.4584 sem_loss=1.8532 hard_loss=0.1500 fer_acc=0.9938 sem_acc=0.1573 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 400/1794 total_loss=0.6512 ce_loss=0.4678 sem_loss=1.7595 hard_loss=0.1500 fer_acc=0.9941 sem_acc=0.1522 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 500/1794 total_loss=0.6521 ce_loss=0.4500 sem_loss=1.9459 hard_loss=0.1500 fer_acc=0.9939 sem_acc=0.1529 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 600/1794 total_loss=0.6605 ce_loss=0.4596 sem_loss=1.9343 hard_loss=0.1490 fer_acc=0.9939 sem_acc=0.1541 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 700/1794 total_loss=0.6546 ce_loss=0.4717 sem_loss=1.7653 hard_loss=0.1263 fer_acc=0.9934 sem_acc=0.1537 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 800/1794 total_loss=0.6911 ce_loss=0.4890 sem_loss=1.9461 hard_loss=0.1500 fer_acc=0.9934 sem_acc=0.1529 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 900/1794 total_loss=0.6476 ce_loss=0.4548 sem_loss=1.8529 hard_loss=0.1500 fer_acc=0.9932 sem_acc=0.1556 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 1000/1794 total_loss=0.6623 ce_loss=0.4696 sem_loss=1.8524 hard_loss=0.1500 fer_acc=0.9932 sem_acc=0.1545 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 1100/1794 total_loss=0.7549 ce_loss=0.5685 sem_loss=1.7992 hard_loss=0.1292 fer_acc=0.9928 sem_acc=0.1539 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 1200/1794 total_loss=0.6657 ce_loss=0.4824 sem_loss=1.7587 hard_loss=0.1500 fer_acc=0.9931 sem_acc=0.1532 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 1300/1794 total_loss=0.6641 ce_loss=0.4696 sem_loss=1.8703 hard_loss=0.1500 fer_acc=0.9929 sem_acc=0.1539 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 1400/1794 total_loss=0.6539 ce_loss=0.4518 sem_loss=1.9459 hard_loss=0.1500 fer_acc=0.9929 sem_acc=0.1534 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 1500/1794 total_loss=0.7992 ce_loss=0.6291 sem_loss=1.6329 hard_loss=0.1373 fer_acc=0.9929 sem_acc=0.1529 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 1600/1794 total_loss=0.6622 ce_loss=0.4690 sem_loss=1.8569 hard_loss=0.1500 fer_acc=0.9929 sem_acc=0.1520 lr_head=0.000142 lr_backbone=0.000015
+Epoch 38/60 step 1700/1794 total_loss=0.6483 ce_loss=0.4583 sem_loss=1.8315 hard_loss=0.1363 fer_acc=0.9928 sem_acc=0.1515 lr_head=0.000142 lr_backbone=0.000015
+[INFO] Epoch 38: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.67% | Macro F1: 0.7268 | Weighted F1: 0.7362
+[INFO] Epoch 38: validation finished
+[INFO] Epoch 38: saving last checkpoint
+Epoch 38/60 [9m 32s] loss=0.6649 sem_loss=1.8412 hard_loss=0.1436 acc=0.9927 val_loss=1.2693 val_acc=0.7367 val_macro_f1=0.7268 gw_means=[0.136,0.324,0.159,0.016,0.365] ent=0.433 throughput=52.0 samples/s lr_head=0.000142 lr_backbone=0.000015 patience=9/15 val_accuracy=0.7367
+Epoch 39/60 step 100/1794 total_loss=0.6718 ce_loss=0.4775 sem_loss=1.8746 hard_loss=0.1362 fer_acc=0.9956 sem_acc=0.1431 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 200/1794 total_loss=0.6809 ce_loss=0.4884 sem_loss=1.8568 hard_loss=0.1357 fer_acc=0.9953 sem_acc=0.1328 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 300/1794 total_loss=0.6610 ce_loss=0.4590 sem_loss=1.9459 hard_loss=0.1500 fer_acc=0.9954 sem_acc=0.1333 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 400/1794 total_loss=0.6590 ce_loss=0.4570 sem_loss=1.9459 hard_loss=0.1500 fer_acc=0.9953 sem_acc=0.1342 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 500/1794 total_loss=0.6569 ce_loss=0.4549 sem_loss=1.9447 hard_loss=0.1500 fer_acc=0.9952 sem_acc=0.1356 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 600/1794 total_loss=0.6400 ce_loss=0.4560 sem_loss=1.7743 hard_loss=0.1318 fer_acc=0.9945 sem_acc=0.1363 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 700/1794 total_loss=0.6602 ce_loss=0.4581 sem_loss=1.9459 hard_loss=0.1500 fer_acc=0.9947 sem_acc=0.1362 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 800/1794 total_loss=0.6487 ce_loss=0.4565 sem_loss=1.8576 hard_loss=0.1286 fer_acc=0.9948 sem_acc=0.1379 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 900/1794 total_loss=0.6471 ce_loss=0.4547 sem_loss=1.8523 hard_loss=0.1435 fer_acc=0.9945 sem_acc=0.1360 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 1000/1794 total_loss=0.6733 ce_loss=0.4792 sem_loss=1.8692 hard_loss=0.1429 fer_acc=0.9942 sem_acc=0.1369 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 1100/1794 total_loss=0.6599 ce_loss=0.4578 sem_loss=1.9459 hard_loss=0.1500 fer_acc=0.9941 sem_acc=0.1391 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 1200/1794 total_loss=0.6558 ce_loss=0.4537 sem_loss=1.9459 hard_loss=0.1500 fer_acc=0.9938 sem_acc=0.1405 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 1300/1794 total_loss=0.6514 ce_loss=0.4591 sem_loss=1.8522 hard_loss=0.1412 fer_acc=0.9937 sem_acc=0.1410 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 1400/1794 total_loss=0.6946 ce_loss=0.4927 sem_loss=1.9445 hard_loss=0.1500 fer_acc=0.9934 sem_acc=0.1409 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 1500/1794 total_loss=0.6486 ce_loss=0.4563 sem_loss=1.8523 hard_loss=0.1417 fer_acc=0.9929 sem_acc=0.1410 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 1600/1794 total_loss=0.6499 ce_loss=0.4577 sem_loss=1.8523 hard_loss=0.1385 fer_acc=0.9930 sem_acc=0.1414 lr_head=0.000133 lr_backbone=0.000014
+Epoch 39/60 step 1700/1794 total_loss=0.6572 ce_loss=0.4551 sem_loss=1.9459 hard_loss=0.1500 fer_acc=0.9929 sem_acc=0.1411 lr_head=0.000133 lr_backbone=0.000014
+[INFO] Epoch 39: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 74.28% | Macro F1: 0.7337 | Weighted F1: 0.7412
+[INFO] Epoch 39: validation finished
+[INFO] Epoch 39: saving last checkpoint
+Epoch 39/60 [9m 31s] loss=0.6661 sem_loss=1.8709 hard_loss=0.1437 acc=0.9929 val_loss=1.2575 val_acc=0.7428 val_macro_f1=0.7337 gw_means=[0.157,0.264,0.141,0.009,0.429] ent=0.479 throughput=52.1 samples/s lr_head=0.000133 lr_backbone=0.000014 patience=10/15 val_accuracy=0.7428
+Epoch 40/60 step 100/1794 total_loss=0.6476 ce_loss=0.4553 sem_loss=1.8523 hard_loss=0.1417 fer_acc=0.9931 sem_acc=0.1550 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 200/1794 total_loss=0.6610 ce_loss=0.4589 sem_loss=1.9460 hard_loss=0.1500 fer_acc=0.9931 sem_acc=0.1466 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 300/1794 total_loss=0.6750 ce_loss=0.4728 sem_loss=1.9462 hard_loss=0.1501 fer_acc=0.9946 sem_acc=0.1452 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 400/1794 total_loss=0.6405 ce_loss=0.4573 sem_loss=1.7704 hard_loss=0.1236 fer_acc=0.9941 sem_acc=0.1478 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 500/1794 total_loss=0.6379 ce_loss=0.4554 sem_loss=1.7600 hard_loss=0.1286 fer_acc=0.9946 sem_acc=0.1580 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 600/1794 total_loss=0.6322 ce_loss=0.4593 sem_loss=1.6700 hard_loss=0.1174 fer_acc=0.9947 sem_acc=0.1680 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 700/1794 total_loss=0.6396 ce_loss=0.4574 sem_loss=1.7599 hard_loss=0.1241 fer_acc=0.9945 sem_acc=0.1776 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 800/1794 total_loss=0.6101 ce_loss=0.4539 sem_loss=1.5302 hard_loss=0.0638 fer_acc=0.9949 sem_acc=0.1841 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 900/1794 total_loss=0.6578 ce_loss=0.4652 sem_loss=1.8562 hard_loss=0.1389 fer_acc=0.9946 sem_acc=0.1862 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 1000/1794 total_loss=0.6411 ce_loss=0.4590 sem_loss=1.7614 hard_loss=0.1192 fer_acc=0.9945 sem_acc=0.1883 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 1100/1794 total_loss=0.6343 ce_loss=0.4526 sem_loss=1.7608 hard_loss=0.1125 fer_acc=0.9941 sem_acc=0.1906 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 1200/1794 total_loss=0.6260 ce_loss=0.4544 sem_loss=1.6664 hard_loss=0.1000 fer_acc=0.9939 sem_acc=0.1930 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 1300/1794 total_loss=0.6141 ce_loss=0.4525 sem_loss=1.5737 hard_loss=0.0833 fer_acc=0.9942 sem_acc=0.1939 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 1400/1794 total_loss=0.6225 ce_loss=0.4559 sem_loss=1.6072 hard_loss=0.1180 fer_acc=0.9939 sem_acc=0.1967 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 1500/1794 total_loss=0.6453 ce_loss=0.4533 sem_loss=1.8528 hard_loss=0.1350 fer_acc=0.9935 sem_acc=0.1986 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 1600/1794 total_loss=0.6309 ce_loss=0.4578 sem_loss=1.6716 hard_loss=0.1184 fer_acc=0.9934 sem_acc=0.2004 lr_head=0.000125 lr_backbone=0.000013
+Epoch 40/60 step 1700/1794 total_loss=0.6636 ce_loss=0.4811 sem_loss=1.7647 hard_loss=0.1215 fer_acc=0.9934 sem_acc=0.2031 lr_head=0.000125 lr_backbone=0.000013
+[INFO] Epoch 40: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 74.06% | Macro F1: 0.7308 | Weighted F1: 0.7401
+[INFO] Epoch 40: validation finished
+[INFO] Epoch 40: saving last checkpoint
+[INFO] Epoch 40: saving periodic checkpoint
+Epoch 40/60 [9m 36s] loss=0.6496 sem_loss=1.7387 hard_loss=0.1193 acc=0.9934 val_loss=1.2572 val_acc=0.7406 val_macro_f1=0.7308 gw_means=[0.177,0.163,0.126,0.005,0.529] ent=0.486 throughput=52.1 samples/s lr_head=0.000125 lr_backbone=0.000013 patience=11/15 val_accuracy=0.7406
+Epoch 41/60 step 100/1794 total_loss=0.6228 ce_loss=0.4584 sem_loss=1.5855 hard_loss=0.1165 fer_acc=0.9900 sem_acc=0.2469 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 200/1794 total_loss=0.6225 ce_loss=0.4778 sem_loss=1.4054 hard_loss=0.0829 fer_acc=0.9925 sem_acc=0.2678 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 300/1794 total_loss=0.6131 ce_loss=0.4513 sem_loss=1.5778 hard_loss=0.0808 fer_acc=0.9921 sem_acc=0.2810 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 400/1794 total_loss=0.5983 ce_loss=0.4851 sem_loss=1.1083 hard_loss=0.0471 fer_acc=0.9927 sem_acc=0.2867 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 500/1794 total_loss=0.6143 ce_loss=0.4616 sem_loss=1.4827 hard_loss=0.0886 fer_acc=0.9926 sem_acc=0.2895 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 600/1794 total_loss=0.6097 ce_loss=0.4735 sem_loss=1.3321 hard_loss=0.0600 fer_acc=0.9928 sem_acc=0.3017 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 700/1794 total_loss=0.5896 ce_loss=0.4566 sem_loss=1.2926 hard_loss=0.0750 fer_acc=0.9920 sem_acc=0.3178 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 800/1794 total_loss=0.6302 ce_loss=0.4596 sem_loss=1.6682 hard_loss=0.0750 fer_acc=0.9925 sem_acc=0.3312 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 900/1794 total_loss=0.5519 ce_loss=0.4576 sem_loss=0.9198 hard_loss=0.0457 fer_acc=0.9928 sem_acc=0.3388 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 1000/1794 total_loss=0.5859 ce_loss=0.4539 sem_loss=1.2916 hard_loss=0.0563 fer_acc=0.9928 sem_acc=0.3473 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 1100/1794 total_loss=0.5872 ce_loss=0.4553 sem_loss=1.2914 hard_loss=0.0553 fer_acc=0.9931 sem_acc=0.3560 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 1200/1794 total_loss=0.5690 ce_loss=0.4568 sem_loss=1.1077 hard_loss=0.0296 fer_acc=0.9932 sem_acc=0.3625 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 1300/1794 total_loss=0.5937 ce_loss=0.4718 sem_loss=1.1994 hard_loss=0.0395 fer_acc=0.9929 sem_acc=0.3680 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 1400/1794 total_loss=0.5684 ce_loss=0.4552 sem_loss=1.1048 hard_loss=0.0553 fer_acc=0.9931 sem_acc=0.3721 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 1500/1794 total_loss=0.6188 ce_loss=0.4579 sem_loss=1.5716 hard_loss=0.0750 fer_acc=0.9932 sem_acc=0.3757 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 1600/1794 total_loss=0.5989 ce_loss=0.4681 sem_loss=1.2923 hard_loss=0.0326 fer_acc=0.9930 sem_acc=0.3790 lr_head=0.000116 lr_backbone=0.000012
+Epoch 41/60 step 1700/1794 total_loss=0.5956 ce_loss=0.4530 sem_loss=1.3844 hard_loss=0.0844 fer_acc=0.9931 sem_acc=0.3835 lr_head=0.000116 lr_backbone=0.000012
+[INFO] Epoch 41: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.92% | Macro F1: 0.7276 | Weighted F1: 0.7375
+[INFO] Epoch 41: validation finished
+[INFO] Epoch 41: saving last checkpoint
+Epoch 41/60 [9m 31s] loss=0.6118 sem_loss=1.3863 hard_loss=0.0731 acc=0.9930 val_loss=1.2413 val_acc=0.7392 val_macro_f1=0.7276 gw_means=[0.197,0.172,0.113,0.014,0.504] ent=0.485 throughput=52.1 samples/s lr_head=0.000116 lr_backbone=0.000012 patience=12/15 val_accuracy=0.7392
+Epoch 42/60 step 100/1794 total_loss=0.5653 ce_loss=0.4538 sem_loss=1.1043 hard_loss=0.0231 fer_acc=0.9962 sem_acc=0.4381 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 200/1794 total_loss=0.6012 ce_loss=0.4588 sem_loss=1.3861 hard_loss=0.0751 fer_acc=0.9959 sem_acc=0.4478 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 300/1794 total_loss=0.5660 ce_loss=0.4541 sem_loss=1.1034 hard_loss=0.0316 fer_acc=0.9944 sem_acc=0.4425 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 400/1794 total_loss=0.6366 ce_loss=0.4740 sem_loss=1.5725 hard_loss=0.1059 fer_acc=0.9947 sem_acc=0.4378 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 500/1794 total_loss=0.6018 ce_loss=0.4586 sem_loss=1.3850 hard_loss=0.0938 fer_acc=0.9946 sem_acc=0.4353 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 600/1794 total_loss=0.5773 ce_loss=0.4555 sem_loss=1.1974 hard_loss=0.0429 fer_acc=0.9941 sem_acc=0.4348 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 700/1794 total_loss=0.6329 ce_loss=0.5074 sem_loss=1.2424 hard_loss=0.0265 fer_acc=0.9943 sem_acc=0.4362 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 800/1794 total_loss=0.5959 ce_loss=0.4547 sem_loss=1.3844 hard_loss=0.0545 fer_acc=0.9941 sem_acc=0.4333 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 900/1794 total_loss=0.6356 ce_loss=0.4915 sem_loss=1.4077 hard_loss=0.0663 fer_acc=0.9942 sem_acc=0.4330 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 1000/1794 total_loss=0.5671 ce_loss=0.4644 sem_loss=1.0109 hard_loss=0.0316 fer_acc=0.9944 sem_acc=0.4318 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 1100/1794 total_loss=0.5843 ce_loss=0.4527 sem_loss=1.2910 hard_loss=0.0500 fer_acc=0.9944 sem_acc=0.4305 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 1200/1794 total_loss=0.6257 ce_loss=0.4641 sem_loss=1.5779 hard_loss=0.0750 fer_acc=0.9945 sem_acc=0.4314 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 1300/1794 total_loss=0.6205 ce_loss=0.4874 sem_loss=1.2932 hard_loss=0.0750 fer_acc=0.9945 sem_acc=0.4314 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 1400/1794 total_loss=0.5936 ce_loss=0.4686 sem_loss=1.2178 hard_loss=0.0659 fer_acc=0.9943 sem_acc=0.4309 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 1500/1794 total_loss=0.7112 ce_loss=0.5212 sem_loss=1.8378 hard_loss=0.1259 fer_acc=0.9943 sem_acc=0.4304 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 1600/1794 total_loss=0.5926 ce_loss=0.4512 sem_loss=1.3846 hard_loss=0.0583 fer_acc=0.9942 sem_acc=0.4307 lr_head=0.000108 lr_backbone=0.000011
+Epoch 42/60 step 1700/1794 total_loss=0.6054 ce_loss=0.4528 sem_loss=1.4825 hard_loss=0.0883 fer_acc=0.9940 sem_acc=0.4296 lr_head=0.000108 lr_backbone=0.000011
+[INFO] Epoch 42: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.73% | Macro F1: 0.7334 | Weighted F1: 0.7365
+[INFO] Epoch 42: validation finished
+[INFO] Epoch 42: saving last checkpoint
+Epoch 42/60 [9m 31s] loss=0.6018 sem_loss=1.3082 hard_loss=0.0567 acc=0.9938 val_loss=1.2358 val_acc=0.7373 val_macro_f1=0.7334 gw_means=[0.196,0.180,0.116,0.017,0.491] ent=0.499 throughput=52.1 samples/s lr_head=0.000108 lr_backbone=0.000011 patience=13/15 val_accuracy=0.7373
+Epoch 43/60 step 100/1794 total_loss=0.5661 ce_loss=0.4539 sem_loss=1.1090 hard_loss=0.0265 fer_acc=0.9969 sem_acc=0.4500 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 200/1794 total_loss=0.5671 ce_loss=0.4549 sem_loss=1.1047 hard_loss=0.0341 fer_acc=0.9953 sem_acc=0.4391 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 300/1794 total_loss=0.5896 ce_loss=0.4583 sem_loss=1.2909 hard_loss=0.0429 fer_acc=0.9954 sem_acc=0.4363 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 400/1794 total_loss=0.6244 ce_loss=0.4530 sem_loss=1.6654 hard_loss=0.0964 fer_acc=0.9944 sem_acc=0.4306 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 500/1794 total_loss=0.6157 ce_loss=0.4537 sem_loss=1.5718 hard_loss=0.0947 fer_acc=0.9940 sem_acc=0.4253 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 600/1794 total_loss=0.5913 ce_loss=0.4504 sem_loss=1.3843 hard_loss=0.0500 fer_acc=0.9942 sem_acc=0.4278 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 700/1794 total_loss=0.5961 ce_loss=0.4650 sem_loss=1.2932 hard_loss=0.0353 fer_acc=0.9940 sem_acc=0.4280 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 800/1794 total_loss=0.5979 ce_loss=0.4545 sem_loss=1.3840 hard_loss=0.1000 fer_acc=0.9938 sem_acc=0.4283 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 900/1794 total_loss=0.6355 ce_loss=0.5171 sem_loss=1.1528 hard_loss=0.0629 fer_acc=0.9937 sem_acc=0.4283 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 1000/1794 total_loss=0.5446 ce_loss=0.4518 sem_loss=0.9173 hard_loss=0.0205 fer_acc=0.9934 sem_acc=0.4290 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 1100/1794 total_loss=0.5744 ce_loss=0.4519 sem_loss=1.1972 hard_loss=0.0553 fer_acc=0.9936 sem_acc=0.4277 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 1200/1794 total_loss=0.6059 ce_loss=0.4542 sem_loss=1.4780 hard_loss=0.0786 fer_acc=0.9938 sem_acc=0.4281 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 1300/1794 total_loss=0.5761 ce_loss=0.4724 sem_loss=1.0172 hard_loss=0.0398 fer_acc=0.9939 sem_acc=0.4287 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 1400/1794 total_loss=0.5902 ce_loss=0.4501 sem_loss=1.3846 hard_loss=0.0321 fer_acc=0.9938 sem_acc=0.4290 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 1500/1794 total_loss=0.6017 ce_loss=0.4795 sem_loss=1.1975 hard_loss=0.0500 fer_acc=0.9940 sem_acc=0.4290 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 1600/1794 total_loss=0.5748 ce_loss=0.4630 sem_loss=1.1040 hard_loss=0.0273 fer_acc=0.9940 sem_acc=0.4301 lr_head=0.000099 lr_backbone=0.000011
+Epoch 43/60 step 1700/1794 total_loss=0.5426 ce_loss=0.4585 sem_loss=0.8233 hard_loss=0.0350 fer_acc=0.9940 sem_acc=0.4291 lr_head=0.000099 lr_backbone=0.000011
+[INFO] Epoch 43: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.98% | Macro F1: 0.7262 | Weighted F1: 0.7391
+[INFO] Epoch 43: validation finished
+[INFO] Epoch 43: saving last checkpoint
+Epoch 43/60 [9m 31s] loss=0.6004 sem_loss=1.3094 hard_loss=0.0565 acc=0.9940 val_loss=1.2380 val_acc=0.7398 val_macro_f1=0.7262 gw_means=[0.186,0.136,0.133,0.010,0.535] ent=0.519 throughput=52.1 samples/s lr_head=0.000099 lr_backbone=0.000011 patience=14/15 val_accuracy=0.7398
+Epoch 44/60 step 100/1794 total_loss=0.5944 ce_loss=0.4541 sem_loss=1.3844 hard_loss=0.0357 fer_acc=0.9931 sem_acc=0.4487 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 200/1794 total_loss=0.5678 ce_loss=0.4553 sem_loss=1.1044 hard_loss=0.0404 fer_acc=0.9934 sem_acc=0.4322 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 300/1794 total_loss=0.6014 ce_loss=0.4502 sem_loss=1.4781 hard_loss=0.0675 fer_acc=0.9944 sem_acc=0.4275 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 400/1794 total_loss=0.5448 ce_loss=0.4521 sem_loss=0.9173 hard_loss=0.0196 fer_acc=0.9947 sem_acc=0.4292 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 500/1794 total_loss=0.5599 ce_loss=0.4574 sem_loss=1.0106 hard_loss=0.0300 fer_acc=0.9946 sem_acc=0.4280 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 600/1794 total_loss=0.5664 ce_loss=0.4527 sem_loss=1.1041 hard_loss=0.0667 fer_acc=0.9948 sem_acc=0.4319 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 700/1794 total_loss=0.5951 ce_loss=0.4524 sem_loss=1.3858 hard_loss=0.0808 fer_acc=0.9949 sem_acc=0.4351 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 800/1794 total_loss=0.5733 ce_loss=0.4519 sem_loss=1.1981 hard_loss=0.0300 fer_acc=0.9948 sem_acc=0.4344 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 900/1794 total_loss=0.5752 ce_loss=0.4717 sem_loss=1.0206 hard_loss=0.0288 fer_acc=0.9947 sem_acc=0.4313 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 1000/1794 total_loss=0.5850 ce_loss=0.4531 sem_loss=1.2904 hard_loss=0.0572 fer_acc=0.9948 sem_acc=0.4328 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 1100/1794 total_loss=0.6083 ce_loss=0.4583 sem_loss=1.4790 hard_loss=0.0417 fer_acc=0.9941 sem_acc=0.4319 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 1200/1794 total_loss=0.5436 ce_loss=0.4508 sem_loss=0.9168 hard_loss=0.0222 fer_acc=0.9941 sem_acc=0.4324 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 1300/1794 total_loss=0.5895 ce_loss=0.4574 sem_loss=1.2921 hard_loss=0.0571 fer_acc=0.9940 sem_acc=0.4325 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 1400/1794 total_loss=0.5926 ce_loss=0.4523 sem_loss=1.3852 hard_loss=0.0353 fer_acc=0.9943 sem_acc=0.4327 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 1500/1794 total_loss=0.5891 ce_loss=0.4569 sem_loss=1.2911 hard_loss=0.0625 fer_acc=0.9943 sem_acc=0.4322 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 1600/1794 total_loss=0.6001 ce_loss=0.4777 sem_loss=1.2003 hard_loss=0.0484 fer_acc=0.9943 sem_acc=0.4331 lr_head=0.000091 lr_backbone=0.000010
+Epoch 44/60 step 1700/1794 total_loss=0.5887 ce_loss=0.4660 sem_loss=1.1976 hard_loss=0.0587 fer_acc=0.9943 sem_acc=0.4331 lr_head=0.000091 lr_backbone=0.000010
+[INFO] Epoch 44: starting validation
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 73.78% | Macro F1: 0.7277 | Weighted F1: 0.7366
+[INFO] Epoch 44: validation finished
+[INFO] Epoch 44: saving last checkpoint
+Epoch 44/60 [9m 31s] loss=0.5994 sem_loss=1.3043 hard_loss=0.0559 acc=0.9940 val_loss=1.2309 val_acc=0.7378 val_macro_f1=0.7277 gw_means=[0.229,0.063,0.118,0.005,0.585] ent=0.494 throughput=52.1 samples/s lr_head=0.000091 lr_backbone=0.000010 patience=15/15 val_accuracy=0.7378
+[INFO] Early stopping triggered at epoch 44 (patience reached 15)
+[INFO] Restored best checkpoint: /home/ptbao/projects/FER2013_MGR_CNN/outputs/papers/siglip2-confusion/checkpoints/best/ckpt-29
+
+======================================================================
+  FINAL TEST EVALUATION
+======================================================================
+
+[INFO] Running final test evaluation (No TTA)...
+[TTA] Horizontal Flip: DISABLED
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 76.09% | Macro F1: 0.7543 | Weighted F1: 0.7607
+
+──────────────────────────────────────────────────
+  TEST RESULTS (No TTA)
+──────────────────────────────────────────────────
+  Test Accuracy:    76.09%
+  Test Loss:        1.1853
+  Macro F1:         0.7543
+  Weighted F1:      0.7607
+──────────────────────────────────────────────────
+
+[INFO] Running final test evaluation (TTA HFlip)...
+[TTA] Horizontal Flip: ENABLED
+[TTA] Original weight: 0.40
+[TTA] Flip weight:     0.60
+[EVALUATION SUMMARY]
+  NO_TTA    - Accuracy: 76.09% | Macro F1: 0.7543 | Weighted F1: 0.7607
+  HFLIP_TTA - Accuracy: 76.23% | Macro F1: 0.7549 | Weighted F1: 0.7618
+
+──────────────────────────────────────────────────
+  TEST RESULTS (TTA HFlip)
+──────────────────────────────────────────────────
+  Test Accuracy:    76.23%
+  Test Loss:        1.1760
+  Macro F1:         0.7549
+  Weighted F1:      0.7618
+──────────────────────────────────────────────────
+
+  TTA Improvement: +0.14%
+
+======================================================================
+  Best Epoch: 29 | Best Val val_accuracy: 0.7442
+======================================================================
+
+{
+  "accuracy": 0.7623293396489272,
+  "macro_f1": 0.7549359440119207,
+  "weighted_f1": 0.7617745789443225,
+  "confusion_matrix": [
+    [
+      352,
+      3,
+      43,
+      8,
+      53,
+      4,
+      28
+    ],
+    [
+      10,
+      39,
+      2,
+      0,
+      3,
+      0,
+      1
+    ],
+    [
+      60,
+      1,
+      300,
+      14,
+      87,
+      31,
+      35
+    ],
+    [
+      12,
+      0,
+      9,
+      804,
+      13,
+      17,
+      24
+    ],
+    [
+      44,
+      1,
+      48,
+      14,
+      402,
+      3,
+      82
+    ],
+    [
+      12,
+      0,
+      19,
+      15,
+      8,
+      357,
+      5
+    ],
+    [
+      25,
+      0,
+      26,
+      19,
+      72,
+      2,
+      482
+    ]
+  ],
+  "classification_report": {
+    "angry": {
+      "precision": 0.683495145631068,
+      "recall": 0.7169042769857433,
+      "f1-score": 0.6998011928429423,
+      "support": 491.0
+    },
+    "disgust": {
+      "precision": 0.8863636363636364,
+      "recall": 0.7090909090909091,
+      "f1-score": 0.7878787878787878,
+      "support": 55.0
+    },
+    "fear": {
+      "precision": 0.6711409395973155,
+      "recall": 0.5681818181818182,
+      "f1-score": 0.6153846153846154,
+      "support": 528.0
+    },
+    "happy": {
+      "precision": 0.919908466819222,
+      "recall": 0.9146757679180887,
+      "f1-score": 0.9172846548773531,
+      "support": 879.0
+    },
+    "sad": {
+      "precision": 0.6300940438871473,
+      "recall": 0.6767676767676768,
+      "f1-score": 0.6525974025974026,
+      "support": 594.0
+    },
+    "surprise": {
+      "precision": 0.8623188405797102,
+      "recall": 0.8581730769230769,
+      "f1-score": 0.8602409638554217,
+      "support": 416.0
+    },
+    "neutral": {
+      "precision": 0.7336377473363774,
+      "recall": 0.7699680511182109,
+      "f1-score": 0.7513639906469213,
+      "support": 626.0
+    },
+    "accuracy": 0.7623293396489272,
+    "macro avg": {
+      "precision": 0.7695655457449252,
+      "recall": 0.7448230824265033,
+      "f1-score": 0.7549359440119207,
+      "support": 3589.0
+    },
+    "weighted avg": {
+      "precision": 0.7633228767146921,
+      "recall": 0.7623293396489272,
+      "f1-score": 0.7617745789443225,
+      "support": 3589.0
+    }
+  },
+  "loss": 1.1760280906705678,
+  "total_loss": 1.1760280906705678,
+  "ce_loss": 1.0057399382362726,
+  "semantic_loss": 1.6518333275426427,
+  "hard_semantic_loss": 0.10209631343162236,
+  "tta_hflip": true,
+  "original_weight": 0.4,
+  "flip_weight": 0.6,
+  "no_tta_accuracy": 0.7609361939258846,
+  "no_tta_macro_f1": 0.7542982534826191,
+  "no_tta_weighted_f1": 0.760689706143623,
+  "no_tta_loss": 1.1853401193083346,
+  "no_tta_hard_semantic_loss": 0.10209631343162236
+}
+============================================================
+ Running Automated TTA Sweep on Best Accuracy Checkpoint...
+============================================================
+[INFO] XLA auto-JIT disabled (jit_compile=False; TF_XLA_FLAGS disables XLA devices)
+[INFO] Mixed precision enabled (mixed_float16) for accelerated GPU training
+[INFO] Configured 1 GPU device(s): ['/physical_device:GPU:0']
+[CLIP/SigLIP] Model: google/siglip2-base-patch16-224
+[CLIP/SigLIP] Text encoder loaded successfully
+[CLIP/SigLIP] Prototype source: REAL_CLIP/SIGLIP
+[CLIP/SigLIP] Prompt SHA256 Hash: 331157f6480823d5... (count: 105)
+[CLIP/SigLIP] Synthetic fallback: DISABLED
+[CLIP/SigLIP] Prototype shape: (7, 5, 768)
+[CLIP/SigLIP] L2 norm check: PASSED (loaded from verified cache: pretrained/siglip2_text_prototypes_7emotions_multigranularity_multi5.npy)
+[ConvNeXtBaseFace] Shape trace:
+[ConvNeXtBaseFace]   input: (1, 112, 112, 3)
+[ConvNeXtBaseFace]   stem: (1, 56, 56, 128)
+[ConvNeXtBaseFace]   stage1: (1, 56, 56, 128)
+[ConvNeXtBaseFace]   stage2: (1, 28, 28, 256)
+[ConvNeXtBaseFace]   stage3: (1, 14, 14, 512)
+[ConvNeXtBaseFace]   stage4 (before ECA): (1, 7, 7, 1024)
+[ConvNeXtBaseFace]   visual_projector: (1, 768)
+[ConvNeXtBaseFace]   text_prototypes (frozen): (7, 5, 768)
+[ConvNeXtBaseFace]   semantic_logits: (1, 7)
+[ConvNeXtBaseFace]   gap: (1, 1024)
+[ConvNeXtBaseFace]   dropout: (1, 1024)
+[ConvNeXtBaseFace]   logits: (1, 7)
+MULTI_PROTOTYPE_CLIP_ENABLED
+Text prototypes shape: (7, 5, 768)
+Visual embedding shape: (1, 768)
+Raw semantic similarity: (1, 7, 5)
+Aggregated semantic logits: (1, 7)
+Aggregation: logsumexp
+Prototype temperature: 0.1
+Semantic logit scale: 20.0
+lambda_sem: 0.1
+[ConvNeXtBaseFace]   Total trainable params: 92,168,332
+[ConvNeXtBaseFace] Loading PyTorch pretrained checkpoint: /home/ptbao/projects/FER2013_MGR_CNN/pretrained/convnext_base_ms1m_arcface.pth
+[ConvNeXtBaseFace] Attempting shape-based fallback matching for 8 unmatched targets...
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.norm.gamma -> stages.2.downsample.0.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.norm.beta -> stages.2.downsample.0.bias
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.conv.kernel -> stages.2.downsample.1.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.conv.bias -> stages.2.downsample.1.bias
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.norm.gamma -> stages.3.downsample.0.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.norm.beta -> stages.3.downsample.0.bias
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.conv.kernel -> stages.3.downsample.1.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.conv.bias -> stages.3.downsample.1.bias
+[ConvNeXtBaseFace] PyTorch -> TensorFlow weight loading complete:
+[ConvNeXtBaseFace]   matched target tensors: 340/340
+[ConvNeXtBaseFace]   unmatched target tensors: 0
+[ConvNeXtBaseFace]   unused checkpoint tensors: 9
+[ConvNeXtBaseFace]   allowed unused face-head tensors: 9
+[ConvNeXtBaseFace]   unexpected unused checkpoint tensors: 0
+[ConvNeXtBaseFace]   first allowed unused face-head keys:
+[ConvNeXtBaseFace]     output_layer.0.bias
+[ConvNeXtBaseFace]     output_layer.0.weight
+[ConvNeXtBaseFace]     output_layer.3.bias
+[ConvNeXtBaseFace]     output_layer.3.weight
+[ConvNeXtBaseFace]     output_layer.4.bias
+[ConvNeXtBaseFace]     output_layer.4.num_batches_tracked
+[ConvNeXtBaseFace]     output_layer.4.running_mean
+[ConvNeXtBaseFace]     output_layer.4.running_var
+[ConvNeXtBaseFace]     output_layer.4.weight
+[ConvNeXtBaseFace] PRETRAINED_LOAD_OK path=/home/ptbao/projects/FER2013_MGR_CNN/pretrained/convnext_base_ms1m_arcface.pth matched=340/340
+[INFO] Restored checkpoint: /home/ptbao/projects/FER2013_MGR_CNN/outputs/papers/siglip2-confusion/checkpoints/best/ckpt-29
+
+[INFO] Extracting raw logits for VALIDATION set...
+
+=================================================================
+  1. VALIDATION SET SWEEP RESULTS
+=================================================================
+ w_orig   | w_flip   | Accuracy   | Macro F1   | Weighted F1 
+-----------------------------------------------------------------
+ 0.00     | 1.00     | 74.17    % | 0.7355     | 0.7404      
+ 0.05     | 0.95     | 74.20    % | 0.7356     | 0.7408      
+ 0.10     | 0.90     | 74.39    % | 0.7384     | 0.7427      
+ 0.15     | 0.85     | 74.31    % | 0.7374     | 0.7418      
+ 0.20     | 0.80     | 74.23    % | 0.7366     | 0.7410      
+ 0.25     | 0.75     | 74.20    % | 0.7366     | 0.7410      
+ 0.30     | 0.70     | 74.17    % | 0.7364     | 0.7406      
+ 0.35     | 0.65     | 74.34    % | 0.7363     | 0.7422      
+ 0.40     | 0.60     | 74.34    % | 0.7364     | 0.7423      
+ 0.45     | 0.55     | 74.62    % | 0.7373     | 0.7451      
+ 0.50     | 0.50     | 74.67    % | 0.7376     | 0.7457       ★ BEST
+ 0.55     | 0.45     | 74.67    % | 0.7398     | 0.7457      
+ 0.60     | 0.40     | 74.62    % | 0.7393     | 0.7451      
+ 0.65     | 0.35     | 74.62    % | 0.7393     | 0.7451      
+ 0.70     | 0.30     | 74.45    % | 0.7378     | 0.7434      
+ 0.75     | 0.25     | 74.39    % | 0.7373     | 0.7429      
+ 0.80     | 0.20     | 74.56    % | 0.7386     | 0.7446      
+ 0.85     | 0.15     | 74.62    % | 0.7392     | 0.7451      
+ 0.90     | 0.10     | 74.53    % | 0.7383     | 0.7442      
+ 0.95     | 0.05     | 74.51    % | 0.7380     | 0.7440      
+ 1.00     | 0.00     | 74.42    % | 0.7373     | 0.7432      
+=================================================================
+
+[INFO] Extracting raw logits for TEST set...
+
+=================================================================
+  2. TEST SET SWEEP RESULTS
+=================================================================
+ w_orig   | w_flip   | Accuracy   | Macro F1   | Weighted F1 
+-----------------------------------------------------------------
+ 0.00     | 1.00     | 75.62    % | 0.7496     | 0.7561      
+ 0.05     | 0.95     | 75.79    % | 0.7512     | 0.7579      
+ 0.10     | 0.90     | 75.87    % | 0.7520     | 0.7587      
+ 0.15     | 0.85     | 75.95    % | 0.7529     | 0.7596      
+ 0.20     | 0.80     | 75.98    % | 0.7531     | 0.7597      
+ 0.25     | 0.75     | 76.09    % | 0.7539     | 0.7607      
+ 0.30     | 0.70     | 76.09    % | 0.7539     | 0.7607      
+ 0.35     | 0.65     | 76.23    % | 0.7550     | 0.7619       ★ TEST-BEST
+ 0.40     | 0.60     | 76.23    % | 0.7549     | 0.7618      
+ 0.45     | 0.55     | 76.21    % | 0.7536     | 0.7615      
+ 0.50     | 0.50     | 76.18    % | 0.7545     | 0.7614       ★ VAL-TUNED
+ 0.55     | 0.45     | 76.15    % | 0.7545     | 0.7611      
+ 0.60     | 0.40     | 76.07    % | 0.7538     | 0.7604      
+ 0.65     | 0.35     | 76.07    % | 0.7537     | 0.7604      
+ 0.70     | 0.30     | 76.07    % | 0.7537     | 0.7603      
+ 0.75     | 0.25     | 76.04    % | 0.7534     | 0.7600      
+ 0.80     | 0.20     | 76.09    % | 0.7541     | 0.7607      
+ 0.85     | 0.15     | 75.98    % | 0.7531     | 0.7595      
+ 0.90     | 0.10     | 76.09    % | 0.7542     | 0.7606      
+ 0.95     | 0.05     | 76.18    % | 0.7551     | 0.7616      
+ 1.00     | 0.00     | 76.07    % | 0.7540     | 0.7604      
+=================================================================
+
+[FINAL OPTIMAL RESULTS - VAL TUNED ON TEST SET]
+  Validation Optimal w_orig: 0.50
+  Validation Optimal w_flip: 0.50
+  Val Accuracy (TTA):         74.67%
+  Test Accuracy (No TTA):    76.07%
+  Test Accuracy (TTA):       76.18%
+  Test Macro F1 (TTA):       0.7545
+  Test Weighted F1 (TTA):    0.7614
+  TTA Improvement Gain:      +0.11%
+
+[INFO] Complete sweep results saved to /home/ptbao/projects/FER2013_MGR_CNN/outputs/papers/siglip2-confusion/tta_sweep_results.json
+============================================================
+ Running Automated TTA Sweep on Best Loss Checkpoint...
+============================================================
+[INFO] XLA auto-JIT disabled (jit_compile=False; TF_XLA_FLAGS disables XLA devices)
+[INFO] Mixed precision enabled (mixed_float16) for accelerated GPU training
+[INFO] Configured 1 GPU device(s): ['/physical_device:GPU:0']
+[CLIP/SigLIP] Model: google/siglip2-base-patch16-224
+[CLIP/SigLIP] Text encoder loaded successfully
+[CLIP/SigLIP] Prototype source: REAL_CLIP/SIGLIP
+[CLIP/SigLIP] Prompt SHA256 Hash: 331157f6480823d5... (count: 105)
+[CLIP/SigLIP] Synthetic fallback: DISABLED
+[CLIP/SigLIP] Prototype shape: (7, 5, 768)
+[CLIP/SigLIP] L2 norm check: PASSED (loaded from verified cache: pretrained/siglip2_text_prototypes_7emotions_multigranularity_multi5.npy)
+[ConvNeXtBaseFace] Shape trace:
+[ConvNeXtBaseFace]   input: (1, 112, 112, 3)
+[ConvNeXtBaseFace]   stem: (1, 56, 56, 128)
+[ConvNeXtBaseFace]   stage1: (1, 56, 56, 128)
+[ConvNeXtBaseFace]   stage2: (1, 28, 28, 256)
+[ConvNeXtBaseFace]   stage3: (1, 14, 14, 512)
+[ConvNeXtBaseFace]   stage4 (before ECA): (1, 7, 7, 1024)
+[ConvNeXtBaseFace]   visual_projector: (1, 768)
+[ConvNeXtBaseFace]   text_prototypes (frozen): (7, 5, 768)
+[ConvNeXtBaseFace]   semantic_logits: (1, 7)
+[ConvNeXtBaseFace]   gap: (1, 1024)
+[ConvNeXtBaseFace]   dropout: (1, 1024)
+[ConvNeXtBaseFace]   logits: (1, 7)
+MULTI_PROTOTYPE_CLIP_ENABLED
+Text prototypes shape: (7, 5, 768)
+Visual embedding shape: (1, 768)
+Raw semantic similarity: (1, 7, 5)
+Aggregated semantic logits: (1, 7)
+Aggregation: logsumexp
+Prototype temperature: 0.1
+Semantic logit scale: 20.0
+lambda_sem: 0.1
+[ConvNeXtBaseFace]   Total trainable params: 92,168,332
+[ConvNeXtBaseFace] Loading PyTorch pretrained checkpoint: /home/ptbao/projects/FER2013_MGR_CNN/pretrained/convnext_base_ms1m_arcface.pth
+[ConvNeXtBaseFace] Attempting shape-based fallback matching for 8 unmatched targets...
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.norm.gamma -> stages.2.downsample.0.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.norm.beta -> stages.2.downsample.0.bias
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.conv.kernel -> stages.2.downsample.1.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage3.conv.bias -> stages.2.downsample.1.bias
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.norm.gamma -> stages.3.downsample.0.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.norm.beta -> stages.3.downsample.0.bias
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.conv.kernel -> stages.3.downsample.1.weight
+[ConvNeXtBaseFace] Fallback matched downsample_stage4.conv.bias -> stages.3.downsample.1.bias
+[ConvNeXtBaseFace] PyTorch -> TensorFlow weight loading complete:
+[ConvNeXtBaseFace]   matched target tensors: 340/340
+[ConvNeXtBaseFace]   unmatched target tensors: 0
+[ConvNeXtBaseFace]   unused checkpoint tensors: 9
+[ConvNeXtBaseFace]   allowed unused face-head tensors: 9
+[ConvNeXtBaseFace]   unexpected unused checkpoint tensors: 0
+[ConvNeXtBaseFace]   first allowed unused face-head keys:
+[ConvNeXtBaseFace]     output_layer.0.bias
+[ConvNeXtBaseFace]     output_layer.0.weight
+[ConvNeXtBaseFace]     output_layer.3.bias
+[ConvNeXtBaseFace]     output_layer.3.weight
+[ConvNeXtBaseFace]     output_layer.4.bias
+[ConvNeXtBaseFace]     output_layer.4.num_batches_tracked
+[ConvNeXtBaseFace]     output_layer.4.running_mean
+[ConvNeXtBaseFace]     output_layer.4.running_var
+[ConvNeXtBaseFace]     output_layer.4.weight
+[ConvNeXtBaseFace] PRETRAINED_LOAD_OK path=/home/ptbao/projects/FER2013_MGR_CNN/pretrained/convnext_base_ms1m_arcface.pth matched=340/340
+[INFO] Restored checkpoint: /home/ptbao/projects/FER2013_MGR_CNN/outputs/papers/siglip2-confusion/checkpoints/best_loss/ckpt-9.index
+
+[INFO] Extracting raw logits for VALIDATION set...
+
+=================================================================
+  1. VALIDATION SET SWEEP RESULTS
+=================================================================
+ w_orig   | w_flip   | Accuracy   | Macro F1   | Weighted F1 
+-----------------------------------------------------------------
+ 0.00     | 1.00     | 15.71    % | 0.0699     | 0.0791      
+ 0.05     | 0.95     | 15.66    % | 0.0692     | 0.0785      
+ 0.10     | 0.90     | 15.58    % | 0.0683     | 0.0775      
+ 0.15     | 0.85     | 15.58    % | 0.0683     | 0.0776      
+ 0.20     | 0.80     | 15.49    % | 0.0674     | 0.0766      
+ 0.25     | 0.75     | 15.52    % | 0.0677     | 0.0769      
+ 0.30     | 0.70     | 15.69    % | 0.0685     | 0.0778      
+ 0.35     | 0.65     | 15.58    % | 0.0673     | 0.0764      
+ 0.40     | 0.60     | 15.63    % | 0.0680     | 0.0770      
+ 0.45     | 0.55     | 15.63    % | 0.0682     | 0.0771      
+ 0.50     | 0.50     | 15.66    % | 0.0682     | 0.0773      
+ 0.55     | 0.45     | 15.77    % | 0.0692     | 0.0783      
+ 0.60     | 0.40     | 15.77    % | 0.0692     | 0.0782      
+ 0.65     | 0.35     | 15.80    % | 0.0697     | 0.0788       ★ BEST
+ 0.70     | 0.30     | 15.71    % | 0.0691     | 0.0781      
+ 0.75     | 0.25     | 15.60    % | 0.0685     | 0.0774      
+ 0.80     | 0.20     | 15.63    % | 0.0686     | 0.0775      
+ 0.85     | 0.15     | 15.63    % | 0.0686     | 0.0775      
+ 0.90     | 0.10     | 15.60    % | 0.0687     | 0.0776      
+ 0.95     | 0.05     | 15.69    % | 0.0691     | 0.0781      
+ 1.00     | 0.00     | 15.74    % | 0.0699     | 0.0791      
+=================================================================
+
+[INFO] Extracting raw logits for TEST set...
+
+=================================================================
+  2. TEST SET SWEEP RESULTS
+=================================================================
+ w_orig   | w_flip   | Accuracy   | Macro F1   | Weighted F1 
+-----------------------------------------------------------------
+ 0.00     | 1.00     | 15.66    % | 0.0653     | 0.0757      
+ 0.05     | 0.95     | 15.69    % | 0.0654     | 0.0758      
+ 0.10     | 0.90     | 15.60    % | 0.0645     | 0.0748      
+ 0.15     | 0.85     | 15.66    % | 0.0647     | 0.0750      
+ 0.20     | 0.80     | 15.69    % | 0.0643     | 0.0746      
+ 0.25     | 0.75     | 15.58    % | 0.0633     | 0.0734      
+ 0.30     | 0.70     | 15.60    % | 0.0629     | 0.0731      
+ 0.35     | 0.65     | 15.58    % | 0.0624     | 0.0725      
+ 0.40     | 0.60     | 15.71    % | 0.0633     | 0.0736      
+ 0.45     | 0.55     | 15.63    % | 0.0630     | 0.0733      
+ 0.50     | 0.50     | 15.69    % | 0.0634     | 0.0737      
+ 0.55     | 0.45     | 15.60    % | 0.0627     | 0.0730      
+ 0.60     | 0.40     | 15.60    % | 0.0631     | 0.0735      
+ 0.65     | 0.35     | 15.69    % | 0.0634     | 0.0738       ★ VAL-TUNED
+ 0.70     | 0.30     | 15.71    % | 0.0637     | 0.0742      
+ 0.75     | 0.25     | 15.80    % | 0.0648     | 0.0754      
+ 0.80     | 0.20     | 15.94    % | 0.0661     | 0.0769      
+ 0.85     | 0.15     | 15.97    % | 0.0662     | 0.0769       ★ TEST-BEST
+ 0.90     | 0.10     | 15.94    % | 0.0659     | 0.0765      
+ 0.95     | 0.05     | 15.88    % | 0.0651     | 0.0757      
+ 1.00     | 0.00     | 15.91    % | 0.0656     | 0.0763      
+=================================================================
+
+[FINAL OPTIMAL RESULTS - VAL TUNED ON TEST SET]
+  Validation Optimal w_orig: 0.65
+  Validation Optimal w_flip: 0.35
+  Val Accuracy (TTA):         15.80%
+  Test Accuracy (No TTA):    15.91%
+  Test Accuracy (TTA):       15.69%
+  Test Macro F1 (TTA):       0.0634
+  Test Weighted F1 (TTA):    0.0738
+  TTA Improvement Gain:      -0.22%
+
+[INFO] Complete sweep results saved to /home/ptbao/projects/FER2013_MGR_CNN/outputs/papers/siglip2-confusion/tta_sweep_results.json
+============================================================
+ FER2013 SigLIP 2 Pipeline Completed (Training + TTA Sweeps)
+ End: Thu Sep  3 07:35:57 AM +07 2026
+============================================================
