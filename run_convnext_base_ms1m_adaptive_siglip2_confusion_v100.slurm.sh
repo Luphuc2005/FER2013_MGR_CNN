@@ -4,7 +4,7 @@
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
 #SBATCH --gres=gpu:v100:1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=64G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_ADAPTIVE_SIGLIP2_CONF_%j.out
 #SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_ADAPTIVE_SIGLIP2_CONF_%j.err

@@ -4,7 +4,7 @@
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
 #SBATCH --gres=gpu:v100:1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=64G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_SIGLIP2_SEED42_%j.out
 #SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_SIGLIP2_SEED42_%j.err
