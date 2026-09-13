@@ -3,12 +3,12 @@
 #SBATCH --partition=gpu-queue
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/EVAL_IND_ENS_CPU_%j.out
-#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/EVAL_IND_ENS_CPU_%j.err
+#SBATCH --gres=gpu:v100:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/EVAL_IND_ENS_GPU_%j.out
+#SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/EVAL_IND_ENS_GPU_%j.err
 
-# HOÀN TOÀN KHÔNG GỌI GPU, 100% CPU THUẦN TÚY
 set -euo pipefail
 
 ROOT=/home/ptbao/projects/FER2013_MGR_CNN
@@ -16,17 +16,15 @@ cd "$ROOT"
 
 mkdir -p logs
 
-# Ép chặt chạy CPU thuần túy, tuyệt đối không đụng tới GPU hay VRAM
-export CUDA_VISIBLE_DEVICES="-1"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 
-CPUS="${SLURM_CPUS_PER_TASK:-8}"
+CPUS="${SLURM_CPUS_PER_TASK:-16}"
 export OMP_NUM_THREADS="$CPUS"
 export MKL_NUM_THREADS="$CPUS"
 export OPENBLAS_NUM_THREADS="$CPUS"
 export TF_NUM_INTRAOP_THREADS="$CPUS"
-export TF_NUM_INTEROP_THREADS=2
+export TF_NUM_INTEROP_THREADS=4
 
 FER_PY="/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/bin/python"
 
@@ -63,24 +61,28 @@ echo "Target Dir     : $TARGET_DIR"
 echo "Checkpoint Dir : $CKPT_DIR"
 echo "============================================================"
 
+nvidia-smi || true
+
+export NVIDIA_LIB=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/lib/python3.9/site-packages/nvidia
+export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVIDIA_LIB/cudnn/lib:$NVIDIA_LIB/cufft/lib:$NVIDIA_LIB/curand/lib:$NVIDIA_LIB/cusolver/lib:$NVIDIA_LIB/cusparse/lib:${LD_LIBRARY_PATH:-}"
+
 [ -x "$FER_PY" ] || { echo "[ERROR] Python not found: $FER_PY"; exit 1; }
 [ -d "$CKPT_DIR" ] || { echo "[ERROR] Checkpoints directory not found: $CKPT_DIR"; exit 1; }
 
 echo -e "\n[INFO] Checkpoints to evaluate in $CKPT_DIR:"
 ls -lh "$CKPT_DIR"/ckpt-*.index 2>/dev/null || true
 
-# Chạy đánh giá từng Checkpoint và tính Softmax Ensemble bằng CPU thuần túy
+# Chạy đánh giá từng Checkpoint và tính Softmax Ensemble bằng GPU
 echo -e "\n============================================================"
-echo " Running Individual Checkpoint Evaluations + Ensemble on CPU (TEST SPLIT)"
+echo " Running Individual Checkpoint Evaluations + Ensemble on GPU (TEST SPLIT)"
 echo "============================================================"
 "$FER_PY" -u scripts/evaluate_top5_ensemble_siglip2.py \
     --config "$CONFIG" \
     --checkpoint-dir "$CKPT_DIR" \
     --split test \
-    --cpu \
     --w-orig 0.40 \
     --w-flip 0.60
 
 echo "============================================================"
-echo " Pure CPU Evaluation Finished Successfully at: $(date)"
+echo " GPU Evaluation Finished Successfully at: $(date)"
 echo "============================================================"
