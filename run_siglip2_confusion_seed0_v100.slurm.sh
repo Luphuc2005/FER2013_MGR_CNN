@@ -24,7 +24,7 @@ CONFIG="$ROOT/config_convnext_base_ms1m_adaptive_siglip2_confusion_seed0.yaml"
 
 echo "============================================================"
 echo " FER2013 ConvNeXt-Base MS1M SigLIP 2 Confusion (Seed 0)"
-echo " CPU: 32 threads | Full TTA | Top-5 Ensemble"
+echo " CPU: 16 cores | Full TTA | Top-5 Ensemble"
 echo "============================================================"
 echo "Job ID: ${SLURM_JOB_ID:-standalone}"
 echo "Node: $(hostname)"
