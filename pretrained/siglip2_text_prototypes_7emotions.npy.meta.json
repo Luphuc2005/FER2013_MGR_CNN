@@ -1,0 +1,14 @@
+{
+  "model": "google/siglip2-base-patch16-224",
+  "source": "REAL_CLIP",
+  "class_names": null,
+  "embedding_dim": 768,
+  "multi_prototype": false,
+  "shape": [
+    7,
+    768
+  ],
+  "prompt_hash": "331157f6480823d5417c9a301bfb9242523f1f54f3a6046bac0497692db581da",
+  "prompt_count": 105,
+  "l2_normalized": true
+}

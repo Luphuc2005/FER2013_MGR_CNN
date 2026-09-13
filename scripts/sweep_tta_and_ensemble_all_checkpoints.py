@@ -63,6 +63,12 @@ def parse_args():
         help="Also include checkpoints from checkpoints/best_loss (lowest val_loss) in evaluation and ensemble (default: True)",
     )
     parser.add_argument(
+        "--include-best-macro-f1",
+        action="store_true",
+        default=True,
+        help="Also include checkpoints from checkpoints/best_macro_f1 (highest val_macro_f1) in evaluation and ensemble (default: True)",
+    )
+    parser.add_argument(
         "--include-periodic",
         action="store_true",
         default=False,
@@ -402,9 +408,23 @@ def main():
                 else:
                     for idx_c, (p, label) in enumerate(collected_ckpts):
                         if p.name == prefix.name:
-                            collected_ckpts[idx_c] = (p, "best & best_loss (High Acc + Low Loss)")
+                            collected_ckpts[idx_c] = (p, f"{label} + best_loss")
 
-    # 3. Include periodic/ if requested
+    # 3. Also include best_macro_f1 (highest val_macro_f1) if requested and exists
+    if getattr(args, "include_best_macro_f1", True) and args.checkpoint_dir is None:
+        best_macro_dir = output_dir / "checkpoints" / "best_macro_f1"
+        if best_macro_dir.exists():
+            for idx in sorted(best_macro_dir.glob("ckpt-*.index"), key=_extract_epoch_num):
+                prefix = Path(str(idx)[:-6])
+                if prefix.name not in seen_prefixes:
+                    seen_prefixes.add(prefix.name)
+                    collected_ckpts.append((prefix, "best_macro_f1 (Highest Val Macro F1)"))
+                else:
+                    for idx_c, (p, label) in enumerate(collected_ckpts):
+                        if p.name == prefix.name:
+                            collected_ckpts[idx_c] = (p, f"{label} + best_macro_f1")
+
+    # 4. Include periodic/ if requested
     if args.include_periodic and args.checkpoint_dir is None:
         periodic_dir = output_dir / "checkpoints" / "periodic"
         if periodic_dir.exists():
@@ -480,6 +500,12 @@ def main():
         val_tuned_val_probs = softmax(val_tuned_val_logits, axis=-1)
         val_probs_list.append(val_tuned_val_probs)
 
+        # Compute Validation metrics (accuracy, macro_f1, loss)
+        val_preds = np.argmax(val_tuned_val_probs, axis=-1)
+        val_macro_f1 = float(f1_score(y_val_true, val_preds, average="macro"))
+        val_loss = float(tf.keras.losses.sparse_categorical_crossentropy(y_val_true, val_tuned_val_probs).numpy().mean())
+        print(f"  -> Validation Metrics   : Acc: {val_best['accuracy']*100:.2f}% | Loss: {val_loss:.4f} | Macro F1: {val_macro_f1:.4f}")
+
         # 2. Test Evaluation
         print(f"  -> Extracting Test set logits (3,068 samples)...", flush=True)
         test_orig, test_flip, test_labels = extract_dataset_logits(model, test_ds)
@@ -514,6 +540,8 @@ def main():
             "checkpoint": ckpt_name,
             "source": source,
             "val_accuracy": val_best["accuracy"],
+            "val_loss": val_loss,
+            "val_macro_f1": val_macro_f1,
             "val_optimal_w_orig": opt_w_orig,
             "val_optimal_w_flip": opt_w_flip,
             "test_no_tta_accuracy": no_tta_acc,
@@ -525,20 +553,35 @@ def main():
         })
 
     # Summary Table of Individual Checkpoints
-    print(f"\n {'Checkpoint':<10} | {'Source / Metric':<30} | {'Val Acc':<9} | {'w_orig/flip':<11} | {'Test (No-TTA)':<13} | {'Test (TTA)':<11}")
-    print("-" * 95)
-    for r in checkpoint_eval_results:
+    print("\n" + "=" * 125)
+    print(f" ALL {num_ckpts} INDIVIDUAL CHECKPOINTS (TTA SWEEP + VAL/TEST METRICS)")
+    print("=" * 125)
+    print(f" {'#':<3} | {'Checkpoint':<10} | {'Source / Metric':<32} | {'Val Acc':<8} | {'Val Loss':<8} | {'Val F1':<8} | {'w_TTA':<9} | {'Test(NoTTA)':<12} | {'Test(TTA)':<10} | {'Test F1':<8}")
+    print("-" * 125)
+    for idx_r, r in enumerate(checkpoint_eval_results, 1):
         w_str = f"{r['val_optimal_w_orig']:.2f}/{r['val_optimal_w_flip']:.2f}"
-        print(f" {r['checkpoint']:<10} | {r['source']:<30} | {r['val_accuracy']*100:<8.2f}% | {w_str:<11} | {r['test_no_tta_accuracy']*100:<12.2f}% | {r['test_val_tuned_accuracy']*100:<10.2f}%")
-    print("=" * 95)
+        print(
+            f" {idx_r:<3} | {r['checkpoint']:<10} | {r['source']:<32} | "
+            f"{r['val_accuracy']*100:<7.2f}% | {r['val_loss']:<8.4f} | {r['val_macro_f1']:<8.4f} | "
+            f"{w_str:<9} | {r['test_no_tta_accuracy']*100:<11.2f}% | {r['test_val_tuned_accuracy']*100:<9.2f}% | {r['test_val_tuned_macro_f1']:<8.4f}"
+        )
+    print("=" * 125)
 
     # 1. Standard Full-Model Average Ensemble
+    avg_val_probs = np.mean(val_probs_list, axis=0)
+    full_ens_val_preds = np.argmax(avg_val_probs, axis=-1)
+    full_ens_val_acc = float(accuracy_score(y_val_true, full_ens_val_preds))
+    full_ens_val_macro_f1 = float(f1_score(y_val_true, full_ens_val_preds, average="macro"))
+    full_ens_val_loss = float(tf.keras.losses.sparse_categorical_crossentropy(y_val_true, avg_val_probs).numpy().mean())
+
     avg_probs = np.mean(test_probs_list, axis=0)
     full_ens_preds = np.argmax(avg_probs, axis=-1)
     full_ens_acc = float(accuracy_score(y_test_true, full_ens_preds))
     full_ens_macro_f1 = float(f1_score(y_test_true, full_ens_preds, average="macro"))
 
-    print(f"\n >>> Standard All-{num_ckpts} Models Uniform Ensemble: Test Acc = {full_ens_acc*100:.2f}% | Macro F1 = {full_ens_macro_f1:.4f}")
+    print(f"\n >>> Standard All-{num_ckpts} Models Uniform Ensemble:")
+    print(f"     Val Acc  = {full_ens_val_acc*100:.2f}% | Val Loss = {full_ens_val_loss:.4f} | Val Macro F1 = {full_ens_val_macro_f1:.4f}")
+    print(f"     Test Acc = {full_ens_acc*100:.2f}% | Test Macro F1 = {full_ens_macro_f1:.4f}")
 
     # =========================================================================
     # MASSIVE COMBINATORIAL ENSEMBLE SWEEP
@@ -621,6 +664,9 @@ def main():
     summary_data = {
         "individual_checkpoints": checkpoint_eval_results,
         "standard_full_ensemble": {
+            "val_accuracy": full_ens_val_acc,
+            "val_loss": full_ens_val_loss,
+            "val_macro_f1": full_ens_val_macro_f1,
             "test_accuracy": full_ens_acc,
             "test_macro_f1": full_ens_macro_f1,
         },
