@@ -70,6 +70,13 @@ if [ -f "scripts/evaluate_top5_ensemble_siglip2.py" ]; then
     "$FER_PY" -u scripts/evaluate_top5_ensemble_siglip2.py --config "$CONFIG" || true
 fi
 
+# 5. Comprehensive 15-Checkpoint TTA Sweep & Ensemble
+echo "============================================================"
+echo " Running TTA Sweep & Ensemble on all 15 Checkpoints..."
+echo "============================================================"
+"$FER_PY" -u scripts/sweep_tta_and_ensemble_all_checkpoints.py --config "$CONFIG" || true
+
+
 echo "============================================================"
 echo " Completed Seed 123 Pipeline (Training + TTA + Top-5 Ensemble)"
 echo " End: $(date)"

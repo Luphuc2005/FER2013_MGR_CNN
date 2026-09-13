@@ -500,10 +500,10 @@ def main():
         ckpt_loader.restore(str(ckpt_prefix)).expect_partial()
 
         # 1. Validation Sweep
-        print(f"  -> Extracting Validation set logits (1,228 samples)...", flush=True)
         val_orig, val_flip, val_labels = extract_dataset_logits(model, val_ds)
         if y_val_true is None:
             y_val_true = val_labels
+        print(f"  -> Extracted Validation set logits ({len(val_labels):,} samples)...", flush=True)
 
         val_sweep, val_best = sweep_weights(val_orig, val_flip, val_labels, step=args.step)
         opt_w_orig = val_best["w_orig"]
@@ -521,10 +521,10 @@ def main():
         print(f"  -> Validation Metrics   : Acc: {val_best['accuracy']*100:.2f}% | Loss: {val_loss:.4f} | Macro F1: {val_macro_f1:.4f}")
 
         # 2. Test Evaluation
-        print(f"  -> Extracting Test set logits (3,068 samples)...", flush=True)
         test_orig, test_flip, test_labels = extract_dataset_logits(model, test_ds)
         if y_test_true is None:
             y_test_true = test_labels
+        print(f"  -> Extracted Test set logits ({len(test_labels):,} samples)...", flush=True)
 
         # No TTA (w_orig = 1.0)
         no_tta_test_logits = test_orig
