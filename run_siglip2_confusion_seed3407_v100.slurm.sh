@@ -4,7 +4,7 @@
 #SBATCH --account=sokhcn
 #SBATCH --qos=gpu-q
 #SBATCH --gres=gpu:v100:1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=24
 #SBATCH --mem=64G
 #SBATCH --output=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_SIGLIP2_SEED3407_%j.out
 #SBATCH --error=/home/ptbao/projects/FER2013_MGR_CNN/logs/FER_SIGLIP2_SEED3407_%j.err
@@ -24,7 +24,7 @@ CONFIG="$ROOT/config_convnext_base_ms1m_adaptive_siglip2_confusion_seed3407.yaml
 
 echo "============================================================"
 echo " FER2013 ConvNeXt-Base MS1M SigLIP 2 Confusion (Seed 3407)"
-echo " CPU: 32 threads | Full TTA | Top-5 Ensemble"
+echo " CPU: 24 cores | Full TTA | Top-5 Ensemble"
 echo "============================================================"
 echo "Job ID: ${SLURM_JOB_ID:-standalone}"
 echo "Node: $(hostname)"
@@ -50,9 +50,9 @@ export TF_GPU_THREAD_COUNT=1
 export TF_CUDNN_USE_AUTOTUNE=1
 export TF_ENABLE_CUBLAS_TENSOR_OP_MATH=1
 export TF_ENABLE_CUDNN_TENSOR_OP_MATH=1
-export OMP_NUM_THREADS=8
-export MKL_NUM_THREADS=8
-export OPENBLAS_NUM_THREADS=8
+export OMP_NUM_THREADS=6
+export MKL_NUM_THREADS=6
+export OPENBLAS_NUM_THREADS=6
 
 # 1. Train Model
 "$FER_PY" -u train.py --config "$CONFIG"

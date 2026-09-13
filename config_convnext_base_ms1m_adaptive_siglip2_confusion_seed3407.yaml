@@ -15,7 +15,7 @@ runtime:
   intra_op_threads: 16
   inter_op_threads: 4
   tf_data_num_parallel_calls: 0
-  tf_data_private_threadpool_size: 16
+  tf_data_private_threadpool_size: 8
   tf_data_deterministic: false
   prefetch_buffer: 0
   distributed_eval: false
