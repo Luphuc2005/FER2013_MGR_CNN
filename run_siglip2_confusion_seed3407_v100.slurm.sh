@@ -44,6 +44,16 @@ nvidia-smi
 export NVIDIA_LIB=/home/ptbao/projects/FER2013_MGR_CNN/fer2013_env/lib/python3.9/site-packages/nvidia
 export LD_LIBRARY_PATH="$NVIDIA_LIB/cuda_runtime/lib:$NVIDIA_LIB/cublas/lib:$NVIDIA_LIB/cudnn/lib:$NVIDIA_LIB/cufft/lib:$NVIDIA_LIB/curand/lib:$NVIDIA_LIB/cusolver/lib:$NVIDIA_LIB/cusparse/lib:${LD_LIBRARY_PATH:-}"
 
+# High-Performance CPU & GPU Runtime Optimizations for Seed 3407 (Option A)
+export TF_GPU_THREAD_MODE=gpu_private
+export TF_GPU_THREAD_COUNT=1
+export TF_CUDNN_USE_AUTOTUNE=1
+export TF_ENABLE_CUBLAS_TENSOR_OP_MATH=1
+export TF_ENABLE_CUDNN_TENSOR_OP_MATH=1
+export OMP_NUM_THREADS=8
+export MKL_NUM_THREADS=8
+export OPENBLAS_NUM_THREADS=8
+
 # 1. Train Model
 "$FER_PY" -u train.py --config "$CONFIG"
 
